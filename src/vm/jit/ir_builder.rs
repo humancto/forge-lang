@@ -729,6 +729,20 @@ fn build_body<M: Module>(
                     }
                     fall(&mut b)?;
                 }
+                OpCode::TypeCheck => {
+                    // Decided by the verifier from the value's kind.
+                    match vf.ops[ip] {
+                        Some(OpInfo::TypeCheck(true)) => fall(&mut b)?,
+                        Some(OpInfo::TypeCheck(false)) => {
+                            let call = blocks
+                                .get(ip + 2)
+                                .copied()
+                                .ok_or_else(|| "BUG: verifier allowed fall-off".to_string())?;
+                            b.ins().jump(call, &[]);
+                        }
+                        _ => return Err(format!("BUG: unverified TypeCheck at ip {}", ip)),
+                    }
+                }
                 OpCode::ForRangePrep => {
                     let (start, end) = if rb == 1 {
                         (

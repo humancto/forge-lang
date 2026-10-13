@@ -47,6 +47,7 @@
 //! | `GetUpvalue` | a captured closure (called only) | reference | — (guard) |
 //! | `GetField` | `math` Float constant | Float | — (guard) |
 //! | `Call` | self / callee with `arity` args (callee specialized for their kinds), pure builtin, `__types.check` of a value whose kind fits the type (identity) | its result | stack depth, cancelled, builtin-specific |
+//! | `TypeCheck` | Int/Float/Bool | — (the following jump, or the check's call) | — |
 //! | `ForRangePrep`/`ForRangeNext` | `range` with Int args | Int counters | — |
 //! | `Return` | a value, same kind on every path | — | — |
 
@@ -630,6 +631,9 @@ pub enum OpInfo {
     Call(CallInfo),
     /// `GetField` of a guarded Float constant.
     FloatConst(f64),
+    /// `TypeCheck` decided by the value's kind: `true` continues with the
+    /// jump over the check's call, `false` runs the call (ip + 2).
+    TypeCheck(bool),
 }
 
 /// A function proven compilable for `sig`.
@@ -1304,6 +1308,26 @@ fn verify_with_ret(
                 s[a] = RegState::Val(JitType::Int);
                 s[a + 1] = RegState::Val(JitType::Int);
                 s[mode] = RegState::RangeFast;
+            }
+            OpCode::TypeCheck => {
+                // The fast path of an annotation check (vm/type_check.rs):
+                // decided by the value's kind alone. When it does not
+                // accept the kind, the `__types.check` call that follows
+                // decides (identity, widening or rejection, above).
+                let kind = match value(&s, a)? {
+                    JitType::Int => crate::vm::type_check::Scalar::Int,
+                    JitType::Float => crate::vm::type_check::Scalar::Float,
+                    JitType::Bool => crate::vm::type_check::Scalar::Bool,
+                };
+                let fits = crate::vm::type_check::accepts_kind(b as u8, kind);
+                if !fits {
+                    if ip + 2 >= len {
+                        return Err(Reject::at(ip, RejectKind::FallsOffEnd));
+                    }
+                    fallthrough = false;
+                    target = Some(ip + 2);
+                }
+                ops[ip] = Some(OpInfo::TypeCheck(fits));
             }
             OpCode::ForRangeNext => {
                 int(&s, a)?;

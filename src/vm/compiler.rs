@@ -1660,6 +1660,111 @@ fn mutable_local_reg(c: &Compiler, object: &Expr) -> Option<u8> {
     }
 }
 
+/// `__types.check(value, "<type>", "<context>")` / `__types.widen(value,
+/// "<type>")` (annotation checks, `typechecker::enforce`) of a type with a
+/// fast path: `TypeCheck` keeps the value when it certainly fits unchanged,
+/// and only otherwise runs the call, exactly as it would have been compiled
+/// (`vm/type_check.rs`). With `dst` the value goes there; without (a
+/// statement, like the argument checks at a function's entry) a local is
+/// checked in place. Returns `false` when the call is not of that shape and
+/// was not compiled.
+fn try_compile_type_check(
+    c: &mut Compiler,
+    object: &Expr,
+    field: &str,
+    args: &[Expr],
+    dst: Option<u8>,
+) -> Result<bool, CompileError> {
+    use super::type_check;
+    let Expr::Ident(module) = object else {
+        return Ok(false);
+    };
+    if module != crate::typechecker::enforce::MODULE || c.binding_mutability(module).is_some() {
+        return Ok(false);
+    }
+    let arity = match field {
+        "check" => 3,
+        "widen" => 2,
+        _ => return Ok(false),
+    };
+    let (true, Some(Expr::StringLit(ty))) = (args.len() == arity, args.get(1)) else {
+        return Ok(false);
+    };
+    let Ok(parsed) = crate::semantics::types::parse(ty) else {
+        return Ok(false);
+    };
+    let Some((code, name)) = type_check::encode(&parsed) else {
+        return Ok(false);
+    };
+    let name_idx = match name {
+        Some(n) => match u8::try_from(c.const_str(n)) {
+            Ok(idx) => idx,
+            Err(_) => return Ok(false),
+        },
+        None => 0,
+    };
+    let saved = c.next_register;
+    let local = match (&args[0], dst) {
+        (Expr::Ident(v), None) => c.resolve_local(v).map(|(reg, _)| reg),
+        _ => None,
+    };
+    // Where the value is checked, and where the call's result goes.
+    let (checked, result) = match (local, dst) {
+        (Some(reg), _) => (reg, c.alloc_reg()?),
+        (None, Some(d)) => (d, d),
+        (None, None) => {
+            let r = c.alloc_reg()?;
+            (r, r)
+        }
+    };
+    if local.is_none() {
+        compile_expr(c, &args[0], checked)?;
+    }
+    c.emit(encode_abc(OpCode::TypeCheck, checked, code, name_idx), 0);
+    let done = c.emit_jump(OpCode::Jump, 0, 0);
+    // The call `compile_hidden_call` would emit, its value read from
+    // `checked` (a local is read as a local).
+    let call_base = c.next_register;
+    let fn_reg = c.alloc_reg()?;
+    let fn_idx = c.const_str("__forge_call_method");
+    c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
+    let receiver = c.alloc_reg()?;
+    compile_expr(c, object, receiver)?;
+    let method = c.alloc_reg()?;
+    compile_expr(c, &Expr::StringLit(field.to_string()), method)?;
+    let value = c.alloc_reg()?;
+    if local.is_some() {
+        compile_expr(c, &args[0], value)?;
+    } else {
+        c.emit(encode_abc(OpCode::Move, value, checked, 0), 0);
+    }
+    for arg in &args[1..] {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+    }
+    c.emit(
+        encode_abc(OpCode::Call, fn_reg, (args.len() + 2) as u8, result),
+        0,
+    );
+    c.free_to(call_base);
+    c.patch_jump(done);
+    if dst.is_none() {
+        c.free_to(saved);
+    }
+    Ok(true)
+}
+
+/// A statement `__types.check(...)` (see [`try_compile_type_check`]).
+fn try_compile_type_check_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, CompileError> {
+    let Expr::Call { function, args } = expr else {
+        return Ok(false);
+    };
+    let Expr::FieldAccess { object, field } = function.as_ref() else {
+        return Ok(false);
+    };
+    try_compile_type_check(c, object, field, args, None)
+}
+
 /// Compile `receiver.method(args)` (or `method(receiver, args)`) where the
 /// receiver is a mutable variable and the method mutates in place. Returns
 /// `false` when the call is not of that shape and was not compiled.
@@ -3007,7 +3112,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::Match { subject, arms } => compile_match(c, subject, arms, None),
 
         Stmt::Expression(expr) => {
-            if try_compile_push_statement(c, expr)? || try_compile_set_update_statement(c, expr)? {
+            if try_compile_push_statement(c, expr)?
+                || try_compile_set_update_statement(c, expr)?
+                || try_compile_type_check_statement(c, expr)?
+            {
                 return Ok(());
             }
             let saved = c.next_register;
@@ -3809,7 +3917,8 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         }
         Expr::Call { function, args } => {
             if let Expr::FieldAccess { object, field } = function.as_ref() {
-                if try_compile_mutating_call(c, object, field, args, dst)?
+                if try_compile_type_check(c, object, field, args, Some(dst))?
+                    || try_compile_mutating_call(c, object, field, args, dst)?
                     || try_compile_place_method(c, object, field, args, dst)?
                     || try_compile_method_peek(c, object, field, args, dst)?
                     || try_compile_receiver_place_call(c, object, field, args, dst)?

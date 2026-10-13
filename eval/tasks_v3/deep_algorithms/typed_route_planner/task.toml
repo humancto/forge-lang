@@ -2,9 +2,8 @@ id = "typed_route_planner"
 category = "deep_algorithms"
 title = "Typed shortest-path route planner with an interface for the metric"
 editions = ["2027"]
-# Passing a parameter declared `Metric` (an interface) on to another
-# `Metric` parameter is a T0012 error in edition 2027.
-known_failing = "V3 finding 6"
+# Passes a parameter declared `Metric` (an interface) on to another `Metric`
+# parameter (V3 finding 6, fixed).
 prompt = """
 Write a typed program: declare the types of every function's parameters and result, use
 structs for roads and search results, and an interface for the cost metric with two

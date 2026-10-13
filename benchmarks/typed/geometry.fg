@@ -1,0 +1,37 @@
+// Edition 2027 benchmark (`tools/bench.sh --suite typed`): annotated
+// helpers on Float, struct and Option values in a hot loop. `dist` is pure
+// (a JIT target; its Int arguments are widened to Float), `area` and
+// `smaller` check a struct and an Option on every call.
+
+struct Rect {
+    w: Int
+    h: Int
+}
+
+fn dist(x: Float, y: Float) -> Float {
+    return math.sqrt(x * x + y * y)
+}
+
+fn area(r: Rect) -> Int {
+    return r.w * r.h
+}
+
+fn smaller(best: ?Int, v: Int) -> Int {
+    if best == null || v < best {
+        return v
+    }
+    return best
+}
+
+let rects = map(range(0, 100), fn(i) { return Rect { w: i % 7 + 1, h: i % 5 + 1 } })
+let mut total = 0.0
+let mut areas = 0
+let mut best = null
+for i in range(0, 300000) {
+    total = total + dist(i % 100, i % 37)
+    areas += area(rects[i % 100])
+    best = smaller(best, (i * 7919) % 100003)
+}
+println(int(total))
+println(areas)
+println(best)

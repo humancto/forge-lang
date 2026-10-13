@@ -1919,35 +1919,24 @@ impl<'a> Checker<'a> {
         discarded: bool,
     ) -> (Ty, Flow) {
         self.infer(condition, None);
-        let facts = self.narrowing_facts(condition);
-        let originals: Vec<(String, Ty)> = facts
-            .iter()
-            .filter_map(|(name, _)| self.lookup(name).map(|b| (name.clone(), b.ty.clone())))
-            .collect();
-        let narrow = |me: &mut Self, invert: bool| {
-            for (name, fact) in &facts {
-                if let Some((_, original)) = originals.iter().find(|(n, _)| n == name) {
-                    let fact = if invert { fact.invert() } else { fact.clone() };
-                    let resolved = me.cx.resolve(original);
-                    me.set_binding_type(name, fact.apply(&resolved));
-                }
-            }
-        };
-        let restore = |me: &mut Self| {
-            for (name, ty) in &originals {
-                me.set_binding_type(name, ty.clone());
-            }
-        };
+        // What the condition proves when it is true (the `then` branch) and
+        // when it is false (`else`, and the rest of the block after a
+        // `then` that cannot finish).
+        let when_true = self.narrowing_facts(condition, true);
+        let when_false = self.narrowing_facts(condition, false);
 
-        narrow(self, false);
-        let (t1, f1) = self.check_stmt_body(then_body, discarded);
-        restore(self);
+        let mut then_result = (Ty::Null, Flow::Normal);
+        self.with_narrowing(&when_true, |me| {
+            then_result = me.check_stmt_body(then_body, discarded);
+        });
+        let (t1, f1) = then_result;
 
         let (t2, f2) = match else_body {
             Some(else_body) => {
-                narrow(self, true);
-                let r = self.check_stmt_body(else_body, discarded);
-                restore(self);
+                let mut r = (Ty::Null, Flow::Normal);
+                self.with_narrowing(&when_false, |me| {
+                    r = me.check_stmt_body(else_body, discarded);
+                });
                 r
             }
             None => (Ty::Null, Flow::Normal),
@@ -1955,7 +1944,7 @@ impl<'a> Checker<'a> {
 
         // `if x == null { return }` narrows the rest of the block.
         if else_body.is_none() && f1 == Flow::Diverges {
-            narrow(self, true);
+            self.apply_narrowing(&when_false);
         }
 
         let flow = if f1 == Flow::Diverges && f2 == Flow::Diverges {
@@ -1966,8 +1955,44 @@ impl<'a> Checker<'a> {
         (self.cx.join(&t1, &t2), flow)
     }
 
-    fn narrowing_facts(&self, expr: &Expr) -> Vec<(String, Narrowing)> {
+    /// Narrow each binding in `facts` (until the scope ends or the binding
+    /// is restored).
+    fn apply_narrowing(&mut self, facts: &[(String, Narrowing)]) {
+        for (name, fact) in facts {
+            if let Some(ty) = self.lookup(name).map(|b| b.ty.clone()) {
+                let resolved = self.cx.resolve(&ty);
+                self.set_binding_type(name, fact.apply(&resolved));
+            }
+        }
+    }
+
+    /// Run `f` with each binding in `facts` narrowed, then restore the
+    /// bindings' types.
+    fn with_narrowing(&mut self, facts: &[(String, Narrowing)], f: impl FnOnce(&mut Self)) {
+        let mut originals: Vec<(String, Ty)> = Vec::new();
+        for (name, _) in facts {
+            if originals.iter().all(|(n, _)| n != name) {
+                if let Some(b) = self.lookup(name) {
+                    originals.push((name.clone(), b.ty.clone()));
+                }
+            }
+        }
+        self.apply_narrowing(facts);
+        f(self);
+        for (name, ty) in &originals {
+            self.set_binding_type(name, ty.clone());
+        }
+    }
+
+    /// The facts `expr` proves when it evaluates to `when`: `x != null`
+    /// true makes `x` non-null, false makes it null; `a && b` true proves
+    /// both sides' facts and `a || b` false both sides' negations; a true
+    /// `||` or a false `&&` proves nothing about either side alone.
+    fn narrowing_facts(&self, expr: &Expr, when: bool) -> Vec<(String, Narrowing)> {
         let is_null = |e: &Expr| matches!(e, Expr::Ident(n) if n == "null" || n == "None");
+        let atom = |name: &String, fact: Narrowing| {
+            vec![(name.clone(), if when { fact } else { fact.invert() })]
+        };
         match expr {
             Expr::BinOp { left, op, right } if matches!(op, BinOp::Eq | BinOp::NotEq) => {
                 let fact = if *op == BinOp::Eq {
@@ -1976,39 +2001,29 @@ impl<'a> Checker<'a> {
                     Narrowing::NonNull
                 };
                 match (left.as_ref(), right.as_ref()) {
-                    (Expr::Ident(n), r) if is_null(r) => vec![(n.clone(), fact)],
-                    (l, Expr::Ident(n)) if is_null(l) => vec![(n.clone(), fact)],
+                    (Expr::Ident(n), r) if is_null(r) => atom(n, fact),
+                    (l, Expr::Ident(n)) if is_null(l) => atom(n, fact),
                     _ => vec![],
                 }
             }
-            Expr::BinOp {
-                left,
-                op: BinOp::And,
-                right,
-            } => {
-                let mut facts = self.narrowing_facts(left);
-                facts.extend(self.narrowing_facts(right));
+            Expr::BinOp { left, op, right }
+                if (*op == BinOp::And && when) || (*op == BinOp::Or && !when) =>
+            {
+                let mut facts = self.narrowing_facts(left, when);
+                facts.extend(self.narrowing_facts(right, when));
                 facts
             }
             Expr::UnaryOp {
                 op: UnaryOp::Not,
                 operand,
-            } => {
-                let facts = self.narrowing_facts(operand);
-                // !(a && b) says nothing about a or b individually.
-                if facts.len() == 1 {
-                    facts.into_iter().map(|(n, f)| (n, f.invert())).collect()
-                } else {
-                    vec![]
-                }
-            }
+            } => self.narrowing_facts(operand, !when),
             Expr::Call { function, args } if args.len() == 1 => {
                 match (function.as_ref(), &args[0]) {
                     (Expr::Ident(f), Expr::Ident(v)) => match f.as_str() {
-                        "is_some" => vec![(v.clone(), Narrowing::NonNull)],
-                        "is_none" => vec![(v.clone(), Narrowing::IsNull)],
-                        "is_ok" => vec![(v.clone(), Narrowing::IsOk)],
-                        "is_err" => vec![(v.clone(), Narrowing::IsErr)],
+                        "is_some" => atom(v, Narrowing::NonNull),
+                        "is_none" => atom(v, Narrowing::IsNull),
+                        "is_ok" => atom(v, Narrowing::IsOk),
+                        "is_err" => atom(v, Narrowing::IsErr),
                         _ => vec![],
                     },
                     _ => vec![],
@@ -2357,6 +2372,12 @@ impl<'a> Checker<'a> {
         let Some(required) = self.interfaces.get(iface).cloned() else {
             return true;
         };
+        if type_name == iface {
+            return true;
+        }
+        if let Some(provided) = self.interfaces.get(type_name).cloned() {
+            return self.check_interface_subsumes(type_name, &provided, iface, &required, span);
+        }
         let fields: Vec<FieldInfo> = self
             .structs
             .get(type_name)
@@ -2407,6 +2428,64 @@ impl<'a> Checker<'a> {
                         format!(
                             "method '{}' on '{}' returns {} but interface '{}' expects {}",
                             m.name, type_name, actual, iface, expected_ret
+                        ),
+                    );
+                }
+            }
+        }
+        ok
+    }
+
+    /// A value declared with interface `have_name` passed where interface
+    /// `iface` is required: every required method must be in `have` with
+    /// the same parameter count and a fitting declared return type (an
+    /// unannotated return is unknown, so it fits). Interfaces have no
+    /// fields and no `extends`, so this is the whole rule (V3 finding 6).
+    fn check_interface_subsumes(
+        &mut self,
+        have_name: &str,
+        have: &[IfaceMethod],
+        iface: &str,
+        required: &[IfaceMethod],
+        span: Span,
+    ) -> bool {
+        let mut ok = true;
+        for m in required {
+            let Some(h) = have.iter().find(|h| h.name == m.name) else {
+                ok = false;
+                self.simple(
+                    Code::InterfaceNotSatisfied,
+                    span,
+                    format!(
+                        "interface '{}' does not satisfy interface '{}': missing '{}'",
+                        have_name, iface, m.name
+                    ),
+                );
+                continue;
+            };
+            if h.param_count != m.param_count {
+                ok = false;
+                self.simple(
+                    Code::InterfaceNotSatisfied,
+                    span,
+                    format!(
+                        "method '{}' of interface '{}' has {} parameter(s) but interface '{}' requires {}",
+                        m.name, have_name, h.param_count, iface, m.param_count
+                    ),
+                );
+            }
+            if let (Some(expected_ret), Some(actual)) = (&m.ret, &h.ret) {
+                let snap = self.cx.snapshot();
+                let fits = self.cx.assign(expected_ret, actual);
+                self.cx.rollback(snap);
+                if !fits {
+                    ok = false;
+                    self.simple(
+                        Code::InterfaceNotSatisfied,
+                        span,
+                        format!(
+                            "method '{}' of interface '{}' returns {} but interface '{}' expects {}",
+                            m.name, have_name, actual, iface, expected_ret
                         ),
                     );
                 }
@@ -2703,6 +2782,24 @@ impl<'a> Checker<'a> {
     }
 
     fn infer_binop(&mut self, whole: &Expr, left: &Expr, op: &BinOp, right: &Expr) -> Ty {
+        if matches!(op, BinOp::And | BinOp::Or) {
+            // The right operand runs only when the left one was true (`&&`)
+            // or false (`||`), so it sees the left operand's narrowing:
+            // `x != null && x > 0`, `x == null || v < x` (V3 finding 18).
+            self.infer(left, None);
+            // Only null tests: they remove a false positive (T0014) and
+            // cannot introduce a diagnostic the operand would not get
+            // inside the matching `if`.
+            let facts: Vec<_> = self
+                .narrowing_facts(left, *op == BinOp::And)
+                .into_iter()
+                .filter(|(_, f)| matches!(f, Narrowing::NonNull | Narrowing::IsNull))
+                .collect();
+            self.with_narrowing(&facts, |me| {
+                me.infer(right, None);
+            });
+            return Ty::Bool;
+        }
         let lt = self.infer(left, None);
         let rt = self.infer(right, None);
         let lt = self.cx.resolve(&lt);

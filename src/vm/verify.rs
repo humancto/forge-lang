@@ -484,6 +484,26 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                     ));
                 }
             }
+            TypeCheck => {
+                // Reads R(A); continues at ip+1 (a jump) or skips to ip+2
+                // (vm/type_check.rs).
+                self.reg(ip, "value", a)?;
+                if !super::type_check::valid_code(b) {
+                    return Err(self.fail(Some(ip), format!("TypeCheck has an unknown code {}", b)));
+                }
+                if b & super::type_check::BASE_MASK == super::type_check::NAMED {
+                    self.name_constant(ip, c as usize)?;
+                }
+                // The VM takes the jump at ip+1 itself (it is checked as an
+                // instruction of its own).
+                let jump = self.chunk.code.get(ip + 1).map(|&i| decode_op(i));
+                if jump != Some(Jump as u8) || ip + 2 >= self.chunk.code.len() {
+                    return Err(self.fail(
+                        Some(ip),
+                        "TypeCheck must be followed by a Jump and the check".to_string(),
+                    ));
+                }
+            }
             UpdateSetLocal => {
                 self.reg(ip, "local", a)?;
                 self.reg(ip, "value", b)?;
@@ -771,6 +791,54 @@ mod tests {
         );
         verify_chunk(&with(encode_asbx(OpCode::JumpIfTrue, 0, 0))).unwrap();
         verify_chunk(&with(encode_asbx(OpCode::Loop, 0, -2))).unwrap();
+    }
+
+    #[test]
+    fn type_check_needs_its_jump_and_a_valid_code() {
+        use crate::vm::type_check::{ARRAY, INT, NAMED, OPTION};
+        // LoadConst; TypeCheck; <next>; LoadNull; Return.
+        let chunk = |check: u32, next: u32| {
+            let mut c = base();
+            let ret = c.code.pop().unwrap();
+            c.lines.pop();
+            c.cols.pop();
+            c.emit(check, 1);
+            c.emit(next, 1);
+            c.emit(encode_abc(OpCode::LoadNull, 0, 0, 0), 1);
+            c.emit(ret, 1);
+            c
+        };
+        let jump = encode_asbx(OpCode::Jump, 0, 1);
+        verify_chunk(&chunk(encode_abc(OpCode::TypeCheck, 0, INT, 0), jump)).unwrap();
+        verify_chunk(&chunk(
+            encode_abc(OpCode::TypeCheck, 0, OPTION | ARRAY | INT, 0),
+            jump,
+        ))
+        .unwrap();
+        verify_chunk(&chunk(encode_abc(OpCode::TypeCheck, 0, NAMED, 1), jump)).unwrap();
+        rejects(
+            &chunk(
+                encode_abc(OpCode::TypeCheck, 0, INT, 0),
+                encode_abc(OpCode::LoadNull, 0, 0, 0),
+            ),
+            "followed by a Jump",
+        );
+        rejects(
+            &chunk(encode_abc(OpCode::TypeCheck, 0, 0x30, 0), jump),
+            "unknown code",
+        );
+        rejects(
+            &chunk(encode_abc(OpCode::TypeCheck, 0, ARRAY | NAMED, 1), jump),
+            "unknown code",
+        );
+        rejects(
+            &chunk(encode_abc(OpCode::TypeCheck, 0, NAMED, 0), jump),
+            "not a string",
+        );
+        rejects(
+            &chunk(encode_abc(OpCode::TypeCheck, 3, INT, 0), jump),
+            "register 3",
+        );
     }
 
     #[test]

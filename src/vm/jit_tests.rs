@@ -1884,3 +1884,32 @@ say twice(json.parse("\"x\""))
         .unwrap_or_default()
         .contains("type error: argument 'n' of 'twice' must be Int, got String"));
 }
+
+#[test]
+fn jit_compiles_type_check_fast_paths() {
+    // `TypeCheck` (vm/type_check.rs) is decided by the value's kind: an
+    // Option of a scalar accepts the scalar, a check that does not apply
+    // to the kind falls to the call (here: an Int for `?Float` widens).
+    let source = r#"
+fn inc(n: ?Int) -> Int { return n + 1 }
+fn flip(b: Bool) -> Bool { return !b }
+fn scaled(x: ?Float, k: Int) -> Float { return x * k }
+say inc(4)
+say flip(true)
+say scaled(2, 3)
+say typeof(scaled(2, 3))
+say scaled(0.5, 3)
+"#;
+    let (out, err) = instrumented_parity(source);
+    assert!(err.is_none(), "{:?}", err);
+    assert_eq!(out, vec!["5", "false", "6", "Float", "1.5"]);
+    let (_, _, vm) = run_instrumented(source, JitMode::Eager);
+    for f in ["inc", "flip", "scaled"] {
+        assert!(
+            vm.jit.native_runs(f) > 0,
+            "expected `{}` to run natively; compiled: {:?}",
+            f,
+            vm.jit.compiled_function_names()
+        );
+    }
+}

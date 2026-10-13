@@ -164,6 +164,12 @@ pub enum OpCode {
     /// receiver (to be stored back into the call's receiver place) and
     /// execution falls through; otherwise jump by sBx (past that store).
     TakeReceiver,
+    /// A=value register, B=type code, C=name constant (`vm::type_check`):
+    /// the fast path of an annotation check. When R(A) certainly fits the
+    /// type and the check would return it unchanged, execution continues
+    /// with the next instruction (the jump over the check's call);
+    /// otherwise that instruction is skipped and the call decides.
+    TypeCheck,
 }
 
 /// `UpdateSetLocal` operations (its C operand).
@@ -176,7 +182,7 @@ pub const MAP_UPDATE_REMOVE: u8 = 1;
 
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::TakeReceiver as u8 + 1 == 80);
+const _: () = assert!(OpCode::TypeCheck as u8 + 1 == 81);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -263,6 +269,7 @@ impl TryFrom<u8> for OpCode {
             77 => Ok(OpCode::CallPure),
             78 => Ok(OpCode::UpdateMapLocal),
             79 => Ok(OpCode::TakeReceiver),
+            80 => Ok(OpCode::TypeCheck),
             _ => Err(value),
         }
     }
@@ -504,7 +511,8 @@ mod tests {
         assert_eq!(OpCode::try_from(77u8), Ok(OpCode::CallPure));
         assert_eq!(OpCode::try_from(78u8), Ok(OpCode::UpdateMapLocal));
         assert_eq!(OpCode::try_from(79u8), Ok(OpCode::TakeReceiver));
-        assert_eq!(OpCode::try_from(80u8), Err(80));
+        assert_eq!(OpCode::try_from(80u8), Ok(OpCode::TypeCheck));
+        assert_eq!(OpCode::try_from(81u8), Err(81));
         // Every byte below the count decodes to the variant with that
         // discriminant.
         for byte in 0..79u8 {

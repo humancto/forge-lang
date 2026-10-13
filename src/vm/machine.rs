@@ -1723,6 +1723,23 @@ impl VM {
                             self.frames[frame_idx].ip += 1;
                         }
                     }
+                    OpCode::TypeCheck => {
+                        // A local (statement checks read it in place) may live in
+                        // an open upvalue cell.
+                        let value = self.read_local(frame_idx, base, a)?;
+                        let name = chunk.constants.get(c as usize);
+                        let frame = &mut self.frames[frame_idx];
+                        if super::type_check::fits_unchanged(&self.gc, value, b, name) {
+                            // Take the following `Jump` (over the check's
+                            // call) right here: the verifier guarantees it
+                            // is one.
+                            let jump = chunk.code[frame.ip];
+                            frame.ip = (frame.ip as i64 + 1 + decode_sbx(jump) as i64) as usize;
+                        } else {
+                            // Skip that jump: the call decides (and raises).
+                            frame.ip += 1;
+                        }
+                    }
                     OpCode::Len => {
                         let src = self.registers[base + b as usize];
                         let len = self.collection_len(src);

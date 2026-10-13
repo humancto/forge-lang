@@ -264,6 +264,65 @@ fn interface_multi_method() {
     );
 }
 
+// V3 finding 6: a value declared with an interface type satisfies that
+// interface, and any interface whose methods it has.
+const IFACE_PRELUDE: &str = "interface Shape { fn area() -> Int }\ninterface Named { fn name() -> String }\ninterface Both {\n  fn area() -> Int\n  fn name() -> String\n}\ninterface Loose { fn area() }\ninterface Wide { fn area(scale: Int) -> Int }\ninterface Stringy { fn area() -> String }\nfn inner(x: Shape) -> Int { return x.area() }\n";
+
+#[test]
+fn interface_value_satisfies_its_interface() {
+    for body in [
+        "fn outer(x: Shape) -> Int { return inner(x) }",
+        "fn outer(x: Both) -> Int { return inner(x) }",
+        // An unannotated return is unknown: it may be an Int.
+        "fn outer(x: Loose) -> Int { return inner(x) }",
+        "fn outer(xs: [Shape]) -> [Shape] { return xs }",
+        "fn outer(xs: [Both]) -> [Shape] { return xs }",
+        "fn outer(x: Shape) -> ?Shape { return x }",
+    ] {
+        let src = format!("{}{}", IFACE_PRELUDE, body);
+        for edition in [Edition::E2026, Edition::E2027] {
+            let d = check_in(&src, false, edition);
+            assert!(
+                d.is_empty(),
+                "{:?} in {:?}: {:?}",
+                body,
+                edition,
+                d.iter().map(|w| &w.message).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn interface_value_missing_methods_is_t0012() {
+    for (body, needle) in [
+        (
+            "fn outer(x: Named) -> Int { return inner(x) }",
+            "missing 'area'",
+        ),
+        ("fn outer(x: Wide) -> Int { return inner(x) }", "parameter"),
+        (
+            "fn outer(x: Stringy) -> Int { return inner(x) }",
+            "returns String",
+        ),
+        (
+            "fn outer(xs: [Named]) -> [Shape] { return xs }",
+            "missing 'area'",
+        ),
+    ] {
+        let src = format!("{}{}", IFACE_PRELUDE, body);
+        let d = check_in(&src, false, Edition::E2027);
+        assert!(
+            d.iter().any(|w| w.code == Code::InterfaceNotSatisfied
+                && w.is_error()
+                && w.message.contains(needle)),
+            "{:?}: {:?}",
+            body,
+            d.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+}
+
 // ========== M3.3: Option<T> Type Checking ==========
 
 #[test]
@@ -483,6 +542,102 @@ fn narrowing_unknown_not_narrowed() {
     // x is Unknown (no annotation), narrowing Unknown stays Unknown,
     // and Unknown is compatible with anything — no warning
     assert!(w.is_empty());
+}
+
+// V3 finding 18: the right operand of `||` / `&&` sees the left one's
+// null test.
+#[test]
+fn narrowing_or_right_operand_after_eq_null() {
+    let src = "fn lowest(xs: [Int]) {\n  let mut lo = null\n  for v in xs {\n    if lo == null || v < lo {\n      lo = v\n    }\n  }\n  return lo\n}";
+    let w = warnings_for(src);
+    assert!(
+        w.is_empty(),
+        "`lo == null || v < lo` is guarded: {:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn narrowing_and_right_operand_after_not_null() {
+    let w = warnings_for("fn f(x: ?Int) -> Bool {\n  return x != null && x > 3\n}");
+    assert!(
+        w.is_empty(),
+        "`x != null && x > 3` is guarded: {:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn narrowing_false_or_proves_both_negations() {
+    // `if best == null || v < best { return v }`: afterwards best is set.
+    for src in [
+        "fn f(best: ?Int, v: Int) -> Int {\n  if best == null || v < best {\n    return v\n  }\n  return best\n}",
+        "fn f(best: ?Int, v: Int) -> Int {\n  if best == null || v < best {\n    return v\n  } else {\n    return best\n  }\n}",
+        "fn f(best: ?Int) -> Int {\n  if !(best != null) { return 0 }\n  return best\n}",
+    ] {
+        let w = warnings_for(src);
+        assert!(
+            w.is_empty(),
+            "{:?}: {:?}",
+            src,
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn narrowing_false_and_proves_nothing() {
+    // The else of `x != null && y != null` knows neither is null nor set:
+    // `x` stays `?Int` (it used to become Null: `x + 1` there was a false
+    // certain error, and this assignment passed).
+    let src = "fn f(x: ?Int, y: ?Int) -> Int {\n  if x != null && y != null {\n    return x + y\n  } else {\n    let z: Null = x\n    return 0\n  }\n}";
+    let w = warnings_for(src);
+    assert!(
+        w.len() == 1 && w[0].message.contains("type mismatch"),
+        "{:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+    let src = "fn f(x: ?Int, y: ?Int) -> Int {\n  if x != null && y != null {\n    return 0\n  }\n  return x\n}";
+    let w = warnings_for(src);
+    assert!(
+        w.iter().any(|w| w.message.contains("return type mismatch")),
+        "{:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn narrowing_operands_stay_sound() {
+    // `x == null && x > 3`, `x != null || x > 3`: x is null there, a
+    // certain run-time error.
+    for src in [
+        "fn f(x: ?Int) -> Bool {\n  return x == null && x > 3\n}",
+        "fn f(x: ?Int) -> Bool {\n  return x != null || x > 3\n}",
+    ] {
+        let w = warnings_for(src);
+        assert!(
+            w.iter()
+                .any(|w| w.message.contains("cannot be applied to Null")),
+            "{:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+    // The wrong test, or a test of another variable, guards nothing; and
+    // the narrowing ends with the expression.
+    for src in [
+        "fn f(x: ?Int, y: ?Int) -> Bool {\n  return y != null && x > 3\n}",
+        // `!(a && b)` false says nothing about a or b alone.
+        "fn f(x: ?Int, y: ?Int) -> Bool {\n  return (x == null && y == null) || x > 3\n}",
+        "fn f(x: ?Int) -> Bool {\n  let a = x != null && x > 3\n  return x > 3\n}",
+    ] {
+        let w = warnings_for(src);
+        assert!(
+            w.iter().any(|w| w.code == Code::OptionMisuse),
+            "expected T0014 for {:?}, got {:?}",
+            src,
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
@@ -1603,6 +1758,34 @@ fn prepare_instruments_annotated_code_from_2027() {
     assert_eq!(calls(Edition::E2026), 0);
     // Argument and return of `f`; nothing in unannotated `g`.
     assert_eq!(calls(Edition::E2027), 2);
+}
+
+#[test]
+fn instrumentation_leaves_out_checks_of_values_that_always_fit() {
+    let checks = |src: &str| {
+        let (program, _) = prepare(
+            src,
+            &CheckOptions {
+                edition: Some(Edition::E2027),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("prepares");
+        format!("{:?}", program).matches("__types").count()
+    };
+    // Literals and Bool-valued operators fit their declared result.
+    assert_eq!(
+        checks("fn f(x: Int) -> Bool {\n  if x > 1 { return true }\n  return x == 0 || x < -5\n}"),
+        1
+    );
+    assert_eq!(checks("fn f() -> String { return \"a{1}\" }"), 0);
+    assert_eq!(checks("fn f() -> ?Int { return null }"), 0);
+    assert_eq!(checks("fn f() -> Int { 7 }"), 0);
+    // A literal that would be widened keeps its check.
+    assert_eq!(checks("fn f() -> Float { return 1 }"), 1);
+    assert_eq!(checks("fn f() -> Float { return 1.5 }"), 0);
+    // Anything else is checked.
+    assert_eq!(checks("fn f(x) -> Int { return x + 1 }"), 1);
 }
 
 #[test]

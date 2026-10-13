@@ -19,6 +19,7 @@ mod range_loop; // counting `for v in range(..)` / `repeat n times` loops
 pub mod serialize;
 #[cfg(feature = "host")]
 pub mod serve;
+mod type_check; // fast path of annotation checks (`TypeCheck`)
 pub mod value;
 pub mod verify;
 
@@ -95,3 +96,5 @@ mod squad_tests;
 mod stream_tests;
 #[cfg(test)]
 mod tuple_tests;
+#[cfg(test)]
+mod type_check_tests;
