@@ -615,7 +615,7 @@ mod tests {
                 false,
             ),
             (Value::Object(Default::default()), "Object<String>", true),
-            (Value::Map(vec![]), "Object<Int>", false),
+            (Value::Map(crate::interpreter::MapEntries::new()), "Object<Int>", false),
             (
                 Value::Object([("a".to_string(), Value::Int(1))].into_iter().collect()),
                 "Map<String, Int>",
