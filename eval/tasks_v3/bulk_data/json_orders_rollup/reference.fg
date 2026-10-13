@@ -18,15 +18,9 @@ fn cmp_str(a: String, b: String) -> Int {
 }
 
 // Whether a character of s is outside ASCII (above "~"; the input has no
-// control characters). A loop instead of `regex.test`, which compiles its
-// pattern on every call (eval/V3_FINDINGS.md, finding 1).
+// control characters).
 fn has_non_ascii(s: String) -> Bool {
-    for c in split(s, "") {
-        if c > "~" {
-            return true
-        }
-    }
-    return false
+    return regex.test(s, "[^ -~]")
 }
 
 // The order's hour in UTC, from "YYYY-MM-DDTHH:MM:SS" plus "Z" or "+HH:MM".

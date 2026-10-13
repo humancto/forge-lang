@@ -1,19 +1,8 @@
 // Roll up a 150,000-line access log in one pass: objects keyed by route,
 // client and minute, then one sort per report.
 
-// Not `regex.test(s, "^[0-9]+$")`: regex functions compile their pattern on
-// every call (about 40 us), which alone takes this program past a minute
-// (eval/V3_FINDINGS.md, finding 1).
 fn is_digits(s: String) -> Bool {
-    if s == "" {
-        return false
-    }
-    for c in split(s, "") {
-        if c < "0" || c > "9" {
-            return false
-        }
-    }
-    return true
+    return regex.test(s, "^[0-9]+$")
 }
 
 fn cmp_str(a: String, b: String) -> Int {

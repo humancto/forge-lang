@@ -33,19 +33,9 @@ fn merge(iv) {
     return blocks
 }
 
-// A non-empty run of ASCII digits. Not `regex.test(s, "^[0-9]+$")`: regex
-// functions compile their pattern on every call (eval/V3_FINDINGS.md,
-// finding 1), which is most of the run time at this input size.
+// A non-empty run of ASCII digits.
 fn is_digits(s: String) -> Bool {
-    if s == "" {
-        return false
-    }
-    for c in split(s, "") {
-        if c < "0" || c > "9" {
-            return false
-        }
-    }
-    return true
+    return regex.test(s, "^[0-9]+$")
 }
 
 let mut count = 0

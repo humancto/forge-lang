@@ -69,6 +69,16 @@ loop instead brings it to 11 s / 6 s.
 Suggested fix: cache compiled patterns (a small LRU keyed by the pattern string, shared by
 both engines in `stdlib/regex.rs`), as Python's `re` does.
 
+**Fixed:** every `regex.*` function compiles through `regex_module::compiled`, a bounded LRU
+of 256 patterns (keyed by the pattern text, flags included; patterns over 4 KiB and invalid
+ones are not cached), thread-safe, shared by both engines. A run with a resource budget
+(sandbox, MCP, `--max-memory`) gets its own cache owned by the `Budget`, so its patterns are
+charged to it and freed with it. The repro takes ~55-80 ms on both engines (was ~670 /
+840 ms with the same debug build); `benchmarks/vm/regex_lines.fg` (50k lines, five calls
+each) went from 75 s to 0.97 s on both engines. The four workaround references
+(access_log_rollup, ledger_replay, interval_sweep, json_orders_rollup) use `regex.test`
+again.
+
 ### 2. Interpreter: array arguments of builtins are copied
 
 ```forge

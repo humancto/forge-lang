@@ -300,6 +300,9 @@ pub struct Budget {
     open: [AtomicUsize; 4],
     imports: AtomicUsize,
     tripped: AtomicU8,
+    /// Compiled `regex` patterns of this run (`stdlib::regex_module`): charged
+    /// to the run and freed with it, never shared with another run.
+    regex_cache: crate::stdlib::regex_module::RegexCache,
 }
 
 impl Budget {
@@ -311,11 +314,17 @@ impl Budget {
             open: Default::default(),
             imports: AtomicUsize::new(0),
             tripped: AtomicU8::new(TRIP_NONE),
+            regex_cache: Default::default(),
         })
     }
 
     pub fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    /// This run's compiled-pattern cache.
+    pub fn regex_cache(&self) -> &crate::stdlib::regex_module::RegexCache {
+        &self.regex_cache
     }
 
     /// Fuel spent so far (as settled at safe points).
