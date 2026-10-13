@@ -3056,6 +3056,23 @@ impl VM {
                     &mut self.gc,
                 ))
             }
+            "chr" => match args.first().map(|v| v.classify(&self.gc)) {
+                Some(ValueKind::Int(n)) => {
+                    let s = crate::semantics::text::chr(n).map_err(|m| VMError::new(&m))?;
+                    Ok(self.alloc_string(&s))
+                }
+                _ => Err(VMError::new(&crate::semantics::text::chr_requires_int())),
+            },
+            "ord" => {
+                let s = match args.first().and_then(|v| self.get_string(v)) {
+                    Some(s) => s,
+                    None => {
+                        return Err(VMError::new(&crate::semantics::text::ord_requires_string()))
+                    }
+                };
+                let n = crate::semantics::text::ord(&s).map_err(|m| VMError::new(&m))?;
+                Ok(Value::int(n, &mut self.gc))
+            }
             "capitalize" => {
                 let s = self.get_string_arg(&args, 0)?;
                 let mut chars = s.chars();

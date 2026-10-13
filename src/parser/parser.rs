@@ -1,5 +1,6 @@
 use super::ast::*;
 use super::index::{DefKind, IndexBuilder, OccId, Pos, Role, ScopeKind, Span, SyntaxIndex};
+use crate::lexer::literal_braces;
 /// Forge Parser — Recursive Descent
 /// Converts a token stream into an AST.
 /// Expression parsing uses Pratt parsing for correct precedence.
@@ -733,7 +734,7 @@ impl Parser {
         match self.current_token() {
             Token::StringLit(s) => {
                 self.advance();
-                Ok(s)
+                Ok(literal_braces(&s).into_owned())
             }
             _ => Err(self.error("expected a library path string after 'native'")),
         }
@@ -829,7 +830,7 @@ impl Parser {
             let path = match self.current_token() {
                 Token::StringLit(s) => {
                     self.advance();
-                    s
+                    literal_braces(&s).into_owned()
                 }
                 _ => return Err(self.error("expected string path after 'from'")),
             };
@@ -862,7 +863,7 @@ impl Parser {
             let path = match self.current_token() {
                 Token::StringLit(s) => {
                     self.advance();
-                    s
+                    literal_braces(&s).into_owned()
                 }
                 Token::Ident(s) => {
                     self.advance();
@@ -1242,6 +1243,7 @@ impl Parser {
             else {
                 return Err(self.error("prompt fields must be string literals"));
             };
+            let val = literal_braces(&val).into_owned();
             self.advance();
             match key.as_str() {
                 "system" => system = val,
@@ -1292,7 +1294,7 @@ impl Parser {
                     while !self.check(&Token::RBracket) {
                         match self.current_token().clone() {
                             Token::StringLit(tool) | Token::RawStringLit(tool) => {
-                                tools.push(tool);
+                                tools.push(literal_braces(&tool).into_owned());
                                 self.advance();
                             }
                             _ => return Err(self.error("agent tools must be string literals")),
@@ -1306,7 +1308,7 @@ impl Parser {
                 }
                 "goal" => match self.current_token().clone() {
                     Token::StringLit(text) | Token::RawStringLit(text) => {
-                        goal = text;
+                        goal = literal_braces(&text).into_owned();
                         self.advance();
                     }
                     _ => return Err(self.error("agent goal must be a string literal")),
@@ -1772,7 +1774,7 @@ impl Parser {
                 Ok(Pattern::Literal(Expr::Float(n)))
             }
             Token::StringLit(ref s) => {
-                let s = s.clone();
+                let s = literal_braces(s).into_owned();
                 self.advance();
                 Ok(Pattern::Literal(Expr::StringLit(s)))
             }
@@ -2376,7 +2378,7 @@ impl Parser {
                     let token = self.pos - 1;
                     self.parse_string_interpolation(&s, token)
                 } else {
-                    Ok(Expr::StringLit(s))
+                    Ok(Expr::StringLit(literal_braces(&s).into_owned()))
                 }
             }
 
@@ -2590,7 +2592,9 @@ impl Parser {
                 }
             } else if ch == '{' {
                 if !current.is_empty() {
-                    parts.push(StringPart::Literal(std::mem::take(&mut current)));
+                    parts.push(StringPart::Literal(
+                        literal_braces(&std::mem::take(&mut current)).into_owned(),
+                    ));
                 }
                 let mut expr_str = String::new();
                 let mut expr_start = None;
@@ -2630,7 +2634,7 @@ impl Parser {
         }
 
         if !current.is_empty() {
-            parts.push(StringPart::Literal(current));
+            parts.push(StringPart::Literal(literal_braces(&current).into_owned()));
         }
 
         if parts.len() == 1 {
@@ -2732,7 +2736,11 @@ impl Parser {
         let mut i = 1;
         while i + 1 < raw.len() {
             columns.push(tok.col + i);
-            i += if raw[i] == '\\' { 2 } else { 1 };
+            i += if raw[i] == '\\' {
+                crate::lexer::escape_source_len(raw, i)
+            } else {
+                1
+            };
         }
         columns.push(tok.col + i);
         columns
@@ -2782,9 +2790,8 @@ impl Parser {
         while !self.check(&Token::RBrace) {
             let key = match self.current_token() {
                 Token::StringLit(s) => {
-                    let s = s;
                     self.advance();
-                    s
+                    literal_braces(&s).into_owned()
                 }
                 _ => {
                     let key = self.expect_ident()?;

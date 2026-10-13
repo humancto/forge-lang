@@ -91,6 +91,8 @@ const BUILTINS: &[&str] = &[
     "slugify",
     "snake_case",
     "camel_case",
+    "chr",
+    "ord",
     "Ok",
     "Err",
     "is_ok",

@@ -546,6 +546,20 @@ or built with `json.parse("\"\\ufeff\"")`, as csv_normalize does.
 Suggested fix: support `\u{XXXX}` (and `\uXXXX`), add `chr(n)`/`ord(s)`, and list the
 escapes in `llms.txt`.
 
+**Fixed:** `"..."` literals accept `\u{XXXX}` (1 to 6 hex digits) and `\uXXXX` (exactly 4;
+a UTF-16 surrogate pair `\uD83D\uDE00` is one character, as in JSON and JavaScript). A lone
+surrogate, a value above `10FFFF` or a malformed escape is a syntax error that says how to
+write it, and an unknown escape lists the valid ones. `chr(n)` and `ord(s)` are builtins on
+both engines (registry, type checker signatures `chr(Int) -> String`, `ord(String) -> Int`;
+`semantics::text` holds the rules, so invalid arguments are the same E0015 on both, with the
+argument type appended centrally). On the way: `\{` and `\}` produced a brace that still
+started an interpolation (`"\{x\}"` printed the value of `x`); escaped braces (also
+`\u{7B}`/`\u{7D}`) are now literal (the lexer marks them with the noncharacters U+FDD0/U+FDD1,
+which a literal therefore cannot contain). `llms.txt` and the spec list every escape.
+csv_normalize's reference now writes the byte-order mark as `"\u{feff}"`. Tests:
+`lexer::tests::test_unicode_escapes`, `test_invalid_escapes`, `semantics::text::tests`,
+`tests/unicode_escapes_test.fg` and `tests/edition2027/unicode_escapes_test.fg` (both engines).
+
 ### 20. `select` cannot report a closed channel
 
 ```forge

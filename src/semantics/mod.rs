@@ -21,6 +21,7 @@ pub mod errors;
 pub mod hoist;
 pub mod net;
 pub mod ordered_set;
+pub mod text;
 pub mod types;
 
 use edition::Edition;

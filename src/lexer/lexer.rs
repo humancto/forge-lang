@@ -409,43 +409,18 @@ impl Lexer {
                     return Ok(Token::StringLit(result));
                 }
                 '\\' => {
-                    self.advance();
-                    if self.pos >= self.source.len() {
-                        return Err(self.error("unexpected end of string"));
+                    let (decoded, len) =
+                        decode_escape(&self.source, self.pos).map_err(|m| self.error(&m))?;
+                    result.push(decoded);
+                    for _ in 0..len {
+                        self.advance();
                     }
-                    match self.current() {
-                        'n' => {
-                            result.push('\n');
-                            self.advance();
-                        }
-                        't' => {
-                            result.push('\t');
-                            self.advance();
-                        }
-                        'r' => {
-                            result.push('\r');
-                            self.advance();
-                        }
-                        '\\' => {
-                            result.push('\\');
-                            self.advance();
-                        }
-                        '"' => {
-                            result.push('"');
-                            self.advance();
-                        }
-                        '{' => {
-                            result.push('{');
-                            self.advance();
-                        }
-                        '}' => {
-                            result.push('}');
-                            self.advance();
-                        }
-                        _ => {
-                            return Err(self.error(&format!("unknown escape: \\{}", self.current())))
-                        }
-                    }
+                }
+                LITERAL_LBRACE | LITERAL_RBRACE => {
+                    return Err(self.error(&format!(
+                        "U+{:04X} cannot appear in a string literal (Forge reserves it)",
+                        u32::from(ch)
+                    )))
                 }
                 '\n' => return Err(self.error("unterminated string (newline in string literal)")),
                 _ => {
@@ -680,6 +655,149 @@ impl Lexer {
             col: self.col,
         }
     }
+}
+
+/// A `{` written as an escape (`\{`, `\u{7B}`) in a `"..."` literal: the
+/// lexer puts this noncharacter in the token's value so the parser does not
+/// take it for the start of an interpolation, and the parser turns it back
+/// into `{` ([`literal_braces`]). Noncharacters are reserved for exactly
+/// this kind of internal use; a string literal cannot contain them.
+pub const LITERAL_LBRACE: char = '\u{FDD0}';
+/// A `}` written as an escape; see [`LITERAL_LBRACE`].
+pub const LITERAL_RBRACE: char = '\u{FDD1}';
+
+/// A string literal's value with escaped braces turned back into `{`/`}`.
+pub fn literal_braces(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains([LITERAL_LBRACE, LITERAL_RBRACE]) {
+        std::borrow::Cow::Owned(
+            s.chars()
+                .map(|c| match c {
+                    LITERAL_LBRACE => '{',
+                    LITERAL_RBRACE => '}',
+                    c => c,
+                })
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// The escapes a `"..."` literal accepts, for error messages.
+const ESCAPES: &str = "\\n \\t \\r \\\\ \\\" \\{ \\} \\u{XXXX} \\uXXXX";
+
+/// The escape sequence starting at `src[i]` (a backslash) in a `"..."`
+/// literal: the character it stands for and how many source characters it
+/// spans. `\u{1F600}` takes 1 to 6 hex digits; `\uXXXX` exactly 4, and a
+/// UTF-16 surrogate pair written as two of them (`\uD83D\uDE00`) is one
+/// character. Escaped braces come back as [`LITERAL_LBRACE`]/[`LITERAL_RBRACE`].
+pub(crate) fn decode_escape(src: &[char], i: usize) -> Result<(char, usize), String> {
+    let Some(&c) = src.get(i + 1) else {
+        return Err("unexpected end of string".to_string());
+    };
+    let simple = match c {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        '\\' => '\\',
+        '"' => '"',
+        '{' => LITERAL_LBRACE,
+        '}' => LITERAL_RBRACE,
+        'u' => return decode_unicode_escape(src, i),
+        other => {
+            return Err(format!(
+                "unknown escape: \\{} (the escapes are {})",
+                other, ESCAPES
+            ))
+        }
+    };
+    Ok((simple, 2))
+}
+
+fn hex_value(digits: &[char]) -> Option<u32> {
+    if digits.is_empty() || !digits.iter().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(&digits.iter().collect::<String>(), 16).ok()
+}
+
+/// `\u{...}` or `\uXXXX` at `src[i]`.
+fn decode_unicode_escape(src: &[char], i: usize) -> Result<(char, usize), String> {
+    let invalid_char = |n: u32| {
+        format!(
+            "invalid Unicode escape: U+{:X} is not a character (code points go up to 10FFFF, \
+             and D800 to DFFF are surrogates)",
+            n
+        )
+    };
+    let to_char = |n: u32| -> Result<char, String> {
+        match char::from_u32(n) {
+            Some('{') => Ok(LITERAL_LBRACE),
+            Some('}') => Ok(LITERAL_RBRACE),
+            Some(c @ (LITERAL_LBRACE | LITERAL_RBRACE)) => Err(format!(
+                "U+{:04X} cannot appear in a string literal (Forge reserves it)",
+                u32::from(c)
+            )),
+            Some(c) => Ok(c),
+            None => Err(invalid_char(n)),
+        }
+    };
+    if src.get(i + 2) == Some(&'{') {
+        let digits_start = i + 3;
+        let close = src[digits_start.min(src.len())..]
+            .iter()
+            .take(8)
+            .position(|&c| c == '}')
+            .map(|k| digits_start + k);
+        let value = close.and_then(|end| {
+            let digits = &src[digits_start..end];
+            if digits.len() > 6 {
+                None
+            } else {
+                hex_value(digits)
+            }
+        });
+        return match (close, value) {
+            (Some(end), Some(n)) => Ok((to_char(n)?, end + 1 - i)),
+            _ => Err(
+                "invalid Unicode escape: write \\u{XXXX} with 1 to 6 hex digits \
+                      (for example \\u{e9} or \\u{1F600})"
+                    .to_string(),
+            ),
+        };
+    }
+    let four = |at: usize| src.get(at..at + 4).and_then(hex_value);
+    let Some(n) = four(i + 2) else {
+        return Err(
+            "invalid Unicode escape: write \\u{XXXX} (1 to 6 hex digits) or \\uXXXX \
+             (exactly 4 hex digits)"
+                .to_string(),
+        );
+    };
+    if (0xD800..0xDC00).contains(&n) {
+        // A high surrogate: only valid as the first half of a pair.
+        if src.get(i + 6) == Some(&'\\') && src.get(i + 7) == Some(&'u') {
+            if let Some(low) = four(i + 8).filter(|l| (0xDC00..0xE000).contains(l)) {
+                let n = 0x10000 + ((n - 0xD800) << 10) + (low - 0xDC00);
+                return Ok((to_char(n)?, 12));
+            }
+        }
+        return Err(format!(
+            "invalid Unicode escape: \\u{:04X} is half of a surrogate pair; write the \
+             character's code point instead (for example \\u{{1F600}})",
+            n
+        ));
+    }
+    if (0xDC00..0xE000).contains(&n) {
+        return Err(invalid_char(n));
+    }
+    Ok((to_char(n)?, 6))
+}
+
+/// How many source characters the escape at `src[i]` (a backslash) spans;
+/// 2 for an invalid one (the lexer has already rejected it).
+pub(crate) fn escape_source_len(src: &[char], i: usize) -> usize {
+    decode_escape(src, i).map_or(2, |(_, len)| len)
 }
 
 #[derive(Debug, Clone)]
@@ -968,7 +1086,72 @@ mod tests {
         assert_eq!(lex(r#""\n""#), vec![Token::StringLit("\n".into())]);
         assert_eq!(lex(r#""\t""#), vec![Token::StringLit("\t".into())]);
         assert_eq!(lex(r#""\\""#), vec![Token::StringLit("\\".into())]);
-        assert_eq!(lex(r#""\{""#), vec![Token::StringLit("{".into())]);
-        assert_eq!(lex(r#""\}""#), vec![Token::StringLit("}".into())]);
+        // Escaped braces are marked so the parser keeps them literal.
+        assert_eq!(
+            lex(r#""\{""#),
+            vec![Token::StringLit(LITERAL_LBRACE.to_string())]
+        );
+        assert_eq!(
+            lex(r#""\}""#),
+            vec![Token::StringLit(LITERAL_RBRACE.to_string())]
+        );
+        assert_eq!(literal_braces("\u{FDD0}x\u{FDD1}"), "{x}");
+        assert_eq!(lex(r#""\r\"""#), vec![Token::StringLit("\r\"".into())]);
+    }
+
+    fn lex_err(input: &str) -> String {
+        Lexer::new(input).tokenize().expect_err("lex error").message
+    }
+
+    #[test]
+    fn test_unicode_escapes() {
+        assert_eq!(lex(r#""\u{e9}""#), vec![Token::StringLit("é".into())]);
+        assert_eq!(lex(r#""\u{1F600}!""#), vec![Token::StringLit("😀!".into())]);
+        assert_eq!(lex(r#""\u{0}""#), vec![Token::StringLit("\0".into())]);
+        assert_eq!(
+            lex(r#""\u{10FFFF}""#),
+            vec![Token::StringLit("\u{10FFFF}".into())]
+        );
+        assert_eq!(
+            lex(r#""\u00e9t\u00E9""#),
+            vec![Token::StringLit("été".into())]
+        );
+        assert_eq!(
+            lex(r#""\uFEFF""#),
+            vec![Token::StringLit("\u{feff}".into())]
+        );
+        // A UTF-16 surrogate pair is one character.
+        assert_eq!(
+            lex(r#""\uD83D\uDE00""#),
+            vec![Token::StringLit("😀".into())]
+        );
+        // Escaped braces stay literal, however they are written.
+        assert_eq!(
+            lex(r#""\u{7B}\u007D""#),
+            vec![Token::StringLit(format!(
+                "{LITERAL_LBRACE}{LITERAL_RBRACE}"
+            ))]
+        );
+        assert_eq!(escape_source_len(&['\\', 'u', '{', '4', '1', '}'], 0), 6);
+        assert_eq!(
+            escape_source_len(&"\\uD83D\\uDE00".chars().collect::<Vec<_>>(), 0),
+            12
+        );
+    }
+
+    #[test]
+    fn test_invalid_escapes() {
+        assert!(lex_err(r#""\q""#).starts_with("unknown escape: \\q"));
+        assert!(lex_err(r#""\u{110000}""#).contains("U+110000 is not a character"));
+        assert!(lex_err(r#""\u{D800}""#).contains("U+D800 is not a character"));
+        assert!(lex_err(r#""\u{}""#).contains("1 to 6 hex digits"));
+        assert!(lex_err(r#""\u{1234567}""#).contains("1 to 6 hex digits"));
+        assert!(lex_err(r#""\u{12""#).contains("1 to 6 hex digits"));
+        assert!(lex_err(r#""\u{zz}""#).contains("1 to 6 hex digits"));
+        assert!(lex_err(r#""\u12""#).contains("exactly 4 hex digits"));
+        assert!(lex_err(r#""\uD83D""#).contains("half of a surrogate pair"));
+        assert!(lex_err(r#""\uDE00""#).contains("U+DE00 is not a character"));
+        assert!(lex_err(r#""\u{FDD0}""#).contains("reserves"));
+        assert!(lex_err("\"\u{FDD1}\"").contains("reserves"));
     }
 }

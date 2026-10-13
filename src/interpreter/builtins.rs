@@ -1055,6 +1055,22 @@ impl Interpreter {
                 }
                 _ => Err(RuntimeError::new("pad_end() requires (string, length)")),
             },
+            "chr" => match args.first() {
+                Some(Value::Int(n)) => crate::semantics::text::chr(*n)
+                    .map(Value::String)
+                    .map_err(|m| RuntimeError::new(&m)),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::text::chr_requires_int(),
+                )),
+            },
+            "ord" => match args.first() {
+                Some(Value::String(s)) => crate::semantics::text::ord(s)
+                    .map(Value::Int)
+                    .map_err(|m| RuntimeError::new(&m)),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::text::ord_requires_string(),
+                )),
+            },
             "capitalize" => match args.first() {
                 Some(Value::String(s)) => {
                     let mut chars = s.chars();

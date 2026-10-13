@@ -175,6 +175,8 @@ pub static GLOBALS: &[Builtin] = &[
     b("slugify", 1, 1),
     b("snake_case", 1, 1),
     b("camel_case", 1, 1),
+    b("chr", 1, 1),
+    b("ord", 1, 1),
     // Results and options
     b("Ok", 0, 1),
     b("ok", 0, 1),

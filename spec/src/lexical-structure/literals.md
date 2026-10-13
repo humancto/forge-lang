@@ -57,7 +57,9 @@ let temp = -0.5
 >
 > _StringContent_ → _Character_ | _EscapeSequence_ | _Interpolation_
 >
-> _EscapeSequence_ → `\n` | `\t` | `\\` | `\"`
+> _EscapeSequence_ → `\n` | `\t` | `\r` | `\\` | `\"` | `\{` | `\}` | _UnicodeEscape_
+>
+> _UnicodeEscape_ → `\u{` _HexDigit_{1,6} `}` | `\u` _HexDigit_{4}
 >
 > _Interpolation_ → `{` _Expression_ `}`
 
@@ -73,12 +75,19 @@ A string literal is a sequence of characters enclosed in double quotes. String l
 
 The following escape sequences are recognized within string literals:
 
-| Sequence | Character               |
-| -------- | ----------------------- |
-| `\n`     | Newline (U+000A)        |
-| `\t`     | Horizontal tab (U+0009) |
-| `\\`     | Backslash (U+005C)      |
-| `\"`     | Double quote (U+0022)   |
+| Sequence      | Character                                   |
+| ------------- | ------------------------------------------- |
+| `\n`          | Newline (U+000A)                            |
+| `\t`          | Horizontal tab (U+0009)                     |
+| `\r`          | Carriage return (U+000D)                    |
+| `\\`          | Backslash (U+005C)                          |
+| `\"`          | Double quote (U+0022)                       |
+| `\{`          | Left brace (U+007B), never an interpolation |
+| `\}`          | Right brace (U+007D)                        |
+| `\u{XXXX}`    | The code point XXXX (1 to 6 hex digits)     |
+| `\uXXXX`      | The code point XXXX (exactly 4 hex digits)  |
+
+`\u{e9}` and `\u00e9` are both `é`; `\u{1F600}` is `😀`. A UTF-16 surrogate pair written as two 4-digit escapes (`\uD83D\uDE00`) is one character; a lone surrogate, a value above `10FFFF` or a malformed escape is a syntax error, and so is any other character after a backslash (`\0`, `\x41`). A brace written as `\u{7B}`/`\u{7D}` is literal like `\{`/`\}`. The noncharacters U+FDD0 and U+FDD1 cannot appear in a `"..."` literal (Forge uses them internally); `chr(64976)` builds one at run time. The builtins `chr(n)` and `ord(s)` convert between characters and code points.
 
 ### String Interpolation
 
@@ -100,7 +109,7 @@ say "Length: {len("hello")}"
 say "Upper: {name}"
 ```
 
-To include a literal `{` in a string without triggering interpolation, there is no dedicated escape sequence in the current version. Use string concatenation or a variable if needed.
+To include a literal `{` or `}` in a string without triggering interpolation, escape it: `"\{name\}"` is the seven characters `{name}`. A `{` that cannot start an interpolation (followed by a quote, or not closed on the line) and `{}` are also literal.
 
 ## Raw String Literals
 
