@@ -1,0 +1,47 @@
+// Run every job concurrently and give each until a shared deadline (600 ms
+// after the start); jobs still running then are reported and abandoned.
+
+let deadline_ms = 600
+let mut jobs = []
+for line in fs.lines("/dev/stdin") {
+    let f = split(line.trim(), " ")
+    if len(f) != 3 {
+        continue
+    }
+    jobs.push({ name: f[0], ms: int(f[1]), outcome: f[2] })
+}
+
+let start = time.now().unix_ms
+let handles = map(jobs, fn(j) {
+    return spawn {
+        wait(j.ms / 1000.0)
+        if starts_with(j.outcome, "ok:") {
+            return Ok(substring(j.outcome, 3, len(j.outcome)))
+        }
+        return Err(substring(j.outcome, 5, len(j.outcome)))
+    }
+})
+
+let mut ok = 0
+let mut failed = 0
+let mut late = 0
+for i in range(0, len(jobs)) {
+    let left = max(0, start + deadline_ms - time.now().unix_ms)
+    let r = await_timeout(handles[i], left)
+    if r == null {
+        late += 1
+        println("{jobs[i].name}: timed out")
+    } else {
+        match r {
+            Ok(v) => {
+                ok += 1
+                println("{jobs[i].name}: ok {v}")
+            },
+            Err(msg) => {
+                failed += 1
+                println("{jobs[i].name}: failed {msg}")
+            },
+        }
+    }
+}
+println("summary: {ok} ok, {failed} failed, {late} timed out")

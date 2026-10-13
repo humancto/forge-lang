@@ -1,0 +1,45 @@
+id = "retry_with_timeouts"
+category = "failures"
+title = "Retry calls that fail or hang, with a time limit per attempt"
+prompt = """
+Each non-blank line of standard input describes a remote call to make with retries:
+`<name> <attempts> <max attempts>`, where attempts is a comma-separated list describing
+what each successive attempt does (at least max attempts entries): `x` means the attempt
+fails immediately with an error; a number means the attempt takes that many milliseconds
+and then succeeds (simulate it by sleeping).
+
+Process the calls one after another. Make up to max attempts attempts of a call, stopping
+at the first success. Every attempt has a time limit of 150 milliseconds: an attempt still
+running after 150 ms counts as a `timeout` and must be abandoned at once (do not wait for
+it to finish), then the next attempt starts. Print one line per call:
+
+- `<name>: ok after <k> attempts (<outcomes>)` if attempt k succeeded, or
+- `<name>: gave up after <k> attempts (<outcomes>)` if all k = max attempts failed,
+
+where outcomes lists each attempt's result in order as `ok`, `error` or `timeout`,
+separated by `, `.
+
+Waiting for slow attempts to finish would take more than 30 seconds; the program must
+finish within a few seconds.
+"""
+needs = []
+timeout = 8
+timed = true
+stdin = """
+inventory x,3000,40 3
+pricing 20,5000 2
+search x,x,x,10 3
+billing 4000,4000,4000 3
+profile 60 1
+shipping x,90 2
+ledger 2500,x,30,5 4
+"""
+expected_stdout = """
+inventory: ok after 3 attempts (error, timeout, ok)
+pricing: ok after 1 attempts (ok)
+search: gave up after 3 attempts (error, error, error)
+billing: gave up after 3 attempts (timeout, timeout, timeout)
+profile: ok after 1 attempts (ok)
+shipping: ok after 2 attempts (error, ok)
+ledger: ok after 3 attempts (timeout, error, ok)
+"""

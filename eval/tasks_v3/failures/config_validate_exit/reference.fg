@@ -1,0 +1,123 @@
+// Validate a JSON service config: errors on stderr, exit status by kind.
+
+type Problem = Fatal(String) | Invalid([String])
+
+fn is_int(v) -> Bool {
+    return typeof(v) == "Int"
+}
+
+fn load(text: String) -> Result<Object, Problem> {
+    let mut cfg = null
+    try {
+        cfg = json.parse(text)
+    } catch e {
+        return Err(Fatal("invalid JSON"))
+    }
+    if typeof(cfg) != "Object" {
+        return Err(Fatal("config must be an object"))
+    }
+    return Ok(cfg)
+}
+
+fn check_routes(routes) -> [String] {
+    if typeof(routes) != "Array" || len(routes) == 0 {
+        return ["routes: must be a non-empty array"]
+    }
+    let mut errors = []
+    let mut seen = set([])
+    for e in enumerate(routes) {
+        let i = e.index
+        let r = e.value
+        if typeof(r) != "Object" {
+            errors.push("routes[{i}]: must be an object")
+            continue
+        }
+        let p = get(r, "path", null)
+        if typeof(p) != "String" || !starts_with(p, "/") {
+            errors.push("routes[{i}].path: must start with /")
+        } else if seen.has(p) {
+            errors.push("routes[{i}].path: duplicate {p}")
+        } else {
+            seen.add(p)
+        }
+        let t = get(r, "target", null)
+        if typeof(t) != "String" || t == "" {
+            errors.push("routes[{i}].target: is required")
+        }
+    }
+    return errors
+}
+
+fn validate(cfg) -> Result<Object, Problem> {
+    let mut errors = []
+    if !has_key(cfg, "name") {
+        errors.push("name: is required")
+    } else if typeof(cfg.name) != "String" || cfg.name == "" {
+        errors.push("name: must be a non-empty string")
+    }
+    let port = get(cfg, "port", 8080)
+    if !is_int(port) || port < 1 || port > 65535 {
+        errors.push("port: must be an integer from 1 to 65535")
+    }
+    let workers = get(cfg, "workers", 4)
+    if !is_int(workers) || workers < 1 {
+        errors.push("workers: must be a positive integer")
+    }
+    if has_key(cfg, "tls") {
+        let tls = cfg.tls
+        if typeof(tls) != "Object" {
+            errors.push("tls: must be an object")
+        } else {
+            for f in ["cert", "key"] {
+                if typeof(get(tls, f, null)) != "String" {
+                    errors.push("tls.{f}: is required")
+                }
+            }
+        }
+    }
+    errors = errors + check_routes(get(cfg, "routes", null))
+    if len(errors) > 0 {
+        return Err(Invalid(errors))
+    }
+    return Ok({ name: cfg.name, port: port, workers: workers, tls: has_key(cfg, "tls"), routes: cfg.routes })
+}
+
+fn run(text: String) -> Result<Object, Problem> {
+    let cfg = load(text)?
+    for k in keys(cfg) {
+        if !contains(["name", "port", "workers", "tls", "routes"], k) {
+            eprintln("warning: unknown key {k}")
+        }
+    }
+    return validate(cfg)
+}
+
+match run(fs.read("/dev/stdin")) {
+    Ok(c) => {
+        println("name={c.name}")
+        println("port={c.port}")
+        println("workers={c.workers}")
+        println("tls={if c.tls { "on" } else { "off" }}")
+        println("routes={len(c.routes)}")
+        let sorted_routes = sort(c.routes, fn(a, b) {
+            if a.path < b.path {
+                return -1
+            }
+            return 1
+        })
+        for r in sorted_routes {
+            println("{r.path} -> {r.target}")
+        }
+    },
+    Err(Fatal(msg)) => {
+        eprintln("error: {msg}")
+        exit(2)
+    },
+    Err(Invalid(errors)) => {
+        for e in errors {
+            eprintln("error: {e}")
+        }
+        eprintln("{len(errors)} errors")
+        exit(3)
+    },
+}

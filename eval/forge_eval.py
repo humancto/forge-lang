@@ -372,7 +372,7 @@ class Task:
         # The time limit proves that work overlaps (sleeps in concurrent
         # tasks), so the run must not compete for the CPU with other runs:
         # see `map_timed_last`.
-        self.timed = bool(data.get("timed", self.category == "parallel"))
+        self.timed = bool(data.get("timed", self.category in ("parallel", "pipelines")))
         self.mode = data.get("mode", "run")
         self.output_files = list(data.get("output_files", []))
         self.requests = list(data.get("request", []))
@@ -531,7 +531,7 @@ class Task:
             "sort_lines", "float_tolerance", "notes", "tags", "port",
             "exit_code", "editions", "case", "stdin_file", "expected_stderr", "answer",
             "known_failing", "known_failing_on", "generator", "generated_sha256",
-            "max_memory",
+            "max_memory", "timed",
         }
         if self.max_memory is not None and not re.fullmatch(
                 r"[0-9]+(KB|MB|GB)", str(self.max_memory)):

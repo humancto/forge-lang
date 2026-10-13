@@ -1,0 +1,115 @@
+id = "config_validate_exit"
+category = "failures"
+title = "Validate a JSON config: messages on stderr, exit status by kind of failure"
+prompt = """
+Standard input is a JSON configuration for a web service. Validate it like a command-line
+tool: diagnostics go to standard error, the result to standard output, and the exit status
+tells what happened.
+
+1. If the input is not valid JSON, write `error: invalid JSON` to stderr and exit with
+   status 2. If it is valid JSON but not an object, write `error: config must be an object`
+   and exit with status 2.
+2. For every top-level key other than `name`, `port`, `workers`, `tls`, `routes`, write
+   `warning: unknown key <key>` to stderr (in document order). Warnings do not fail.
+3. Collect validation errors, in this order:
+   - `name`: missing: `name: is required`; not a non-empty string:
+     `name: must be a non-empty string`.
+   - `port` (default 8080): not an integer from 1 to 65535:
+     `port: must be an integer from 1 to 65535`.
+   - `workers` (default 4): not an integer >= 1: `workers: must be a positive integer`.
+   - `tls` (optional): if present but not an object: `tls: must be an object`; otherwise a
+     missing or non-string `cert` / `key`: `tls.cert: is required` / `tls.key: is required`.
+   - `routes`: not a non-empty array: `routes: must be a non-empty array`. Otherwise for
+     each route i (from 0): not an object: `routes[i]: must be an object`; else a `path`
+     that is not a string starting with `/`: `routes[i].path: must start with /`, or a path
+     already used by an earlier route: `routes[i].path: duplicate <path>`; a `target` that
+     is not a non-empty string: `routes[i].target: is required`.
+   If there are errors, write each as `error: <message>` to stderr, then
+   `<number> errors`, and exit with status 3. (Integers are JSON numbers without a
+   fraction; `true` is not an integer.)
+4. Otherwise print to stdout `name=<name>`, `port=<port>`, `workers=<workers>`,
+   `tls=on` or `tls=off`, `routes=<count>`, then one line `<path> -> <target>` per route
+   sorted by path, and exit with status 0.
+"""
+needs = []
+
+[[case]]
+name = "ok"
+stdin = '''
+{"name": "shop", "routes": [{"path": "/b", "target": "svc-b"}, {"path": "/a", "target": "svc-a"}],
+ "tls": {"cert": "c.pem", "key": "k.pem"}, "debug": true, "workers": 8, "colour": "red"}
+'''
+expected_stdout = """
+name=shop
+port=8080
+workers=8
+tls=on
+routes=2
+/a -> svc-a
+/b -> svc-b
+"""
+expected_stderr = """
+warning: unknown key debug
+warning: unknown key colour
+"""
+exit_code = 0
+
+[[case]]
+name = "invalid"
+stdin = '''
+{"name": "", "port": 70000, "workers": true, "tls": {"cert": 5},
+ "routes": [{"path": "a", "target": "x"}, 7, {"path": "/x", "target": ""}, {"path": "/x", "target": "y"}],
+ "extra": null}
+'''
+expected_stdout = ""
+expected_stderr = """
+warning: unknown key extra
+error: name: must be a non-empty string
+error: port: must be an integer from 1 to 65535
+error: workers: must be a positive integer
+error: tls.cert: is required
+error: tls.key: is required
+error: routes[0].path: must start with /
+error: routes[1]: must be an object
+error: routes[2].target: is required
+error: routes[3].path: duplicate /x
+9 errors
+"""
+exit_code = 3
+
+[[case]]
+name = "missing"
+stdin = '''
+{"port": 0, "tls": "yes", "routes": []}
+'''
+expected_stdout = ""
+expected_stderr = """
+error: name: is required
+error: port: must be an integer from 1 to 65535
+error: tls: must be an object
+error: routes: must be a non-empty array
+4 errors
+"""
+exit_code = 3
+
+[[case]]
+name = "not_json"
+stdin = '''
+{"name": "shop",
+'''
+expected_stdout = ""
+expected_stderr = """
+error: invalid JSON
+"""
+exit_code = 2
+
+[[case]]
+name = "array"
+stdin = '''
+[{"name": "shop"}]
+'''
+expected_stdout = ""
+expected_stderr = """
+error: config must be an object
+"""
+exit_code = 2

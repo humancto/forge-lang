@@ -1,0 +1,50 @@
+id = "deadline_jobs"
+category = "failures"
+title = "Concurrent jobs with a shared deadline, failures and abandoned stragglers"
+prompt = """
+Each non-blank line of standard input describes a job: `<name> <milliseconds> <outcome>`.
+A job takes the given number of milliseconds (simulate it by sleeping) and then either
+succeeds with a value (outcome `ok:<value>`) or fails with a message (outcome
+`fail:<message>`). Values and messages contain no spaces.
+
+Start all jobs at once, so they run concurrently. Every job has the same deadline: 600 ms
+after the jobs were started. Then print one line per job, in input order:
+`<name>: ok <value>`, `<name>: failed <message>`, or `<name>: timed out` if the job had not
+finished by the deadline; and finally `summary: <n> ok, <n> failed, <n> timed out`.
+
+The program must print everything and exit within about one second of starting the jobs:
+it must not wait for jobs that missed the deadline (some would take 10 seconds), and
+running the jobs one after another would take far too long.
+"""
+needs = []
+timeout = 4
+timed = true
+stdin = """
+fetch-users 150 ok:42
+fetch-orders 120 ok:17
+resize 90 fail:disk-full
+slow-report 3000 ok:never
+render 60 ok:done
+notify 100 fail:smtp-refused
+stuck 10000 fail:never
+index 140 ok:3
+cleanup 30 ok:freed
+backup 2000 ok:never
+audit 110 fail:bad-checksum
+warm-cache 80 ok:hot
+"""
+expected_stdout = """
+fetch-users: ok 42
+fetch-orders: ok 17
+resize: failed disk-full
+slow-report: timed out
+render: ok done
+notify: failed smtp-refused
+stuck: timed out
+index: ok 3
+cleanup: ok freed
+backup: timed out
+audit: failed bad-checksum
+warm-cache: ok hot
+summary: 6 ok, 3 failed, 3 timed out
+"""
