@@ -37,7 +37,7 @@ sb = Sandbox(
     allow_write=[work],                # fs.write only under these directories
     allow_net=["api.github.com"],      # net only to these hosts (*.x.com, host:port)
     max_time=5.0,                      # wall-clock limit per run, seconds
-    max_output=64_000,                 # stop after printing this many bytes
+    max_output=64_000,                 # stop after printing this many bytes (stdout + stderr)
     max_fuel=50_000_000,               # deterministic step budget per run
     max_memory=256 * 1024 * 1024,      # bytes one run may hold
     engine="vm",                       # or "interp"; same sandbox either way
@@ -49,6 +49,11 @@ say fs.read("{work}/notes.txt")
 ''')
 print(result.stdout)                   # remember the milk
 ```
+
+`result.stderr` holds what the program wrote to stderr: `eprintln(...)`,
+and `log.info/warn/error/debug(...)` as one `[level] message` line each
+(`Sandbox().run('log.warn("disk low")').stderr == "[warn] disk low\n"`).
+Both are captured instead of reaching the host's own stdout and stderr.
 
 Capability names: `fs.read`, `fs.write`, `net`, `env`, `db`, `run`, `ai`,
 `process` (also listed in `forge_lang.CAPABILITIES`). Scoped filesystem
@@ -75,7 +80,8 @@ Failures raise typed exceptions, all subclasses of `ForgeError`:
 | `ForgeMemoryLimitError` | `memory_limit` | `max_memory` exceeded (`limit` in bytes) |
 | `ForgeResourceLimitError` | `resource_limit` | Another resource cap (open handles, value size, imports) |
 
-Every exception carries `stdout`: what the program printed before it failed.
+Every exception carries `stdout` and `stderr`: what the program printed
+before it failed.
 Syntax, runtime and permission errors also carry `code`, the stable error
 code (`E0012`, ...; `forge explain <code>` documents it), and `hint`, how
 to fix it; both are `None` for the other kinds.
@@ -187,8 +193,7 @@ reference written for models; include it in the system prompt.
   servers (`@server`), `schedule` and `watch` blocks are not started.
 * Call depth is bounded by the engine's recursion limit (default 10,000;
   `FORGE_MAX_DEPTH` in the host's environment).
-* stderr output (`log`, `term`) is not captured, and `input()` reads the
-  host's stdin.
+* `input()` reads the host's stdin only with the `process` capability.
 
 ## Development
 

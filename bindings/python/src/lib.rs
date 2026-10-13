@@ -54,7 +54,7 @@ create_exception!(
     forge_lang,
     ForgeError,
     PyException,
-    "Base class for every error raised by a Forge run. Carries `kind` (stable string), `stdout` (output printed before the failure), and `code`/`hint` (stable error code such as `E0012`, and how to fix it) when the error has them."
+    "Base class for every error raised by a Forge run. Carries `kind` (stable string), `stdout` and `stderr` (output printed before the failure), and `code`/`hint` (stable error code such as `E0012`, and how to fix it) when the error has them."
 );
 create_exception!(
     forge_lang,
@@ -84,7 +84,7 @@ create_exception!(
     forge_lang,
     ForgeOutputLimitError,
     ForgeError,
-    "The program printed more than `max_output` bytes. `limit` is the limit in bytes; `stdout` holds the first `limit` bytes."
+    "The program printed more than `max_output` bytes. `limit` is the limit in bytes (stdout and stderr together); `stdout` and `stderr` hold the first `limit` bytes."
 );
 create_exception!(
     forge_lang,
@@ -184,6 +184,7 @@ fn build_exception(py: Python<'_>, err: &SandboxError, source: &str) -> PyResult
     let exc = ty.call1((err.to_string(),))?;
     exc.setattr("kind", err.kind())?;
     exc.setattr("stdout", err.stdout())?;
+    exc.setattr("stderr", err.stderr())?;
     let none = py.None();
     let (mut line, mut column, mut limit) = (none.clone_ref(py), none.clone_ref(py), none);
     let (mut code, mut hint): (Option<String>, Option<String>) = (None, None);
@@ -247,12 +248,20 @@ pub struct RunResult {
     /// Everything the program printed with `say` / `println` / `print`.
     #[pyo3(get)]
     stdout: String,
+    /// Everything the program wrote to stderr: `eprint` / `eprintln`,
+    /// `log.*` (one `[level] message` line per call), `sus`, `term.*`.
+    #[pyo3(get)]
+    stderr: String,
 }
 
 #[pymethods]
 impl RunResult {
     fn __repr__(&self) -> String {
-        format!("Result(stdout={:?})", self.stdout)
+        if self.stderr.is_empty() {
+            format!("Result(stdout={:?})", self.stdout)
+        } else {
+            format!("Result(stdout={:?}, stderr={:?})", self.stdout, self.stderr)
+        }
     }
 }
 
@@ -525,7 +534,10 @@ impl Sandbox {
             || handle.cancel(),
         )?;
         match result {
-            Ok(out) => Ok(RunResult { stdout: out.stdout }),
+            Ok(out) => Ok(RunResult {
+                stdout: out.stdout,
+                stderr: out.stderr,
+            }),
             Err(e) => Err(to_py_err(py, e, &code)),
         }
     }

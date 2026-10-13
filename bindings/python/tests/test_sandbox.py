@@ -187,6 +187,31 @@ def test_output_limit():
     assert Sandbox(max_output=10).run('say "ok"').stdout == "ok\n"
 
 
+@pytest.mark.parametrize("engine", ["vm", "interp"])
+def test_stderr_and_logs_are_captured(engine):
+    res = Sandbox(engine=engine).run(
+        'say "out"\neprintln("err")\nlog.warn("disk low")\n'
+        'let h = spawn { eprintln("from task") }\nawait h'
+    )
+    assert res.stdout == "out\n"
+    assert res.stderr == "err\n[warn] disk low\nfrom task\n"
+    assert Sandbox(engine=engine).run('say "x"').stderr == ""
+
+
+@pytest.mark.parametrize("engine", ["vm", "interp"])
+def test_errors_carry_stderr_and_stderr_counts_against_max_output(engine):
+    with pytest.raises(ForgeRuntimeError) as exc:
+        Sandbox(engine=engine).run('eprintln("before")\nlet x = 1 / 0')
+    assert exc.value.stderr == "before\n"
+    assert exc.value.stdout == ""
+    with pytest.raises(ForgeOutputLimitError) as exc:
+        Sandbox(engine=engine, max_output=1000, max_time=20).run(
+            'while true { log.info("spam spam") }'
+        )
+    assert len(exc.value.stderr) <= 1000
+    assert exc.value.stderr.startswith("[info] spam")
+
+
 def test_fuel_limit_is_deterministic():
     with pytest.raises(forge_lang.ForgeFuelExhaustedError) as exc:
         Sandbox(max_fuel=10_000).run('say "start"\nwhile true { }')
