@@ -1,0 +1,61 @@
+// Edition 2027 benchmark (`tools/bench.sh --suite typed` runs it with
+// `--edition 2027`): small annotated functions called ~200k times, the
+// shape of eval/tasks_v3/deep_algorithms/sudoku_solver. Every call checks
+// its arguments and result at run time (V3 finding 21); run it with
+// `-- --edition 2026` for the same program without the checks.
+
+let mut grid = []
+let mut found = 0
+
+fn fits(i: Int, d: Int) -> Bool {
+    let r = i / 9
+    let c = i % 9
+    for k in range(0, 9) {
+        if grid[r * 9 + k] == d || grid[k * 9 + c] == d {
+            return false
+        }
+    }
+    let br = r / 3 * 3
+    let bc = c / 3 * 3
+    for rr in range(br, br + 3) {
+        for cc in range(bc, bc + 3) {
+            if grid[rr * 9 + cc] == d {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+fn search() -> Int {
+    let i = index_of(grid, 0)
+    if i < 0 {
+        found += 1
+        return 1
+    }
+    let mut n = 0
+    for d in range(1, 10) {
+        if fits(i, d) {
+            grid[i] = d
+            n += search()
+            grid[i] = 0
+        }
+    }
+    return n
+}
+
+let puzzles = [
+    "53..7....6..195....98....6.8...6...34..8.3..17...2...6.6....28....419..5....8..79",
+    "..9748...7.........2.1.9.....7...24..64.1.59..98...3.....8.3.2.........6...2759..",
+    "53467891267219534819834256785976.42.42685.79.713924856.6.5.7.8.2.7.1.6.5.4.2.6.7.",
+]
+for p in puzzles {
+    grid = map(split(p, ""), fn(ch) {
+        if ch == "." {
+            return 0
+        }
+        return int(ch)
+    })
+    println(search())
+}
+println(found)
