@@ -1,3 +1,8 @@
 # Eval task fixtures and expected outputs compare byte for byte: keep LF
 # line endings on every platform (Windows checkouts would add CR).
 eval/tasks/** text eol=lf
+eval/tasks_v2/** text eol=lf
+eval/tasks_v3/** text eol=lf
+# Kept byte for byte: CRLF input on purpose, and a deliberately broken file.
+eval/tasks_v3/cli_text/csv_normalize/input.csv -text
+eval/tasks_v2/http_client/fetch_error_report/www/broken.json -text

@@ -62,12 +62,12 @@ fn eval_references_pass_on_both_engines() {
 /// Tier v3 (eval/README.md, "Tier v3"): about 2.5 minutes on 4 cores, most
 /// of it the large generated inputs, which run one at a time. Known-failing
 /// tasks (eval/V3_FINDINGS.md) are reported, not failed. Linux only: the
-/// time limits are calibrated there, and macOS runners are slower at the
-/// concurrency tasks (eval/V2_FINDINGS.md, finding 27).
+/// time limits of the large-input and concurrency tasks are calibrated
+/// there, and the macOS and Windows runners are much slower.
 #[test]
 fn eval_v3_references_pass() {
-    if cfg!(target_os = "macos") {
-        eprintln!("skipping tier v3 on macOS");
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping tier v3 off Linux");
         return;
     }
     harness(&["validate", "--quick", "--tier", "v3"]);

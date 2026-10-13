@@ -586,8 +586,14 @@ def generated_input(task, name):
             if not want or file_sha256(path) == want:
                 return path
         os.makedirs(out_dir, exist_ok=True)
-        p = subprocess.run([sys.executable or "python3", task.generator, name], cwd=task.dir,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        # The generator's stdout is written with "\n" line endings on every
+        # platform (text-mode stdout would write "\r\n" on Windows and
+        # change the input, and its sha256).
+        runner = ("import runpy, sys; sys.stdout.reconfigure(newline='\\n'); "
+                  "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+        p = subprocess.run([sys.executable or "python3", "-c", runner, task.generator, name],
+                           cwd=task.dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           timeout=300)
         if p.returncode != 0:
             raise RuntimeError("{} {} failed: {}".format(
                 task.generator, name, p.stderr.decode("utf-8", "replace")[-300:]))
@@ -2446,7 +2452,7 @@ def selftest_v2_features(forge, args, expect):
         os.makedirs(cdir)
         with open(os.path.join(cdir, "task.toml"), "w") as f:
             f.write(cases_toml)
-        with open(os.path.join(cdir, "bad.txt"), "w") as f:
+        with open(os.path.join(cdir, "bad.txt"), "w", newline="") as f:
             f.write("nope\n")
         data = load_toml(os.path.join(cdir, "task.toml"))
         check(load_toml(os.path.join(cdir, "task.toml"), force_mini=True) == data,
