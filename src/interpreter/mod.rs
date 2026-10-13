@@ -1805,6 +1805,23 @@ impl Interpreter {
         interp
     }
 
+    /// The `type` metadata (`__type_Name__`, used by `match` exhaustiveness)
+    /// the module knows: its own types and those it imported, so a type it
+    /// re-exports keeps its metadata in the importer.
+    fn absorb_type_metadata(&mut self, from: &LoadedModule) {
+        for key in from.env.all_names() {
+            let is_meta = key
+                .strip_prefix("__type_")
+                .and_then(|rest| rest.strip_suffix("__"))
+                .is_some_and(|name| !name.is_empty());
+            if is_meta {
+                if let Some(val) = from.env.get(&key) {
+                    self.env.define(key, val);
+                }
+            }
+        }
+    }
+
     /// Merge an imported module's method tables, static methods, struct
     /// defaults and embedded fields into this interpreter. Includes the
     /// tables the module itself imported, so `impl` blocks reach every
@@ -2086,6 +2103,12 @@ impl Interpreter {
                     "variants".to_string(),
                     Value::Array(variant_names.into_iter().map(Value::String).collect()),
                 );
+                // The type's name is a value too (its description), like a
+                // struct or interface name, so it can be imported.
+                if crate::semantics::type_name_is_value(name, variants) {
+                    self.env
+                        .define(name.clone(), Value::Object(type_meta.clone()));
+                }
                 self.env
                     .define(format!("__type_{}__", name), Value::Object(type_meta));
                 Ok(Signal::None)
@@ -2503,30 +2526,27 @@ impl Interpreter {
                                     self.env.define(name.clone(), val);
                                 }
                             }
-                            Stmt::TypeDef { variants, .. } => {
-                                // Import each variant individually
-                                for variant in variants {
-                                    if let Some(val) = module.env.get(&variant.name) {
-                                        self.env.define(variant.name.clone(), val);
+                            Stmt::TypeDef { name, variants } => {
+                                // The type's name (its description) and
+                                // each variant.
+                                let names =
+                                    std::iter::once(name).chain(variants.iter().map(|v| &v.name));
+                                for n in names {
+                                    if let Some(val) = module.env.get(n) {
+                                        self.env.define(n.clone(), val);
                                     }
+                                }
+                            }
+                            Stmt::InterfaceDef { name, .. } => {
+                                if let Some(val) = module.env.get(name) {
+                                    self.env.define(name.clone(), val);
                                 }
                             }
                             _ => {}
                         }
                     }
                 }
-                // Type metadata travels with every import, selective or
-                // not: a value built from an imported struct or variant
-                // dispatches through these tables (the VM registers them
-                // process-wide when the module runs).
-                for spanned in &module.program.statements {
-                    if let Stmt::TypeDef { name, .. } = &spanned.stmt {
-                        let meta_key = format!("__type_{}__", name);
-                        if let Some(val) = module.env.get(&meta_key) {
-                            self.env.define(meta_key, val);
-                        }
-                    }
-                }
+                self.absorb_type_metadata(&module);
                 self.absorb_type_tables(&module);
                 Ok(Signal::None)
             }
@@ -2545,32 +2565,38 @@ impl Interpreter {
                     crate::semantics::NAMESPACE_MODULE_KEY.to_string(),
                     Value::String(path.clone()),
                 );
+                let struct_marker = |n: &str| {
+                    let mut marker = IndexMap::new();
+                    marker.insert("__kind__".to_string(), Value::String("struct".into()));
+                    marker.insert("name".to_string(), Value::String(n.to_string()));
+                    Value::Object(marker)
+                };
                 for member in crate::semantics::namespace_members(&module.program) {
                     match member {
                         crate::semantics::NamespaceMember::Value(n) => {
                             let val = module.env.get(&n).ok_or_else(|| {
                                 RuntimeError::new(&crate::semantics::import_missing_name(path, &n))
                             })?;
+                            // A struct the module imported is a struct
+                            // member too (the VM's value of a struct name).
+                            let val = match &val {
+                                Value::BuiltIn(b) => match b.strip_prefix("struct:") {
+                                    Some(s) => struct_marker(s),
+                                    None => val,
+                                },
+                                _ => val,
+                            };
                             members.insert(n, val);
                         }
                         crate::semantics::NamespaceMember::Struct(n) => {
-                            let mut marker = IndexMap::new();
-                            marker.insert("__kind__".to_string(), Value::String("struct".into()));
-                            marker.insert("name".to_string(), Value::String(n.clone()));
-                            members.insert(n, Value::Object(marker));
+                            let marker = struct_marker(&n);
+                            members.insert(n, marker);
                         }
                     }
                 }
                 // Type metadata travels with the import, as for the other
                 // forms (values built here dispatch through it).
-                for spanned in &module.program.statements {
-                    if let Stmt::TypeDef { name, .. } = &spanned.stmt {
-                        let meta_key = format!("__type_{}__", name);
-                        if let Some(val) = module.env.get(&meta_key) {
-                            self.env.define(meta_key, val);
-                        }
-                    }
-                }
+                self.absorb_type_metadata(&module);
                 self.absorb_type_tables(&module);
                 self.env
                     .define_with_mutability(name.clone(), Value::Object(members), false);

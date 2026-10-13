@@ -758,7 +758,7 @@ pub fn timeout_deadline(now: crate::clock::Instant, secs: u64) -> crate::clock::
 
 pub fn import_missing_name(path: &str, name: &str) -> String {
     format!(
-        "import '{}' does not export '{}'\n  hint: only top-level `fn`, `let`, `type` and `struct` definitions can be imported",
+        "import '{}' does not export '{}'\n  hint: a module exports its top-level `fn`, `let`, `struct`, `type`, variant and `interface` names and the names it imports",
         path, name
     )
 }
@@ -820,8 +820,9 @@ pub const NAMESPACE_MODULE_KEY: &str = "__module__";
 /// One member of a module namespace (`import "path" as m`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceMember {
-    /// A top-level function, variable or variant: `m.name` is the value
-    /// the module's top level left in it (read when the import runs, like
+    /// A top-level function, variable, variant, `type` name, interface or
+    /// a name the module imported (a re-export): `m.name` is the value the
+    /// module's top level left in it (read when the import runs, like
     /// `import { name }`).
     Value(String),
     /// A struct: `m.Name` is the struct marker
@@ -838,13 +839,46 @@ impl NamespaceMember {
     }
 }
 
+/// Whether `type name = ...` binds `name` as a value: its type description
+/// `{__kind__: "type", name, variants}` (the same object as the type's
+/// metadata), as a struct or interface name is a value. Not when a variant
+/// has the type's own name (`type Wrap = Wrap(Int)`): the name is that
+/// variant's constructor.
+pub fn type_name_is_value(name: &str, variants: &[crate::parser::ast::Variant]) -> bool {
+    !variants.iter().any(|v| v.name == name)
+}
+
+/// The names a module's top-level imports bind in it, in order: what it
+/// re-exports (`import { f } from "m.fg"` binds `f`, `as` binds the alias;
+/// `import "m.fg" as m` binds `m`; native imports bind their names). A
+/// bare `import "m.fg"` is not listed: its names depend on the other file.
+pub fn import_bindings(program: &crate::parser::ast::Program) -> Vec<String> {
+    use crate::parser::ast::{NativeBinding, Stmt};
+    let mut out = Vec::new();
+    for s in &program.statements {
+        match &s.stmt {
+            Stmt::Import {
+                names: Some(names), ..
+            } => out.extend(names.iter().map(|n| n.binding().to_string())),
+            Stmt::ImportNamespace { name, .. } => out.push(name.clone()),
+            Stmt::ImportNative { binding, .. } => match binding {
+                NativeBinding::Namespace(name) => out.push(name.clone()),
+                NativeBinding::Names(names) => out.extend(names.iter().cloned()),
+            },
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The members of `import "path" as m`, in definition order: the module's
-/// top-level `fn`s, `let`s, the variants of its `type`s and its structs.
-/// Both engines build the namespace object from this list, so it prints
-/// and compares the same on both. (Type names and interfaces are not
-/// values; their tables travel with the import as for every import.)
+/// top-level `fn`s, `let`s (destructuring included), `type` names and
+/// their variants, interfaces, structs and the names its imports bind
+/// (re-exports, as `import { name }` can import them). Both engines build
+/// the namespace object from this list, so it prints and compares the
+/// same on both.
 pub fn namespace_members(program: &crate::parser::ast::Program) -> Vec<NamespaceMember> {
-    use crate::parser::ast::Stmt;
+    use crate::parser::ast::{DestructurePattern, NativeBinding, Stmt};
     let mut out: Vec<NamespaceMember> = Vec::new();
     let mut push = |m: NamespaceMember| {
         if !out.iter().any(|o| o.name() == m.name()) {
@@ -856,12 +890,46 @@ pub fn namespace_members(program: &crate::parser::ast::Program) -> Vec<Namespace
             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
                 push(NamespaceMember::Value(name.clone()))
             }
-            Stmt::TypeDef { variants, .. } => {
+            Stmt::Destructure { pattern, .. } => {
+                let names: Vec<&String> = match pattern {
+                    DestructurePattern::Object(fields) => {
+                        fields.iter().map(|(_, name)| name).collect()
+                    }
+                    DestructurePattern::Array { items, rest } => {
+                        items.iter().chain(rest.iter()).collect()
+                    }
+                    DestructurePattern::Tuple(names) => names.iter().collect(),
+                };
+                for name in names {
+                    push(NamespaceMember::Value(name.clone()));
+                }
+            }
+            Stmt::TypeDef { name, variants } => {
+                if type_name_is_value(name, variants) {
+                    push(NamespaceMember::Value(name.clone()));
+                }
                 for v in variants {
                     push(NamespaceMember::Value(v.name.clone()));
                 }
             }
+            Stmt::InterfaceDef { name, .. } => push(NamespaceMember::Value(name.clone())),
             Stmt::StructDef { name, .. } => push(NamespaceMember::Struct(name.clone())),
+            Stmt::Import {
+                names: Some(names), ..
+            } => {
+                for n in names {
+                    push(NamespaceMember::Value(n.binding().to_string()));
+                }
+            }
+            Stmt::ImportNamespace { name, .. } => push(NamespaceMember::Value(name.clone())),
+            Stmt::ImportNative { binding, .. } => match binding {
+                NativeBinding::Namespace(name) => push(NamespaceMember::Value(name.clone())),
+                NativeBinding::Names(names) => {
+                    for n in names {
+                        push(NamespaceMember::Value(n.clone()));
+                    }
+                }
+            },
             _ => {}
         }
     }
@@ -934,6 +1002,31 @@ pub fn import_not_found(path: &str) -> String {
 mod tests {
     use super::*;
     use Operand::*;
+
+    fn parse(source: &str) -> crate::parser::ast::Program {
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lexes");
+        crate::parser::Parser::new(tokens)
+            .parse_program()
+            .expect("parses")
+    }
+
+    #[test]
+    fn namespace_members_list_every_export_in_order() {
+        let program = parse(
+            "import { a, b as c } from \"x.fg\"\nimport \"y.fg\" as y\nimport \"z.fg\"\n\
+             fn f() { return 1 }\nlet {lo, hi: top} = {lo: 1, hi: 2}\n\
+             struct P { x: Int }\ninterface I { fn n() -> Int }\n\
+             type T = A(Int) | B\ntype W = W(Int)\n",
+        );
+        let members = namespace_members(&program);
+        let names: Vec<&str> = members.iter().map(NamespaceMember::name).collect();
+        assert_eq!(
+            names,
+            ["a", "c", "y", "f", "lo", "top", "P", "I", "T", "A", "B", "W"]
+        );
+        assert!(members.contains(&NamespaceMember::Struct("P".into())));
+        assert_eq!(import_bindings(&program), ["a", "c", "y"]);
+    }
 
     #[test]
     fn builtin_module_imports_check_members() {

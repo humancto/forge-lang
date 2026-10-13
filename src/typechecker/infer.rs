@@ -463,11 +463,16 @@ impl<'a> Checker<'a> {
         self.foreign = saved_foreign;
         let functions = std::mem::replace(&mut self.functions, saved_functions);
         let members = crate::semantics::namespace_members(program);
+        // A struct the module imports is a struct member too (when its
+        // definition was followed, see `reexported_declarations`).
+        let reexports = crate::semantics::import_bindings(program);
         let structs = members
             .iter()
             .filter_map(|m| match m {
                 crate::semantics::NamespaceMember::Struct(n) => Some(n.clone()),
-                crate::semantics::NamespaceMember::Value(_) => None,
+                crate::semantics::NamespaceMember::Value(n) => {
+                    (reexports.contains(n) && self.structs.contains_key(n)).then(|| n.clone())
+                }
             })
             .collect();
         self.namespaces.insert(

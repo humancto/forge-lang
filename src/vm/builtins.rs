@@ -1053,15 +1053,9 @@ impl VM {
                 for member in crate::semantics::namespace_members(&module.program) {
                     match member {
                         crate::semantics::NamespaceMember::Value(name) => {
-                            let value = self
-                                .globals
-                                .get(&format!("{}{}", module.prefix, name))
-                                .cloned()
-                                .ok_or_else(|| {
-                                    VMError::new(&crate::semantics::import_missing_name(
-                                        &path, &name,
-                                    ))
-                                })?;
+                            let value = self.module_export(&module, &name).ok_or_else(|| {
+                                VMError::new(&crate::semantics::import_missing_name(&path, &name))
+                            })?;
                             members.insert(name, value);
                         }
                         crate::semantics::NamespaceMember::Struct(name) => {
@@ -1136,31 +1130,11 @@ impl VM {
                 }
                 let export_names = requested_names
                     .unwrap_or_else(|| crate::vm::compiler::import_export_names(&module.program));
-                let struct_names: std::collections::HashSet<&str> = module
-                    .program
-                    .statements
-                    .iter()
-                    .filter_map(|spanned| match &spanned.stmt {
-                        crate::parser::ast::Stmt::StructDef { name, .. } => Some(name.as_str()),
-                        _ => None,
-                    })
-                    .collect();
                 let mut exports = IndexMap::new();
                 for name in export_names {
-                    let value = self
-                        .globals
-                        .get(&format!("{}{}", module.prefix, name))
-                        .or_else(|| {
-                            // Struct registrations are global by type name.
-                            struct_names
-                                .contains(name.as_str())
-                                .then(|| self.globals.get(&name))
-                                .flatten()
-                        })
-                        .cloned()
-                        .ok_or_else(|| {
-                            VMError::new(&crate::semantics::import_missing_name(&path, &name))
-                        })?;
+                    let value = self.module_export(&module, &name).ok_or_else(|| {
+                        VMError::new(&crate::semantics::import_missing_name(&path, &name))
+                    })?;
                     exports.insert(name, value);
                 }
                 let exports_ref = self.gc.alloc(ObjKind::Object(exports));
@@ -4020,6 +3994,29 @@ impl VM {
                 }))
             })?,
         })
+    }
+
+    /// The value an import of `name` from `module` binds: one of the
+    /// module's top-level names (kept under its private prefix: its own
+    /// definitions and the names its imports bound, i.e. re-exports), or a
+    /// struct or interface it defines (registered under its own name).
+    fn module_export(
+        &self,
+        module: &crate::vm::machine::LoadedModule,
+        name: &str,
+    ) -> Option<Value> {
+        use crate::parser::ast::Stmt;
+        if let Some(value) = self.globals.get(&format!("{}{}", module.prefix, name)) {
+            return Some(value.clone());
+        }
+        let registered_by_name = module.program.statements.iter().any(|s| {
+            matches!(&s.stmt, Stmt::StructDef { name: n, .. } | Stmt::InterfaceDef { name: n, .. } if n == name)
+        });
+        if registered_by_name {
+            self.globals.get(name).cloned()
+        } else {
+            None
+        }
     }
 
     fn make_struct_marker(&mut self, type_name: &str) -> Value {

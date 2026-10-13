@@ -1,0 +1,36 @@
+// expect: done
+// A module re-exports the names it imports (functions, variables, structs,
+// interfaces, types and variants), selectively and through a namespace.
+import { quad, twice, LIMIT, high, Pt, Named, Tok, Num, End, first_tok } from "tests/parity/modules/reexport_lib.fg"
+import "tests/parity/modules/reexport_lib.fg" as lib
+
+struct Dog {
+    n: String
+}
+impl Named for Dog {
+    fn name(it) -> String {
+        return it.n
+    }
+}
+
+fn show_all(ts: [Tok]) -> String {
+    return join(map(ts, fn(t) { return t.show() }), ", ")
+}
+
+println(twice(5))
+println(quad(5))
+println(LIMIT)
+println(high)
+println(Pt { x: 3 }.sum())
+println(satisfies(Dog { n: "rex" }, Named))
+println(show_all([Num(4), End]))
+println(first_tok(End))
+println(Tok.name)
+println(Tok.variants)
+println(lib.twice(7))
+println(lib.sqrt(16))
+println(lib.Pt { x: 1, y: 2 }.sum())
+println(lib.Num(1).show())
+println(lib.Tok.name)
+println(has_key(lib, "Named"))
+"done"

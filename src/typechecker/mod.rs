@@ -262,9 +262,32 @@ pub fn analyze_parsed(program: Program, index: SyntaxIndex, options: &CheckOptio
     checker.unknown_wildcard = wildcard_imports.iter().any(|i| i.names.is_none());
     for (info, program) in imports.iter().zip(&loaded) {
         if let Some(name) = &info.namespace {
+            // The structs, types and interfaces the module re-exports are
+            // registered by name, like its own (its re-exported functions
+            // stay members only).
+            if let (Some(program), Some(path)) = (program, &info.resolved) {
+                let names: Vec<crate::parser::ast::ImportName> =
+                    crate::semantics::import_bindings(program)
+                        .into_iter()
+                        .map(crate::parser::ast::ImportName::new)
+                        .collect();
+                for (module, names) in reexported_declarations(path, program, &names) {
+                    let types = type_names(&module);
+                    let names: Vec<_> = names
+                        .into_iter()
+                        .filter(|n| types.contains(n.name.as_str()))
+                        .collect();
+                    checker.import_declarations(&module, Some(&names));
+                }
+            }
             checker.import_namespace(name, &info.path, program.as_ref());
         } else if let Some(program) = program {
             checker.import_declarations(program, info.names.as_deref());
+            if let (Some(names), Some(path)) = (&info.names, &info.resolved) {
+                for (module, names) in reexported_declarations(path, program, names) {
+                    checker.import_declarations(&module, Some(&names));
+                }
+            }
         }
     }
     checker.check_program(&program);
@@ -476,6 +499,113 @@ fn import_rename_diagnostics(
         }
     }
     out
+}
+
+/// How many modules deep [`reexported_declarations`] follows re-exports
+/// (a bound on import cycles, which the engines report when they run).
+const MAX_REEXPORT_DEPTH: usize = 16;
+
+/// `import { name } from "path"` where the module at `path` (`program`)
+/// does not define `name` but imports it itself (a re-export): the modules
+/// that define those names, with the names to declare from each (renamed
+/// to the binding the importer sees), following chains of re-exports.
+fn reexported_declarations(
+    path: &Path,
+    program: &Program,
+    names: &[crate::parser::ast::ImportName],
+) -> Vec<(Program, Vec<crate::parser::ast::ImportName>)> {
+    let mut out = Vec::new();
+    collect_reexports(path, program, names, 0, &mut out);
+    out
+}
+
+fn collect_reexports(
+    path: &Path,
+    program: &Program,
+    names: &[crate::parser::ast::ImportName],
+    depth: usize,
+    out: &mut Vec<(Program, Vec<crate::parser::ast::ImportName>)>,
+) {
+    use crate::parser::ast::ImportName;
+    if depth >= MAX_REEXPORT_DEPTH {
+        return;
+    }
+    let defined = defined_names(program);
+    for s in &program.statements {
+        let Stmt::Import {
+            path: from,
+            names: Some(bound),
+        } = &s.stmt
+        else {
+            continue;
+        };
+        if is_builtin_module(from) {
+            continue;
+        }
+        // (the name the other module defines, the name the importer binds)
+        let wanted: Vec<ImportName> = names
+            .iter()
+            .filter(|n| !defined.contains(n.name.as_str()))
+            .filter_map(|n| {
+                let item = bound.iter().find(|b| b.binding() == n.name)?;
+                let binding = n.binding();
+                Some(ImportName {
+                    name: item.name.clone(),
+                    alias: (item.name != binding).then(|| binding.to_string()),
+                })
+            })
+            .collect();
+        if wanted.is_empty() {
+            continue;
+        }
+        let Some(resolved) = crate::package::resolve_import_from(from, path.parent()) else {
+            continue;
+        };
+        let Some(module) = load_module(&resolved) else {
+            continue;
+        };
+        collect_reexports(&resolved, &module, &wanted, depth + 1, out);
+        out.push((module, wanted));
+    }
+}
+
+/// The structs, types (with their variants) and interfaces a module defines.
+fn type_names(program: &Program) -> HashSet<&str> {
+    let mut names = HashSet::new();
+    for s in &program.statements {
+        match &s.stmt {
+            Stmt::StructDef { name, .. } | Stmt::InterfaceDef { name, .. } => {
+                names.insert(name.as_str());
+            }
+            Stmt::TypeDef { name, variants } => {
+                names.insert(name.as_str());
+                names.extend(variants.iter().map(|v| v.name.as_str()));
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The names a module's own top-level definitions bind (not its imports).
+fn defined_names(program: &Program) -> HashSet<&str> {
+    let mut names = HashSet::new();
+    for s in &program.statements {
+        match &s.stmt {
+            Stmt::FnDef { name, .. }
+            | Stmt::Let { name, .. }
+            | Stmt::StructDef { name, .. }
+            | Stmt::InterfaceDef { name, .. } => {
+                names.insert(name.as_str());
+            }
+            Stmt::TypeDef { name, variants } => {
+                names.insert(name.as_str());
+                names.extend(variants.iter().map(|v| v.name.as_str()));
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 /// Parse an imported module (no checking: it is checked on its own).

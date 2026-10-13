@@ -1,0 +1,16 @@
+// A package-style entry module: it gathers its API from reexport_core.fg
+// and re-exports it (every name its imports bind can be imported from it).
+import { twice, LIMIT, Pt, Named, Tok, Num, End } from "reexport_core.fg"
+import { hi as high } from "reexport_core.fg"
+import { sqrt } from "math"
+
+fn quad(x: Int) -> Int {
+    return twice(twice(x))
+}
+
+fn first_tok(t: Tok) -> String {
+    return match t {
+        End => "end first",
+        Num(n) => "num first " + str(n),
+    }
+}

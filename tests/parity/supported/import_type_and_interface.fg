@@ -1,0 +1,26 @@
+// expect: done
+// A `type` name and an interface can be imported by name (both engines);
+// an imported type name works in annotations and is its description.
+import { Shape, Circle, Square } from "tests/parity/modules/typed_shapes.fg"
+import { Named } from "tests/parity/modules/reexport_core.fg"
+
+fn total(shapes: [Shape]) -> Int {
+    return reduce(map(shapes, fn(s: Shape) { return s.area() }), 0, fn(a, b) { return a + b })
+}
+
+struct Cat {
+    n: String
+}
+impl Named for Cat {
+    fn name(it) -> String {
+        return it.n
+    }
+}
+
+type Local = One | Two
+println(total([Circle(1), Square(2)]))
+println(Shape.name)
+println(Shape.variants)
+println(Local.variants)
+println(satisfies(Cat { n: "tom" }, Named))
+"done"

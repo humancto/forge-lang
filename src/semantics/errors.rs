@@ -511,8 +511,9 @@ Example:
     import { helper } from \"utils\"     // cannot import 'utils': file not found
 
 Fix: check the path — it is resolved relative to the importing file, and
-`utils`, `utils.fg` and `forge_modules/utils/main.fg` are tried. Only
-top-level `fn`, `let`, `type` and `struct` definitions can be imported.
+`utils`, `utils.fg` and `forge_modules/utils/main.fg` are tried. A module
+exports its top-level names: `fn`, `let`, `struct`, `type` (and its
+variants), `interface`, and the names it imports itself (re-exports).
 Break import cycles by moving shared code into a third module.",
         matches: |h| {
             starts_with_any(h, &["cannot import", "circular import"])

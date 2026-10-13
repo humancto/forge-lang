@@ -145,6 +145,52 @@ fn a_module_imported_from_another_task_brings_its_own_imports() {
 }
 
 #[test]
+fn a_reexporting_module_run_in_a_task_exports_its_imports() {
+    // `lib.fg` re-exports what it imports from `core.fg` (a function, a
+    // struct, a type and an interface). A task runs both modules first; the
+    // parent then imports the re-exports from the task's run.
+    let dir = project(
+        "reexport",
+        &[
+            (
+                "core.fg",
+                "println(\"loading core\")\n\
+                 fn twice(x) { return x * 2 }\n\
+                 struct Pt { x: Int }\n\
+                 type Tok = Num(Int) | End\n\
+                 interface Named {\n    fn name() -> String\n}\n",
+            ),
+            (
+                "lib.fg",
+                "println(\"loading lib\")\n\
+                 import { twice, Pt, Tok, Num, Named } from \"core.fg\"\n\
+                 fn quad(x) { return twice(twice(x)) }\n",
+            ),
+            (
+                "main.fg",
+                "let t = spawn {\n\
+                     import { quad } from \"lib.fg\"\n\
+                     return quad(1)\n\
+                 }\n\
+                 println(\"task {await t}\")\n\
+                 import { twice, Pt, Tok, Num, Named } from \"lib.fg\"\n\
+                 import \"lib.fg\" as lib\n\
+                 println(twice(3))\n\
+                 println(Pt { x: 4 }.x)\n\
+                 println(Tok.name)\n\
+                 println(Num(2))\n\
+                 println(Named.name)\n\
+                 println(lib.quad(2))\n",
+            ),
+        ],
+    );
+    expect_output(
+        &dir,
+        "loading lib\nloading core\ntask 4\n6\n4\nTok\n{ \"__type__\": \"Tok\", \"__variant__\": \"Num\", \"_0\": 2 }\nNamed\n8\n",
+    );
+}
+
+#[test]
 fn an_import_cycle_across_tasks_is_reported_not_a_deadlock() {
     // Task a runs ca.fg, which imports cb.fg; task b runs cb.fg, which
     // imports ca.fg. Each would wait for the other forever.

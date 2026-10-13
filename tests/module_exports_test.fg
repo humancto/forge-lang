@@ -1,0 +1,73 @@
+// module_exports_test.fg — what a module exports (both engines): its
+// top-level functions, variables (destructured ones too), structs, `type`
+// names and variants, interfaces, and every name its own imports bind
+// (re-exports, as a package entry file gathers its API).
+
+import { quad, twice, LIMIT, high, Pt, Named, Tok, Num, End } from "tests/parity/modules/reexport_lib.fg"
+import { lo, hi } from "tests/parity/modules/reexport_core.fg"
+import { Shape, Circle } from "tests/parity/modules/typed_shapes.fg"
+import "tests/parity/modules/reexport_lib.fg" as lib
+
+struct Bird {
+    n: String
+}
+
+impl Named for Bird {
+    fn name(it) -> String {
+        return it.n
+    }
+}
+
+fn describe(t: Tok) -> String {
+    return t.show()
+}
+
+fn area_of(s: Shape) -> Int {
+    return s.area()
+}
+
+@test
+fn test_reexported_functions_and_variables() {
+    assert_eq(twice(4), 8)
+    assert_eq(quad(1), 4)
+    assert_eq(LIMIT, 10)
+    assert_eq(high, 9)
+}
+
+@test
+fn test_destructured_names_are_exported() {
+    assert_eq([lo, hi], [1, 9])
+}
+
+@test
+fn test_reexported_struct_keeps_defaults_and_methods() {
+    let p = Pt { x: 5 }
+    assert_eq(p.y, 0)
+    assert_eq(p.sum(), 5)
+}
+
+@test
+fn test_imported_interface() {
+    assert(satisfies(Bird { n: "kea" }, Named))
+    assert(!satisfies(Pt { x: 1 }, Named))
+}
+
+@test
+fn test_imported_type_name() {
+    assert_eq(describe(Num(3)), "num 3")
+    assert_eq(describe(End), "end")
+    assert_eq(area_of(Circle(1)), 3)
+    assert_eq(Shape.name, "Shape")
+    assert_eq(Tok.variants, ["Num", "End"])
+}
+
+@test
+fn test_namespace_members_include_reexports() {
+    assert_eq(lib.quad(2), 8)
+    assert_eq(lib.twice(2), 4)
+    assert_eq(lib.high, 9)
+    assert_eq(lib.Pt { x: 2, y: 3 }.sum(), 5)
+    assert_eq(lib.End.show(), "end")
+    assert(has_key(lib, "Named"))
+    assert(has_key(lib, "sqrt"))
+}

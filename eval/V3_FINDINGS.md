@@ -23,9 +23,9 @@ out or exhausts memory), **gap** (missing feature or behaviour a model cannot le
 | 4 | perf | VM: a function that writes an element of a top-level array/object copies the whole container per write; RSS grows to GBs | network_components (**known failing** on the VM), typed_route_planner |
 | 5 | bug | A method cannot change its receiver: `it.n += 1` / `it.items.push(x)` in an `impl` method is silently lost | (any stateful struct) |
 | 6 | bug | Type checker: a parameter declared with an interface type cannot be passed to another parameter of that interface (T0012 "struct 'Metric' does not satisfy interface 'Metric'"), an error in 2027 | typed_route_planner (**known failing**) |
-| 7 | bug | VM: `import { Plugin } from "api.fg"` of an interface fails (E0019 "does not export"); the interpreter imports it | plugin_pipeline (**known failing** on the VM) |
-| 8 | bug | An algebraic type's name cannot be imported (`import { Shape } from "m.fg"` → E0019, both engines), so `fn f(s: Shape)` in another module is T0015 (error in 2027) | stack_machine_modules (**known failing**) |
-| 9 | bug | VM: a name a module imports cannot be imported from it (re-export through a package entry); the interpreter allows it | csvlite_package (**known failing** on the VM) |
+| 7 | bug | VM: `import { Plugin } from "api.fg"` of an interface fails (E0019 "does not export"); the interpreter imports it (**fixed**) | plugin_pipeline |
+| 8 | bug | An algebraic type's name cannot be imported (`import { Shape } from "m.fg"` → E0019, both engines), so `fn f(s: Shape)` in another module is T0015 (error in 2027) (**fixed**) | stack_machine_modules |
+| 9 | bug | VM: a name a module imports cannot be imported from it (re-export through a package entry); the interpreter allows it (**fixed**) | csvlite_package |
 | 10 | bug | `timeout 0.5 seconds { }` truncates the limit to 0 and fails at once ("exceeded 0 second limit"); there is no millisecond unit | retry_with_timeouts (workaround) |
 | 11 | bug | Interpreter: a struct method named `push` is dispatched to the builtin (`E0015 push() first argument must be array`); the VM calls the method | (any struct with `push`) |
 | 12 | bug | Builtin argument errors differ between engines: `join([1, 2], 5)` is `"152"` on the VM and E0015 on the interpreter; `split`/`keys`/`push` error texts differ | error_code_report (avoids them) |
@@ -272,6 +272,13 @@ work. `import "api.fg"` works on both.
 Suggested fix: export interface definitions from VM modules (the selective-import path in
 the VM compiler/`__forge_import_module`), and add a parity fixture.
 
+**Fixed:** the VM's import looks a requested name up among the module's prefixed globals
+and then among the structs *and interfaces* it registers under their own names
+(`VM::module_export`, shared by `import { ... }` and `import "m.fg" as m`). Both engines
+also bind interface names on a bare `import "m.fg"`, and interfaces are namespace members.
+Tests: `tests/parity/supported/import_type_and_interface.fg`,
+`tests/module_exports_test.fg`; plugin_pipeline is no longer known failing.
+
 ### 8. Algebraic types cannot be imported by name
 
 ```forge
@@ -292,6 +299,19 @@ module use the type in annotations.
 
 Suggested fix: export the type name (for annotations and for `satisfies`/methods) along
 with its variants; importing the type could bring its variants too.
+
+**Fixed:** a `type` name is now a value on both engines, like a struct or interface name:
+its description `{__kind__: "type", name: "Shape", variants: ["Circle", "Dot"]}` (the
+object the type's metadata already was; not when a variant has the type's own name,
+`semantics::type_name_is_value`). So it is exported like any top-level name:
+`import { Shape } from "shapes.fg"` works, `fn area(s: Shape)` checks in the importer, and
+`Shape.variants` / `m.Shape` are usable. Decision: importing the type does not bring its
+variants (they are separate names, and a selective import binds exactly the names it
+lists); write `import { Shape, Circle, Dot }`. A bare
+`import "m.fg"` binds the type name together with the variants. The type checker already
+treated type names as values and imports as type definitions. Tests:
+`tests/parity/supported/import_type_and_interface.fg`, `tests/module_exports_test.fg`,
+`imported_types_and_reexports_are_checked`; stack_machine_modules is no longer known failing.
 
 ### 9. VM: re-exports are not importable
 
@@ -320,6 +340,22 @@ the same way. `llms.txt` does not say either way, so the engines should at least
 
 Suggested fix: decide (re-exports are useful for packages; the interpreter's behaviour),
 implement it on the VM, and document it next to `import { a as b }`.
+
+**Fixed:** re-exports are part of the language (the interpreter's behaviour, now
+documented in `llms.txt`): a module exports every name its top level binds, including the
+names its imports bind (`import { a, b as c }`, `import "x.fg" as x`, native imports) and,
+on both engines, destructured `let`s. On the VM those bindings now live under the module's
+private global prefix (`compiler::module_top_level_names`, plus the names of a bare
+`import "x.fg"` inside a module, read once when the module is compiled) instead of leaking
+into the program's globals unprefixed, so `__forge_import_module` and namespaces find
+them, and `vm::module_share` carries them to other tasks with the module's other globals.
+`semantics::namespace_members` lists them, so `import "lib" as lib; lib.twice(5)` works on
+both engines (a re-exported struct is a struct member: `lib.Pt { x: 1 }`). The type
+checker follows a selective import of a re-export to the module that defines it, so the
+function keeps its signature (also under an `as` alias). A bare `import "lib"` still binds
+only the module's own definitions. Tests: `tests/parity/supported/import_reexports.fg`,
+`tests/module_exports_test.fg`, `module_once::a_reexporting_module_run_in_a_task_exports_its_imports`;
+csvlite_package is no longer known failing.
 
 ### 10. `timeout` truncates fractional seconds
 
