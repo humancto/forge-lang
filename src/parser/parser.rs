@@ -651,18 +651,51 @@ impl Parser {
         })
     }
 
-    /// Parses: wait expr seconds
+    /// Parses: wait expr [unit]
     fn parse_wait(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Wait)?;
         let duration = self.parse_expr()?;
-        if self.check(&Token::Seconds) {
-            self.advance();
-        }
+        let duration = self.parse_duration_in_seconds(duration);
 
         Ok(Stmt::Expression(Expr::Call {
             function: Box::new(Expr::Ident("wait".to_string())),
             args: vec![duration],
         }))
+    }
+
+    /// The duration unit after the number of `wait`, `timeout` or `schedule
+    /// every`, on the same line, if there is one: `seconds` (a keyword) or
+    /// one of the words of `semantics::DURATION_UNITS` (`ms`, `minute`, ...,
+    /// plain names everywhere else). Returns the canonical unit name.
+    fn parse_duration_unit(&mut self) -> Option<&'static str> {
+        let unit = match self.current_token() {
+            Token::Seconds => Some("seconds"),
+            Token::Ident(ref w) => crate::semantics::duration_unit(w),
+            _ => None,
+        };
+        if unit.is_some() {
+            self.advance();
+        }
+        unit
+    }
+
+    /// `duration` followed by an optional unit, as a number of seconds:
+    /// `500 ms` is `500 / 1000.0`, `2 minutes` is `2 * 60` (a fraction stays
+    /// exact: `0.5 seconds` is `0.5`).
+    fn parse_duration_in_seconds(&mut self, duration: Expr) -> Expr {
+        let (op, factor) = match self.parse_duration_unit() {
+            None | Some("seconds") => return duration,
+            Some("milliseconds") => (BinOp::Div, Expr::Float(1000.0)),
+            Some(unit) => (
+                BinOp::Mul,
+                Expr::Int(crate::semantics::duration_unit_seconds(unit) as i64),
+            ),
+        };
+        Expr::BinOp {
+            left: Box::new(duration),
+            op,
+            right: Box::new(factor),
+        }
     }
 
     /// Parses: try { body } catch name { handler }
@@ -1108,9 +1141,7 @@ impl Parser {
     fn parse_timeout(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Timeout)?;
         let duration = self.parse_expr()?;
-        if self.check(&Token::Seconds) {
-            self.advance();
-        }
+        let duration = self.parse_duration_in_seconds(duration);
         let body = self.parse_block()?;
         Ok(Stmt::TimeoutBlock { duration, body })
     }
@@ -1131,21 +1162,7 @@ impl Parser {
             self.advance();
         }
         let interval = self.parse_expr()?;
-        let unit = match self.current_token() {
-            Token::Seconds => {
-                self.advance();
-                "seconds".to_string()
-            }
-            Token::Ident(ref s) if s == "minutes" => {
-                self.advance();
-                "minutes".to_string()
-            }
-            Token::Ident(ref s) if s == "hours" => {
-                self.advance();
-                "hours".to_string()
-            }
-            _ => "seconds".to_string(),
-        };
+        let unit = self.parse_duration_unit().unwrap_or("seconds").to_string();
         let body = self.parse_block()?;
         Ok(Stmt::ScheduleBlock {
             interval,

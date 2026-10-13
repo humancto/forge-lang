@@ -140,9 +140,12 @@ spawn_stmt     = "spawn" block ;
 ```ebnf
 check_stmt     = "check" expr ( "is" "not"? "empty" | "contains" expr | "between" expr "and" expr ) ;
 safe_block     = "safe" block ;
-timeout_block  = "timeout" expr "seconds" block ;
+timeout_block  = "timeout" expr duration_unit? block ;
 retry_block    = "retry" expr "times" block ;
-schedule_block = "schedule" "every" expr ( "seconds" | "minutes" ) block ;
+schedule_block = "schedule" "every" expr duration_unit? block ;
+wait_stmt      = "wait" expr duration_unit? ;
+duration_unit  = "milliseconds" | "millisecond" | "ms" | "seconds" | "second"
+               | "minutes" | "minute" | "hours" | "hour" ;
 watch_block    = "watch" expr block ;
 ```
 

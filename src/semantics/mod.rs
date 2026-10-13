@@ -737,23 +737,69 @@ pub fn seconds_f64(secs: f64) -> std::time::Duration {
     std::time::Duration::try_from_secs_f64(secs.max(0.0)).unwrap_or(std::time::Duration::MAX)
 }
 
-/// `schedule every <n> <unit>` interval in seconds, saturating instead of
-/// overflowing for absurd `n`.
-pub fn schedule_interval_secs(n: u64, unit: &str) -> u64 {
-    match unit {
-        "minutes" => n.saturating_mul(60),
-        "hours" => n.saturating_mul(3600),
-        _ => n, // "seconds" or default
+/// The duration units `wait`, `timeout` and `schedule every` accept after
+/// their number, with how many seconds one of them is. Singular and plural
+/// spellings and `ms` all work; the parser normalises them to the first
+/// spelling of each row (the `unit` a `schedule` block stores).
+pub const DURATION_UNITS: &[(&[&str], f64)] = &[
+    (&["milliseconds", "millisecond", "ms"], 0.001),
+    (&["seconds", "second"], 1.0),
+    (&["minutes", "minute"], 60.0),
+    (&["hours", "hour"], 3600.0),
+];
+
+/// The canonical unit name (`"milliseconds"`, `"seconds"`, `"minutes"`,
+/// `"hours"`) a duration word spells, if it is one.
+pub fn duration_unit(word: &str) -> Option<&'static str> {
+    DURATION_UNITS
+        .iter()
+        .find(|(names, _)| names.contains(&word))
+        .map(|(names, _)| names[0])
+}
+
+/// Seconds in one `unit` (a canonical name from [`duration_unit`]; anything
+/// else counts as seconds).
+pub fn duration_unit_seconds(unit: &str) -> f64 {
+    DURATION_UNITS
+        .iter()
+        .find(|(names, _)| names.contains(&unit))
+        .map_or(1.0, |(_, secs)| *secs)
+}
+
+/// `schedule every <n> <unit>`: the interval between runs. `n` may be a
+/// fraction (`every 0.5 seconds`, `every 250 ms`); it must be positive, and
+/// absurd values saturate instead of panicking.
+pub fn schedule_interval(n: f64, unit: &str) -> Result<std::time::Duration, String> {
+    if n.is_nan() || n <= 0.0 {
+        return Err("schedule interval must be a positive number".to_string());
+    }
+    // A run more often than every millisecond would only spin.
+    Ok(seconds_f64((n * duration_unit_seconds(unit)).max(0.001)))
+}
+
+/// The time limit of `timeout <n> seconds { }` in seconds: negative and NaN
+/// mean zero (the block fails at once).
+pub fn timeout_seconds(n: f64) -> f64 {
+    if n.is_nan() {
+        0.0
+    } else {
+        n.max(0.0)
     }
 }
 
-/// Deadline `secs` seconds after `now` for a `timeout` block. Saturates at
-/// a century, which outlives any program, rather than overflowing
-/// `Instant` (a panic) for absurd durations.
-pub fn timeout_deadline(now: crate::clock::Instant, secs: u64) -> crate::clock::Instant {
+/// Deadline `secs` seconds after `now` for a `timeout` block (fractions are
+/// exact to the nanosecond). Saturates at a century, which outlives any
+/// program, rather than overflowing `Instant` (a panic) for absurd durations.
+pub fn timeout_deadline(now: crate::clock::Instant, secs: f64) -> crate::clock::Instant {
     const CENTURY_SECS: u64 = 100 * 365 * 24 * 60 * 60;
-    let capped = std::time::Duration::from_secs(secs.min(CENTURY_SECS));
+    let capped = seconds_f64(secs).min(std::time::Duration::from_secs(CENTURY_SECS));
     now.checked_add(capped).unwrap_or(now)
+}
+
+/// The error a `timeout` block raises when its limit passes (E0031); the
+/// limit is printed as a Forge number (`0.5`, `2`).
+pub fn timeout_exceeded(secs: f64) -> String {
+    format!("timeout: operation exceeded {} second limit", secs)
 }
 
 pub fn import_missing_name(path: &str, name: &str) -> String {
@@ -964,13 +1010,66 @@ mod tests {
         assert_eq!(seconds_f64(f64::NAN), Duration::ZERO);
         assert_eq!(seconds_f64(f64::INFINITY), Duration::MAX);
         assert_eq!(seconds_f64(1e300), Duration::MAX);
-        assert_eq!(schedule_interval_secs(2, "minutes"), 120);
-        assert_eq!(schedule_interval_secs(2, "hours"), 7200);
-        assert_eq!(schedule_interval_secs(u64::MAX, "hours"), u64::MAX);
-        assert_eq!(schedule_interval_secs(7, "seconds"), 7);
+        assert_eq!(
+            schedule_interval(2.0, "minutes"),
+            Ok(Duration::from_secs(120))
+        );
+        assert_eq!(
+            schedule_interval(2.0, "hours"),
+            Ok(Duration::from_secs(7200))
+        );
+        assert_eq!(schedule_interval(f64::MAX, "hours"), Ok(Duration::MAX));
+        assert_eq!(
+            schedule_interval(7.0, "seconds"),
+            Ok(Duration::from_secs(7))
+        );
+        assert_eq!(
+            schedule_interval(0.5, "seconds"),
+            Ok(Duration::from_millis(500))
+        );
+        assert_eq!(
+            schedule_interval(250.0, "milliseconds"),
+            Ok(Duration::from_millis(250))
+        );
+        assert!(schedule_interval(0.0, "seconds").is_err());
+        assert!(schedule_interval(-1.0, "seconds").is_err());
+        assert!(schedule_interval(f64::NAN, "seconds").is_err());
         let now = Instant::now();
-        assert_eq!(timeout_deadline(now, 2), now + Duration::from_secs(2));
-        assert!(timeout_deadline(now, u64::MAX) > now + Duration::from_secs(1 << 30));
+        assert_eq!(timeout_deadline(now, 2.0), now + Duration::from_secs(2));
+        assert_eq!(
+            timeout_deadline(now, 0.25),
+            now + Duration::from_millis(250)
+        );
+        assert!(timeout_deadline(now, f64::MAX) > now + Duration::from_secs(1 << 30));
+        assert!(timeout_deadline(now, f64::INFINITY) > now + Duration::from_secs(1 << 30));
+        assert_eq!(timeout_seconds(f64::NAN), 0.0);
+        assert_eq!(timeout_seconds(-2.0), 0.0);
+        assert_eq!(
+            timeout_exceeded(0.5),
+            "timeout: operation exceeded 0.5 second limit"
+        );
+        assert_eq!(
+            timeout_exceeded(2.0),
+            "timeout: operation exceeded 2 second limit"
+        );
+    }
+
+    #[test]
+    fn duration_units() {
+        for (word, unit) in [
+            ("ms", "milliseconds"),
+            ("millisecond", "milliseconds"),
+            ("milliseconds", "milliseconds"),
+            ("second", "seconds"),
+            ("seconds", "seconds"),
+            ("minute", "minutes"),
+            ("hours", "hours"),
+        ] {
+            assert_eq!(duration_unit(word), Some(unit), "{word}");
+        }
+        assert_eq!(duration_unit("days"), None);
+        assert_eq!(duration_unit_seconds("milliseconds"), 0.001);
+        assert_eq!(duration_unit_seconds("hours"), 3600.0);
     }
 
     #[test]

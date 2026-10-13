@@ -66,14 +66,20 @@ If all retries fail, the error from the last attempt is raised.
 
 ## timeout N seconds { }
 
-Limits execution time for a block. If the block does not complete within the time limit, it is interrupted.
+Limits execution time for a block. If the block does not complete within the time limit, it is interrupted and the block raises E0031 `timeout: operation exceeded N second limit` (N in seconds, as a Forge number: `0.5`, `2`), which `try`/`catch` can handle.
 
 ```forge
 timeout 5 seconds {
     let result = http.get("https://slow-api.example.com")
     say result.json
 }
+
+timeout 250 ms {
+    wait 0.1 seconds
+}
 ```
+
+Duration units (for `wait`, `timeout` and `schedule every`): `milliseconds` / `millisecond` / `ms`, `seconds` / `second`, `minutes` / `minute`, `hours` / `hour`. The number may be any expression and a fraction is exact (`timeout 0.5 seconds`, `wait 1.5 ms`); without a unit it counts seconds. The unit words are not reserved: they are only units right after the number, on the same line.
 
 > **Note:** This feature is experimental and may not interrupt all operations cleanly.
 
@@ -90,7 +96,7 @@ schedule every 5 minutes {
 }
 ```
 
-Supported units: `seconds`, `minutes`, `hours`.
+Supported units: those of `timeout` (`ms`, `seconds`, `minutes`, `hours`, singular or plural); the interval may be a fraction (`schedule every 0.5 seconds`) and must be positive.
 
 ## watch "path" { }
 
@@ -147,9 +153,10 @@ Pauses execution for the specified duration.
 ```forge
 wait 2 seconds
 wait 500 milliseconds
+wait 0.25 seconds
 ```
 
-Supported units: `seconds`, `milliseconds`, `minutes`.
+Supported units: those of `timeout` (`ms`/`milliseconds`, `seconds`, `minutes`, `hours`, singular or plural). `wait(n)` (the builtin) takes seconds.
 
 ## grab ... from "url"
 

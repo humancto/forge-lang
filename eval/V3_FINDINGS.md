@@ -343,6 +343,23 @@ Suggested fix: parse the duration as a Float (`semantics::timeout_deadline` alre
 saturates), print it as given in the message, and accept `milliseconds`/`ms` like
 `schedule` units.
 
+**Fixed:** the limit is kept as a Float on both engines (`semantics::timeout_seconds`,
+`timeout_deadline(now, f64)`, exact to the nanosecond, still saturating), and the error prints
+it as a Forge number (`semantics::timeout_exceeded`: `exceeded 0.5 second limit`, still E0031).
+`wait`, `timeout` and `schedule every` share one unit list (`semantics::DURATION_UNITS`):
+`milliseconds`/`millisecond`/`ms`, `seconds`/`second`, `minutes`/`minute`, `hours`/`hour`
+(before, `wait` and `timeout` took only `seconds`, `schedule` only the three plurals). The
+words are matched after the number on the same line, not reserved, so `ms`, `second`, ... stay
+ordinary names in both editions. The parser turns `wait`/`timeout` units into seconds (`500
+ms` is `500 / 1000.0`, `2 minutes` is `2 * 60`); `schedule` keeps the canonical unit name and
+takes a fractional interval (`semantics::schedule_interval`), which must be positive on both
+engines (the interpreter used to spin on `every 0 seconds` and wrap a negative interval to
+centuries; a Float interval silently became 60 s). There are no `retry` delays to convert.
+retry_with_timeouts' reference now uses `timeout 150 ms { ... }`. Tests:
+`tests/durations_test.fg`, `tests/edition2027/durations_test.fg` (both engines),
+`semantics::tests::duration_units`, `durations_saturate_instead_of_panicking`,
+`runtime::metadata::tests::schedule_units_are_normalised`.
+
 ### 11. Interpreter: a struct method named `push` calls the builtin
 
 ```forge

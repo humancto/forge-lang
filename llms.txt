@@ -384,7 +384,7 @@ println([1, 2, 3, 4].stream().filter(fn(x) { return x > 1 }).take(2).collect())
 
 Maps: `m.set(k, v)` and `m.remove(k)` return a new Map (a bare `m.set(k, v)` statement changes nothing), `m.get(k)` (`null` if absent), `m.has(k)`, `m.keys()`, `m.values()`, `m.len()`, `m.to_array()` (an array of `(key, value)` tuples), `for k, v in m`; `m[k]` is an error. Keys may be any value (`1` and `1.0` are one key, NaN finds NaN, arrays/objects/sets compare by content); for String keys an object (`obj[k] = v`) is simpler. Maps and sets are hash-indexed: `get`/`has`/`set`/`remove` (and set `has`/`add`/`remove`) take constant time on average, and `m = m.set(k, v)` / `m = m.remove(k)` on a `let mut` variable update it without copying the map, so building a map in a loop is linear.
 
-Other builtins: `exit(code)` (ends the program at once with that exit status; output already printed is kept), `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stderr: warnings and errors of CLI programs), `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
+Other builtins: `exit(code)` (ends the program at once with that exit status; output already printed is kept), `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stderr: warnings and errors of CLI programs), `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)` (fractions allowed: `wait(0.25)`), `assert`, `assert_eq`.
 
 ## Standard library (always in scope)
 
@@ -560,7 +560,7 @@ fn cities() { return ["Oslo"] }
 - Put non-String values into text with interpolation (`"total: {n}"`) or `str(n)`, never `"total: " + n`: edition 2027 rejects `+` between a String and a non-String (E0034; edition 2026 converts silently).
 - No format specs such as `{x:.2f}` or `%.2f`: write `"{to_fixed(x, 2)}"`.
 - Mutating a field or index requires a `let mut` binding.
-- `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.
+- `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds. Statement forms take a unit after the number: `wait 250 ms`, `timeout 0.5 seconds { ... }`, `schedule every 2 minutes { ... }` (units `ms`/`millisecond(s)`, `second(s)`, `minute(s)`, `hour(s)`; fractions are exact; no unit means seconds); a `timeout` that expires raises E0031 `timeout: operation exceeded 0.5 second limit`.
 - Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.
 - Always pass user input to SQL as a params array: `db.query("... WHERE id = ?", [id])`.
 
