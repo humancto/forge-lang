@@ -1,0 +1,70 @@
+id = "stock_events"
+category = "typed"
+title = "Inventory events as an algebraic data type"
+editions = ["2027"]
+prompt = """
+Write a typed program. Model inventory events as one algebraic data type (tagged union)
+with the variants `Received(sku, qty)`, `Shipped(sku, qty)`, `Adjusted(sku, delta, reason)`
+and `Audit(sku)`; parse each input line into an event with a function that returns a
+`Result` (the event or an error message), and give every function declared parameter and
+return types.
+
+Each non-blank line of standard input is an event:
+`recv <sku> <qty>`, `ship <sku> <qty>`, `adjust <sku> <delta> <reason words...>` or
+`audit <sku>`. qty is a positive integer (digits only, greater than 0); delta is a non-zero
+integer with an optional sign (`+3`, `-2`, `5`). Line numbers count all lines from 1.
+
+Process the events in order, starting with no stock:
+- a line that cannot be parsed prints `line <n>: parse error: <message>` with message
+  `unknown event <word>`, `wrong number of fields` or `bad quantity <text>`
+  (adjust needs at least one reason word; check the field count before the quantity);
+- `ship` more than the stock of that sku prints `line <n>: rejected: only <stock> <sku> in
+  stock` and changes nothing; so does an `adjust` that would make the stock negative
+  (`line <n>: rejected: adjustment would make <sku> negative`);
+- `audit` prints `audit <sku>: <stock>` (0 for an unknown sku);
+- every accepted adjustment is remembered as `<sku> <delta with sign> (<reason>)`.
+
+At the end print `stock:` followed by one line per sku with non-zero stock, sorted by sku,
+as `  <sku> <stock>`, then `adjustments:` and the remembered adjustments in order, each as
+`  <text>` (or `  none`).
+"""
+stdin = """
+recv apple 10
+recv pear 4
+ship apple 3
+ship pear 5
+adjust apple -2 damaged in transit
+audit apple
+audit kiwi
+adjust pear +1 found behind shelf
+sell apple 1
+ship apple
+recv apple 0
+recv apple ten
+adjust pear 0 nothing
+adjust pear -9 big loss
+adjust kiwi 3
+ship pear 5
+recv kiwi 7
+ship kiwi 7
+audit pear
+"""
+needs = []
+expected_stdout = """
+line 4: rejected: only 4 pear in stock
+audit apple: 5
+audit kiwi: 0
+line 9: parse error: unknown event sell
+line 10: parse error: wrong number of fields
+line 11: parse error: bad quantity 0
+line 12: parse error: bad quantity ten
+line 13: parse error: bad quantity 0
+line 14: rejected: adjustment would make pear negative
+line 15: parse error: wrong number of fields
+audit pear: 0
+stock:
+  apple 5
+adjustments:
+  apple -2 (damaged in transit)
+  pear +1 (found behind shelf)
+"""

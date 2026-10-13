@@ -1,0 +1,75 @@
+id = "staged_pipeline"
+category = "parallel"
+title = "A three-stage pipeline over bounded queues"
+prompt = """
+Each non-blank line of standard input is a record `<id> <text...>` (id is a word, the text
+may contain spaces). Process the records with a pipeline of three stages that run
+concurrently, connected by bounded queues that hold at most 2 items each:
+
+1. parse: split the line into id and text, count the words of the text; then sleep 100 ms
+   (simulated I/O);
+2. digest: compute the first 8 hex characters of the SHA-256 of the text (lower-case hex);
+   then sleep 100 ms;
+3. output: print `<id> words=<n> sha=<digest> <text in upper case>`; then sleep 100 ms.
+
+Records must come out in input order. When all records are done, print
+`processed <number of records>`. There are 25 records; doing the stages one after
+another would take about 7.5 seconds, and the program must finish within 7 seconds.
+"""
+stdin = """
+r01 the quick brown fox
+r02 jumps over
+r03 the lazy dog
+r04 pack my box with five dozen liquor jugs
+r05 sphinx of black quartz judge my vow
+r06 hello
+r07 hello world
+r08 forge pipelines are channels
+r09 bounded queues apply backpressure
+r10 a
+r11 b c
+r12 lorem ipsum dolor sit amet
+r13 consectetur adipiscing elit
+r14 sed do eiusmod tempor
+r15 incididunt ut labore
+r16 et dolore magna aliqua
+r17 ut enim ad minim veniam
+r18 quis nostrud exercitation
+r19 ullamco laboris nisi
+r20 ut aliquip ex ea commodo
+r21 duis aute irure dolor
+r22 in reprehenderit in voluptate
+r23 velit esse cillum
+r24 dolore eu fugiat nulla pariatur
+r25 the end
+"""
+needs = []
+timeout = 7
+expected_stdout = """
+r01 words=4 sha=9ecb3656 THE QUICK BROWN FOX
+r02 words=2 sha=94d7b525 JUMPS OVER
+r03 words=3 sha=e6f6cfd5 THE LAZY DOG
+r04 words=8 sha=c826b48f PACK MY BOX WITH FIVE DOZEN LIQUOR JUGS
+r05 words=7 sha=660dcab1 SPHINX OF BLACK QUARTZ JUDGE MY VOW
+r06 words=1 sha=2cf24dba HELLO
+r07 words=2 sha=b94d27b9 HELLO WORLD
+r08 words=4 sha=455339f2 FORGE PIPELINES ARE CHANNELS
+r09 words=4 sha=f3a0d711 BOUNDED QUEUES APPLY BACKPRESSURE
+r10 words=1 sha=ca978112 A
+r11 words=2 sha=47d8a4a8 B C
+r12 words=5 sha=2f858607 LOREM IPSUM DOLOR SIT AMET
+r13 words=3 sha=b8614e0d CONSECTETUR ADIPISCING ELIT
+r14 words=4 sha=4c6bc7ae SED DO EIUSMOD TEMPOR
+r15 words=3 sha=004f4ec5 INCIDIDUNT UT LABORE
+r16 words=4 sha=cec2a0d0 ET DOLORE MAGNA ALIQUA
+r17 words=5 sha=3ddf7778 UT ENIM AD MINIM VENIAM
+r18 words=3 sha=ba135966 QUIS NOSTRUD EXERCITATION
+r19 words=3 sha=4b87d600 ULLAMCO LABORIS NISI
+r20 words=5 sha=ad0c99fe UT ALIQUIP EX EA COMMODO
+r21 words=4 sha=8e0560ae DUIS AUTE IRURE DOLOR
+r22 words=4 sha=73d101bd IN REPREHENDERIT IN VOLUPTATE
+r23 words=3 sha=1f992424 VELIT ESSE CILLUM
+r24 words=5 sha=8c44a671 DOLORE EU FUGIAT NULLA PARIATUR
+r25 words=2 sha=92eb9cd0 THE END
+processed 25
+"""

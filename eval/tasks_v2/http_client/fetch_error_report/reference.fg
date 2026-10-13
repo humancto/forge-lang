@@ -1,0 +1,49 @@
+// Classify fetch outcomes. A refused connection raises (catch it); an
+// error status does not; resp.json is null both for invalid JSON and for
+// the document `null`, so parse the body text to tell them apart.
+
+let lines = filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" })
+let base = lines[0].trim()
+let mut ok = 0
+let mut errors = 0
+
+for line in slice(lines, 1, len(lines)) {
+    let parts = split(line.trim(), " ")
+    let label = parts[0]
+    let mut url = base + parts[1]
+    if starts_with(parts[1], "http://") {
+        url = parts[1]
+    }
+    let mut resp = null
+    try {
+        resp = http.get(url)
+    } catch e {
+        resp = null
+    }
+    if resp == null {
+        println("{label}: connection failed")
+        errors += 1
+        continue
+    }
+    if resp.status >= 400 {
+        println("{label}: HTTP {resp.status}")
+        errors += 1
+        continue
+    }
+    let mut parsed = false
+    let mut doc = null
+    try {
+        doc = json.parse(resp.body)
+        parsed = true
+    } catch e {
+        parsed = false
+    }
+    if !parsed {
+        println("{label}: invalid JSON")
+        errors += 1
+        continue
+    }
+    println("{label}: ok {json.compact(doc)}")
+    ok += 1
+}
+println("ok={ok} errors={errors}")

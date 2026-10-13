@@ -7,6 +7,7 @@ use std::time::Duration;
 use super::bytecode::*;
 use super::frame::*;
 use super::gc::Gc;
+use super::local_ops::ElemKey;
 use super::profiler::Profiler;
 use super::value::*;
 
@@ -163,7 +164,19 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_check",
     "__forge_when_matches",
     "__forge_method_mut",
+    "__forge_method_mut_place",
 ];
+
+/// Builtins a `CallPure` may call with borrowed (`PeekLocal`) arguments:
+/// they only read their arguments, never store them anywhere and never call
+/// back into Forge code. Their result is shared (`get` returns an element).
+pub(super) const PURE_BORROW_BUILTINS: &[&str] = &["len", "get", "has_key", "contains"];
+/// A module that ran in a VM (see [`VM::loaded_modules`]).
+pub(crate) struct LoadedModule {
+    pub(crate) program: Arc<crate::parser::ast::Program>,
+    /// Global-name prefix of the module's top-level names.
+    pub(crate) prefix: String,
+}
 
 pub struct VM {
     pub registers: Vec<Value>,
@@ -174,6 +187,10 @@ pub struct VM {
     pub static_methods: HashMap<String, IndexMap<String, Value>>,
     pub embedded_fields: HashMap<String, Vec<(String, String)>>,
     pub struct_defaults: HashMap<String, IndexMap<String, Value>>,
+    /// Modules that already ran in this VM, by canonical path: importing
+    /// one again binds its globals instead of running it again (see
+    /// `__forge_import_module`).
+    pub(crate) loaded_modules: HashMap<std::path::PathBuf, Arc<LoadedModule>>,
     pub gc: Gc,
     pub output: Vec<String>,
     /// JIT tier state: specialization cache keyed by (prototype id, type
@@ -187,6 +204,14 @@ pub struct VM {
     /// dropped.
     #[cfg(feature = "jit")]
     pub(crate) jit_bridge_error: Option<VMError>,
+    /// Closures recently called back by native builtins (`vm::callback`).
+    pub(super) callbacks: super::callback::CallbackMemo,
+    /// Counts every entry into bytecode execution (`run_until`) and into a
+    /// native builtin (`call_native`): only those can change globals,
+    /// captured variables or the VM state JIT entry guards depend on. Equal
+    /// epochs mean no Forge code or builtin ran in between, so guards that
+    /// held still hold (`vm::callback`).
+    pub(super) exec_epoch: u64,
     pub profiler: Profiler,
     /// Instructions left before the next safe-point poll of `timeout`
     /// deadlines (see [`SAFEPOINT_INTERVAL`]). Reading the clock and walking
@@ -432,12 +457,15 @@ impl VM {
             static_methods: HashMap::new(),
             embedded_fields: HashMap::new(),
             struct_defaults: HashMap::new(),
+            loaded_modules: HashMap::new(),
             gc,
             output: Vec::new(),
             #[cfg(feature = "jit")]
             jit: super::jit::tier::JitState::default(),
             #[cfg(feature = "jit")]
             jit_bridge_error: None,
+            callbacks: Default::default(),
+            exec_epoch: 0,
             profiler,
             safepoint_countdown: 0,
             fuel_window: 0,
@@ -697,6 +725,9 @@ impl VM {
         }
 
         child.embedded_fields = self.embedded_fields.clone();
+        // The task has copies of the modules' globals: it must not run
+        // them again when it imports one.
+        child.loaded_modules = self.loaded_modules.clone();
 
         for (name, defaults) in &self.struct_defaults {
             let mut child_defaults = IndexMap::new();
@@ -1014,7 +1045,8 @@ impl VM {
         Ok(frame_idx)
     }
 
-    fn run_until(&mut self, boundary_frame_idx: usize) -> Result<Value, VMError> {
+    pub(super) fn run_until(&mut self, boundary_frame_idx: usize) -> Result<Value, VMError> {
+        self.exec_epoch = self.exec_epoch.wrapping_add(1);
         let mut cached_closure: Option<(GcRef, Arc<Chunk>)> = None;
 
         loop {
@@ -1242,6 +1274,59 @@ impl VM {
                         let popped = self.pop_local(frame_idx, base, a)?;
                         self.registers[base + b as usize] = popped;
                     }
+                    OpCode::GetIndexLocal => {
+                        let key = ElemKey::Index(self.registers[base + c as usize]);
+                        let value = self.get_element_local(frame_idx, base, b, key)?;
+                        self.registers[base + a as usize] = value;
+                    }
+                    OpCode::GetFieldLocal => {
+                        let Constant::Str(field) = &chunk.constants[c as usize] else {
+                            return Err(VMError::new(
+                                "BUG: GetFieldLocal constant is not a string",
+                            ));
+                        };
+                        let value =
+                            self.get_element_local(frame_idx, base, b, ElemKey::Field(field))?;
+                        self.registers[base + a as usize] = value;
+                    }
+                    OpCode::SetIndexLocal => {
+                        let key = ElemKey::Index(self.registers[base + b as usize]);
+                        let value = self.registers[base + c as usize];
+                        self.set_element_local(frame_idx, base, a, key, value)?;
+                    }
+                    OpCode::SetFieldLocal => {
+                        let Constant::Str(field) = &chunk.constants[b as usize] else {
+                            return Err(VMError::new(
+                                "BUG: SetFieldLocal constant is not a string",
+                            ));
+                        };
+                        let value = self.registers[base + c as usize];
+                        self.set_element_local(frame_idx, base, a, ElemKey::Field(field), value)?;
+                    }
+                    OpCode::PushIndexLocal => {
+                        let key = ElemKey::Index(self.registers[base + b as usize]);
+                        let value = self.registers[base + c as usize];
+                        self.push_element_local(frame_idx, base, a, key, value)?;
+                    }
+                    OpCode::PushFieldLocal => {
+                        let Constant::Str(field) = &chunk.constants[b as usize] else {
+                            return Err(VMError::new(
+                                "BUG: PushFieldLocal constant is not a string",
+                            ));
+                        };
+                        let value = self.registers[base + c as usize];
+                        self.push_element_local(frame_idx, base, a, ElemKey::Field(field), value)?;
+                    }
+                    OpCode::PeekLocal => {
+                        // Not shared: the copy is an argument of the
+                        // `CallPure` that follows (see the opcode docs).
+                        let value = self.read_local(frame_idx, base, b)?;
+                        self.registers[base + a as usize] = value;
+                    }
+                    OpCode::UpdateSetLocal => {
+                        let value = self.registers[base + b as usize];
+                        self.update_set_local(frame_idx, base, a, value, c == SET_UPDATE_REMOVE)?;
+                    }
                     OpCode::Jump => {
                         let frame = &mut self.frames[frame_idx];
                         frame.ip = (frame.ip as i64 + sbx as i64) as usize;
@@ -1278,7 +1363,7 @@ impl VM {
                             }
                         }
                     }
-                    OpCode::Call => {
+                    OpCode::Call | OpCode::CallPure => {
                         // Cooperative cancellation check at function call
                         if self.is_cancelled() {
                             return Err(VMError::new("task cancelled"));
@@ -1292,11 +1377,26 @@ impl VM {
                             args.push(self.registers[base + a as usize + 1 + i]);
                         }
 
+                        // `CallPure` arguments may be `PeekLocal` copies of
+                        // owned locals: only a builtin that never keeps or
+                        // returns its arguments may see them unshared.
+                        let borrowed =
+                            opcode == OpCode::CallPure && self.is_pure_borrow_builtin(func_val);
+                        if opcode == OpCode::CallPure && !borrowed {
+                            for v in &args {
+                                self.gc.share(*v);
+                            }
+                        }
+
                         // Direct calls of user functions follow the shared
                         // arity rule; callbacks invoked by builtins (which
                         // also use `call_value`) stay lenient.
                         self.check_direct_call_arity(func_val, args.len())?;
                         let result = self.call_value(func_val, args)?;
+                        if borrowed {
+                            // `get` returns an element of its argument.
+                            self.gc.share(result);
+                        }
                         self.registers[dst_reg] = result;
                     }
                     OpCode::Return => {
@@ -1480,12 +1580,25 @@ impl VM {
                                     Pair(Value, Value),
                                     ObjPair(String, Value),
                                 }
+                                // A set with removed items is compacted when
+                                // the loop starts so each step is an O(1)
+                                // positional read (invisible: same items,
+                                // same order). The loop's own reference is
+                                // shared, so nothing updates it in place.
+                                if i == 0 {
+                                    if let Some(ObjKind::Set(items)) =
+                                        self.gc.get_mut(r).map(|o| &mut o.kind)
+                                    {
+                                        items.make_dense();
+                                    }
+                                }
                                 let src = if let Some(o) = self.gc.get(r) {
                                     match &o.kind {
-                                        ObjKind::Array(items)
-                                        | ObjKind::Tuple(items)
-                                        | ObjKind::Set(items) => {
+                                        ObjKind::Array(items) | ObjKind::Tuple(items) => {
                                             items.get(i as usize).copied().map(IterSrc::Item)
+                                        }
+                                        ObjKind::Set(items) => {
+                                            items.get_index(i as usize).copied().map(IterSrc::Item)
                                         }
                                         ObjKind::Map(pairs) => pairs
                                             .get(i as usize)
@@ -2158,68 +2271,111 @@ impl VM {
         depth_below: usize,
         force_hot: bool,
     ) -> Result<Option<Value>, VMError> {
-        use super::jit::tier::{invoke, Invoke};
+        let Some(sel) = self.jit_select(closure, chunk, args, depth_below, force_hot) else {
+            return Ok(None);
+        };
+        self.jit_run_selected(&sel, args, depth_below)
+    }
 
+    /// The specialization to run for this call, if any: [`JitState::select`]
+    /// (function, argument kinds, globals guards) plus the VM-state entry
+    /// guards only the VM can check.
+    ///
+    /// [`JitState::select`]: super::jit::tier::JitState::select
+    #[cfg(feature = "jit")]
+    pub(super) fn jit_select(
+        &mut self,
+        closure: GcRef,
+        chunk: &Arc<Chunk>,
+        args: &[Value],
+        depth_below: usize,
+        force_hot: bool,
+    ) -> Option<super::jit::tier::Selected> {
         let globals = JitGlobals {
             globals: &self.globals,
             gc: &self.gc,
         };
-        let Some(sel) = self
+        let sel = self
             .jit
-            .select(closure, chunk, args, &self.gc, force_hot, &globals)
-        else {
-            return Ok(None);
-        };
+            .select(closure, chunk, args, &self.gc, force_hot, &globals)?;
+        if !self.jit_vm_guards_ok(depth_below) {
+            self.jit.record_guard_failure(&sel);
+            return None;
+        }
+        Some(sel)
+    }
 
-        // VM-state guards (`select` checked the globals the code relies
-        // on): the VM itself would refuse the call (stack overflow), or a
-        // `timeout` is active (the VM checks deadlines between
-        // instructions; native code does not).
-        let depth_limit = crate::runtime::recursion::max_depth();
+    /// VM-state entry guards (`select` checked the globals the code relies
+    /// on): the VM itself would refuse the call (stack overflow), or a
+    /// `timeout` is active (the VM checks deadlines between instructions;
+    /// native code does not). Only running bytecode can change them while
+    /// `depth_below` stays the same (see `vm::callback`).
+    #[cfg(feature = "jit")]
+    pub(super) fn jit_vm_guards_ok(&self, depth_below: usize) -> bool {
         // Native code has no fuel counter: with a fuel budget every call
         // stays in the VM, so exhaustion is exact and deterministic.
         // Likewise the JIT polls only the run's own cancel flag, so code
         // inside a squad / timeout scope stays in the VM.
-        let guards_ok = depth_below < depth_limit
+        depth_below < crate::runtime::recursion::max_depth()
             && !self.meter.fuel_limited()
             && self.scope_cancels.is_empty()
-            && self.frames.iter().all(|f| f.timeouts.is_empty());
-        if !guards_ok {
-            self.jit.record_guard_failure(&sel);
-            return Ok(None);
-        }
+            && self.frames.iter().all(|f| f.timeouts.is_empty())
+    }
 
-        let mut raw: Vec<i64> = Vec::with_capacity(args.len());
-        for v in args {
-            // `select` already checked every argument's kind.
+    /// Run the selected specialization natively. `args` must match the
+    /// signature it was selected for (`TypeSig::matches`): the native code
+    /// trusts each argument's encoding. `None` means it deopted (or an
+    /// argument has no native encoding), and the caller runs the call in
+    /// the VM.
+    #[cfg(feature = "jit")]
+    pub(super) fn jit_run_selected(
+        &mut self,
+        sel: &super::jit::tier::Selected,
+        args: &[Value],
+        depth_below: usize,
+    ) -> Result<Option<Value>, VMError> {
+        use super::jit::tier::{invoke, Invoke};
+
+        // Arguments are encoded on the stack for the usual arities.
+        const INLINE_ARGS: usize = 8;
+        let mut inline = [0i64; INLINE_ARGS];
+        let mut spilled = Vec::new();
+        let raw: &mut [i64] = if args.len() <= INLINE_ARGS {
+            &mut inline[..args.len()]
+        } else {
+            spilled.resize(args.len(), 0);
+            &mut spilled
+        };
+        for (slot, v) in raw.iter_mut().zip(args) {
             let encoded = super::jit::types::JitType::of_value(v, &self.gc)
                 .and_then(|kind| kind.encode(v, &self.gc));
             let Some(encoded) = encoded else {
                 return Ok(None);
             };
-            raw.push(encoded);
+            *slot = encoded;
         }
-        let max_depth = (depth_limit - 1 - depth_below) as i64;
+        let depth_limit = crate::runtime::recursion::max_depth();
+        let max_depth = depth_limit.saturating_sub(1 + depth_below) as i64;
         // SAFETY: `sel.entry` was produced by the JIT compiler owned by
         // `self.jit`, which outlives this call; `raw` has exactly the
         // specialization's arity (checked by `select`); `self.cancelled` is
         // alive for the duration of the call.
-        let outcome = unsafe { invoke(sel.entry, &raw, max_depth, Arc::as_ptr(&self.cancelled)) };
+        let outcome = unsafe { invoke(sel.entry, raw, max_depth, Arc::as_ptr(&self.cancelled)) };
         // An error raised by a runtime bridge is the call's outcome. It is
         // checked before the return/deopt result: a deopt would re-run the
         // call in the VM and repeat the side effects that preceded the
         // error, and a normal return would swallow it.
         if let Some(err) = self.jit_bridge_error.take() {
-            self.jit.record_run(&sel);
+            self.jit.record_run(sel);
             return Err(err);
         }
         match outcome {
             Invoke::Returned(r) => {
-                self.jit.record_run(&sel);
+                self.jit.record_run(sel);
                 Ok(Some(sel.ret.decode(r, &mut self.gc)))
             }
             Invoke::Deopt => {
-                self.jit.record_deopt(&sel);
+                self.jit.record_deopt(sel);
                 Ok(None)
             }
         }
@@ -2238,6 +2394,37 @@ impl VM {
     #[cfg(all(test, feature = "jit"))]
     pub(crate) fn take_jit_bridge_error(&mut self) -> Option<VMError> {
         self.jit_bridge_error.take()
+    }
+
+    /// Push the frame for a call of `closure` (whose code is `chunk`) with
+    /// `args`, the way every call of a Forge function starts: the shared
+    /// depth limit, the register window, missing parameters set to `null`
+    /// and extra arguments dropped (callbacks are lenient; direct calls
+    /// check arity before getting here). The caller sets the frame's
+    /// `entry_args` if the function can be restarted natively by loop
+    /// tier-up (`try_jit_loop_restart`), then runs it with `run_until`.
+    pub(super) fn enter_closure(
+        &mut self,
+        closure: GcRef,
+        arity: usize,
+        frame_size: usize,
+        args: &[Value],
+    ) -> Result<(), VMError> {
+        let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
+        // Shared depth limit + native stack guard (runtime/recursion.rs):
+        // runaway recursion is a catchable error, never a process abort.
+        crate::runtime::recursion::check_call_depth(self.frames.len())
+            .map_err(|m| VMError::new(&m))?;
+        self.ensure_registers(new_base + frame_size);
+        let passed = args.len().min(arity);
+        self.registers[new_base..new_base + passed].copy_from_slice(&args[..passed]);
+        for slot in &mut self.registers[new_base + passed..new_base + arity] {
+            *slot = Value::null();
+        }
+        let mut frame = CallFrame::new(closure, new_base, frame_size);
+        frame.argc = args.len();
+        self.frames.push(frame);
+        Ok(())
     }
 
     /// Call any callable value (closure, function, native, `__call__`
@@ -2267,53 +2454,33 @@ impl VM {
                 match &obj.kind {
                     ObjKind::Closure(closure) => {
                         let chunk = closure.function.chunk.clone();
-                        let func_name = closure.function.name.clone();
+                        // Only `--profile` records named calls; the name is
+                        // cloned only then (anonymous lambdas all share the
+                        // name "<lambda>" and are not profiled).
+                        let profiled_name = (self.profiler.is_enabled()
+                            && !closure.function.name.is_empty()
+                            && closure.function.name != "<lambda>")
+                            .then(|| closure.function.name.clone());
 
                         // JIT dispatch: a verified, type-specialized native
                         // version runs when its entry guards pass; otherwise
                         // (or on deopt) the call runs in the VM below.
                         #[cfg(feature = "jit")]
                         if let Some(result) = self.try_jit_call(r, &chunk, &args)? {
-                            if self.profiler.is_enabled()
-                                && !func_name.is_empty()
-                                && func_name != "<lambda>"
-                            {
-                                self.profiler.enter_function(&func_name);
+                            if let Some(name) = &profiled_name {
+                                self.profiler.enter_function(name);
                                 self.profiler.exit_function();
                             }
                             return Ok(result);
                         }
 
-                        // Count calls for profiling. Anonymous lambdas all
-                        // share the name "<lambda>" and are not profiled.
-                        if !func_name.is_empty() && func_name != "<lambda>" {
-                            self.profiler.enter_function(&func_name);
+                        if let Some(name) = &profiled_name {
+                            self.profiler.enter_function(name);
                         }
-
-                        let arity = chunk.arity as usize;
                         let frame_size = (chunk.max_registers as usize).max(1);
-                        let new_base = self.frames.last().map(|f| f.base + f.size).unwrap_or(0);
-                        // Shared depth limit + native stack guard
-                        // (runtime/recursion.rs): runaway recursion is a
-                        // catchable error, never a process abort.
-                        crate::runtime::recursion::check_call_depth(self.frames.len())
-                            .map_err(|m| VMError::new(&m))?;
-                        self.ensure_registers(new_base + frame_size);
-
-                        for (i, arg) in args.iter().enumerate() {
-                            if i < arity {
-                                self.registers[new_base + i] = *arg;
-                            }
-                        }
-                        for i in args.len()..arity {
-                            self.registers[new_base + i] = Value::null();
-                        }
-
-                        let mut frame = CallFrame::new(r, new_base, frame_size);
-                        frame.argc = args.len();
-                        frame.entry_args = args;
-                        self.frames.push(frame);
+                        self.enter_closure(r, chunk.arity as usize, frame_size, &args)?;
                         let boundary = self.frames.len() - 1;
+                        self.frames[boundary].entry_args = args;
                         self.run_until(boundary)
                     }
                     ObjKind::NativeFunction(nf) => {
@@ -2415,21 +2582,20 @@ impl VM {
         ))
     }
 
-    /// The object a `catch e { }` block receives: `message`, the legacy
-    /// `type` and the stable `code` (shared with the interpreter through
-    /// `semantics::errors`).
+    /// The object a `catch e { }` block receives: `message` (without its
+    /// hint line), the legacy `type`, the stable `code` and the `hint`
+    /// (shared with the interpreter through `semantics::errors`).
     fn runtime_error_value(&mut self, err: &VMError) -> Value {
-        use crate::semantics::errors;
+        let caught = crate::semantics::errors::caught_error_fields(&err.message);
         let mut err_obj = IndexMap::new();
-        err_obj.insert("message".to_string(), self.alloc_string(&err.message));
-        err_obj.insert(
-            "type".to_string(),
-            self.alloc_string(errors::legacy_error_type(&err.message)),
-        );
-        err_obj.insert(
-            "code".to_string(),
-            self.alloc_string(errors::classify(&err.message).code),
-        );
+        err_obj.insert("message".to_string(), self.alloc_string(&caught.message));
+        err_obj.insert("type".to_string(), self.alloc_string(caught.error_type));
+        err_obj.insert("code".to_string(), self.alloc_string(caught.code));
+        let hint = match &caught.hint {
+            Some(h) => self.alloc_string(h),
+            None => Value::null(),
+        };
+        err_obj.insert("hint".to_string(), hint);
         let err_ref = self.gc.alloc(ObjKind::Object(err_obj));
         Value::obj(err_ref)
     }
@@ -2532,13 +2698,11 @@ impl VM {
                                 .collect();
                             crate::interpreter::Value::Tuple(converted)
                         }
-                        ObjKind::Set(items) => {
-                            let converted: Vec<crate::interpreter::Value> = items
-                                .iter()
-                                .map(|i| self.convert_to_interp_val(i))
-                                .collect();
-                            crate::interpreter::Value::Set(converted)
-                        }
+                        ObjKind::Set(items) => crate::interpreter::Value::Set(
+                            crate::interpreter::SetItems::from_values_unchecked(
+                                items.iter().map(|i| self.convert_to_interp_val(i)),
+                            ),
+                        ),
                         ObjKind::Map(pairs) => {
                             let converted: Vec<(
                                 crate::interpreter::Value,
@@ -2602,7 +2766,8 @@ impl VM {
             crate::interpreter::Value::Set(items) => {
                 let vm_items: Vec<Value> =
                     items.iter().map(|i| self.convert_interp_value(i)).collect();
-                let r = self.gc.alloc(ObjKind::Set(vm_items));
+                let set = VmSet::collect_unchecked(vm_items, &self.gc);
+                let r = self.gc.alloc(ObjKind::Set(set));
                 Value::obj(r)
             }
             crate::interpreter::Value::Map(pairs) => {
@@ -2806,9 +2971,13 @@ impl VM {
                 }
                 _ => return Err(VMError::new(&format!("no method '{}' on String", field))),
             },
-            ObjKind::Array(items) | ObjKind::Set(items) => match field {
+            ObjKind::Array(_) | ObjKind::Set(_) => match field {
                 "len" => {
-                    let len = items.len() as i64;
+                    let len = match &obj.kind {
+                        ObjKind::Set(items) => items.len(),
+                        ObjKind::Array(items) => items.len(),
+                        _ => 0,
+                    } as i64;
                     return Ok(Value::int(len, &mut self.gc));
                 }
                 _ => {
@@ -2864,6 +3033,14 @@ impl VM {
     }
 
     /// `crate::semantics::check_call_arity` for a closure called directly.
+    /// Whether `func` is one of [`PURE_BORROW_BUILTINS`].
+    fn is_pure_borrow_builtin(&self, func: Value) -> bool {
+        matches!(
+            func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind),
+            Some(ObjKind::NativeFunction(nf)) if PURE_BORROW_BUILTINS.contains(&nf.name.as_str())
+        )
+    }
+
     fn check_direct_call_arity(&self, func: Value, argc: usize) -> Result<(), VMError> {
         let kind = func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind);
         let Some(ObjKind::Closure(closure)) = kind else {
@@ -2883,7 +3060,8 @@ impl VM {
     fn collection_len(&self, src: Value) -> i64 {
         match src.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
             Some(ObjKind::String(s)) => s.chars().count() as i64,
-            Some(ObjKind::Array(a) | ObjKind::Tuple(a) | ObjKind::Set(a)) => a.len() as i64,
+            Some(ObjKind::Array(a) | ObjKind::Tuple(a)) => a.len() as i64,
+            Some(ObjKind::Set(a)) => a.len() as i64,
             Some(ObjKind::Object(o)) => o.len() as i64,
             Some(ObjKind::Map(p)) => p.len() as i64,
             _ => 0,
@@ -2987,7 +3165,7 @@ impl VM {
         Ok(Value::obj(self.gc.alloc(updated)))
     }
 
-    fn get_str_ref<'a>(&'a self, val: &Value) -> Option<&'a str> {
+    pub(super) fn get_str_ref<'a>(&'a self, val: &Value) -> Option<&'a str> {
         match val.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
             Some(ObjKind::String(s)) => Some(s.as_str()),
             _ => None,
@@ -3032,11 +3210,35 @@ impl VM {
             Outcome::Float(f) => Value::float(f),
             Outcome::Bool(b) => Value::bool_val(b),
             Outcome::Concat => {
-                let (l, r) = (left.display(&self.gc), right.display(&self.gc));
-                self.caps
-                    .check_string(l.len() + r.len())
-                    .map_err(|m| VMError::new(&m))?;
-                Value::obj(self.gc.alloc_string(l + &r))
+                // Build the result once, without copying string operands
+                // first. It is not interned: a computed string is rarely
+                // seen again, and interning it costs a hash, a table entry
+                // and a second copy (`"r" + str(i)` in a loop of 100k
+                // distinct values spent most of its time there).
+                let mut text = match self.get_str_ref(left) {
+                    Some(s) => {
+                        let mut t = String::with_capacity(s.len() + 16);
+                        t.push_str(s);
+                        t
+                    }
+                    None => left.display(&self.gc),
+                };
+                match self.get_str_ref(right) {
+                    Some(s) => {
+                        self.caps
+                            .check_string(text.len() + s.len())
+                            .map_err(|m| VMError::new(&m))?;
+                        text.push_str(s);
+                    }
+                    None => {
+                        let r = right.display(&self.gc);
+                        self.caps
+                            .check_string(text.len() + r.len())
+                            .map_err(|m| VMError::new(&m))?;
+                        text.push_str(&r);
+                    }
+                }
+                Value::obj(self.gc.alloc(ObjKind::String(text)))
             }
             Outcome::ArrayConcat => {
                 let items = self.concat_array_items(left, right)?;

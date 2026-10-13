@@ -1,0 +1,98 @@
+id = "text_stats_api"
+category = "servers"
+title = "Text statistics API with a batch endpoint"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18505. All responses have status 200 and a JSON body.
+
+Text statistics of a string: words are maximal runs of ASCII letters and apostrophes
+(`'`), compared in lower case (`Don't` and `don't` are the same word); a sentence is a
+maximal run of text that contains at least one letter and ends at `.`, `!` or `?` (or at
+the end of the text), so `Hi!! Ok` has two sentences. The statistics object is
+
+`{"words": <number of words>, "unique": <distinct words>, "sentences": <n>, "top": [<the 3 most frequent words as {"word", "count"}, most frequent first, ties by word ascending; fewer if there are fewer words>], "longest": <the longest word in lower case, the first one in the text on ties; null when there are no words>}`
+
+- `POST /analyze` with body `{"text": <string>}` returns the statistics of the text. If
+  `text` is missing or not a string, return `{"error": "text must be a string"}`.
+- `POST /analyze/batch` with body `{"texts": [<string>, ...]}` returns
+  `{"results": [<statistics of each text, in order>], "total_words": <sum of words>}`. If
+  `texts` is missing or not an array of strings, return
+  `{"error": "texts must be an array of strings"}`.
+
+The server runs until it is stopped.
+"""
+needs = ["net"]
+timeout = 20
+mode = "server"
+port = 18505
+expected_stdout = """
+STATUS 200
+{"longest": "the", "sentences": 4, "top": [{"count": 3, "word": "the"}, {"count": 2, "word": "cat"}, {"count": 1, "word": "did"}], "unique": 7, "words": 10}
+STATUS 200
+{"longest": "don't", "sentences": 3, "top": [{"count": 2, "word": "don't"}, {"count": 1, "word": "a"}, {"count": 1, "word": "is"}], "unique": 10, "words": 11}
+STATUS 200
+{"longest": null, "sentences": 0, "top": [], "unique": 0, "words": 0}
+STATUS 200
+{"longest": null, "sentences": 0, "top": [], "unique": 0, "words": 0}
+STATUS 200
+{"error": "text must be a string"}
+STATUS 200
+{"error": "text must be a string"}
+STATUS 200
+{"results": [{"longest": "a", "sentences": 1, "top": [{"count": 2, "word": "a"}, {"count": 1, "word": "b"}], "unique": 2, "words": 3}, {"longest": "alpha", "sentences": 2, "top": [{"count": 1, "word": "alpha"}, {"count": 1, "word": "beta"}, {"count": 1, "word": "gamma"}], "unique": 4, "words": 4}, {"longest": "b", "sentences": 1, "top": [{"count": 1, "word": "b"}], "unique": 1, "words": 1}], "total_words": 8}
+STATUS 200
+{"results": [], "total_words": 0}
+STATUS 200
+{"error": "texts must be an array of strings"}
+STATUS 200
+{"error": "texts must be an array of strings"}
+"""
+
+[[request]]
+method = "POST"
+path = "/analyze"
+body = '{"text": "The cat sat. The CAT ran! Did the dog? No."}'
+
+[[request]]
+method = "POST"
+path = "/analyze"
+body = "{\"text\": \"Don't stop; don\\u0027t quit!!  Rock-n-roll... 42 is not a word\"}"
+
+[[request]]
+method = "POST"
+path = "/analyze"
+body = '{"text": ""}'
+
+[[request]]
+method = "POST"
+path = "/analyze"
+body = '{"text": "...!? 123"}'
+
+[[request]]
+method = "POST"
+path = "/analyze"
+body = '{"txt": "typo"}'
+
+[[request]]
+method = "POST"
+path = "/analyze"
+body = '{"text": 17}'
+
+[[request]]
+method = "POST"
+path = "/analyze/batch"
+body = '{"texts": ["a b a", "Zeta alpha beta. Gamma", "b"]}'
+
+[[request]]
+method = "POST"
+path = "/analyze/batch"
+body = '{"texts": []}'
+
+[[request]]
+method = "POST"
+path = "/analyze/batch"
+body = '{"texts": ["ok", 3]}'
+
+[[request]]
+method = "POST"
+path = "/analyze/batch"
+body = '{"texts": "not a list"}'

@@ -266,6 +266,111 @@ pub fn fits(value: &Value, ty: &RuntimeType) -> bool {
     }
 }
 
+/// Int → Float widening of a value that fits `ty` ([`fits`]): every Int at a
+/// position `ty` declares `Float` becomes that Float (`3` checked against
+/// `Float` is `3.0`, `[1, 2]` against `[Float]` is `[1.0, 2.0]`), so code
+/// written against a declared `Float` never does integer arithmetic.
+/// `None` when nothing changes. A union keeps an Int that one of its
+/// members accepts as it is (`Int | Float`); otherwise the first member
+/// the value fits decides. Sets and map keys are left alone (widening
+/// could merge two elements).
+pub fn widen(value: &Value, ty: &RuntimeType) -> Option<Value> {
+    use RuntimeType as T;
+    if !mentions_float(ty) {
+        return None;
+    }
+    let _level = crate::runtime::recursion::enter_value_level()?;
+    let all = |items: &[Value], elem: &RuntimeType| -> Option<Vec<Value>> {
+        let changed: Vec<Option<Value>> = items.iter().map(|v| widen(v, elem)).collect();
+        if changed.iter().all(Option::is_none) {
+            return None;
+        }
+        Some(
+            items
+                .iter()
+                .zip(changed)
+                .map(|(v, w)| w.unwrap_or_else(|| v.clone()))
+                .collect(),
+        )
+    };
+    match (ty, value) {
+        (_, Value::Frozen(inner)) => widen(inner, ty).map(|v| Value::Frozen(Box::new(v))),
+        (T::Float, Value::Int(n)) => Some(Value::Float(*n as f64)),
+        (T::Array(elem), Value::Array(items)) => all(items, elem).map(Value::Array),
+        (T::Tuple(types), Value::Tuple(items)) if types.len() == items.len() => {
+            let changed: Vec<Option<Value>> =
+                items.iter().zip(types).map(|(v, t)| widen(v, t)).collect();
+            if changed.iter().all(Option::is_none) {
+                return None;
+            }
+            Some(Value::Tuple(
+                items
+                    .iter()
+                    .zip(changed)
+                    .map(|(v, w)| w.unwrap_or_else(|| v.clone()))
+                    .collect(),
+            ))
+        }
+        (T::Map(_, vt), Value::Map(pairs)) => {
+            let values: Vec<Value> = pairs.iter().map(|(_, v)| v.clone()).collect();
+            let widened = all(&values, vt)?;
+            Some(Value::Map(
+                pairs
+                    .iter()
+                    .zip(widened)
+                    .map(|((k, _), v)| (k.clone(), v))
+                    .collect(),
+            ))
+        }
+        (T::Result(ok, _), Value::ResultOk(v)) => {
+            widen(v, ok).map(|v| Value::ResultOk(Box::new(v)))
+        }
+        (T::Result(_, err), Value::ResultErr(v)) => {
+            widen(v, err).map(|v| Value::ResultErr(Box::new(v)))
+        }
+        (T::Option(_), Value::Null | Value::None) => None,
+        (T::Option(inner), Value::Some(v)) => widen(v, inner).map(|v| Value::Some(Box::new(v))),
+        (T::Option(inner), Value::Object(map)) if type_tag(map) == Some("Option") => {
+            let widened = widen(map.get("_0")?, inner)?;
+            let mut map = map.clone();
+            map.insert("_0".to_string(), widened);
+            Some(Value::Object(map))
+        }
+        (T::Option(inner), other) => widen(other, inner),
+        (T::Union(members), v) => {
+            if members.iter().any(|m| fits(v, m) && widen(v, m).is_none()) {
+                return None;
+            }
+            members
+                .iter()
+                .find(|m| fits(v, m))
+                .and_then(|m| widen(v, m))
+        }
+        _ => None,
+    }
+}
+
+/// Does `ty` declare `Float` anywhere a value can be widened?
+pub fn mentions_float(ty: &RuntimeType) -> bool {
+    use RuntimeType as T;
+    match ty {
+        T::Float => true,
+        T::Array(t) | T::Option(t) => mentions_float(t),
+        T::Map(_, v) => mentions_float(v),
+        T::Result(o, e) => mentions_float(o) || mentions_float(e),
+        T::Tuple(items) | T::Union(items) => items.iter().any(mentions_float),
+        T::Any
+        | T::Int
+        | T::String
+        | T::Bool
+        | T::Null
+        | T::Object
+        | T::Fn
+        | T::Set(_)
+        | T::Named(_) => false,
+    }
+}
+
 /// What one argument says about a generic type parameter at run time, in
 /// canonical notation: its outer type (`Int`, `Named:Point`, `[Any]`, ...).
 /// `None` when it says nothing (`Option` values, streams, tasks,

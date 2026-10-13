@@ -87,6 +87,8 @@ pub static GLOBALS: &[Builtin] = &[
     // Output
     variadic("print", 0),
     variadic("println", 0),
+    variadic("eprint", 0),
+    variadic("eprintln", 0),
     variadic("say", 0),
     variadic("yell", 0),
     variadic("whisper", 0),

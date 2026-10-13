@@ -1,0 +1,46 @@
+// Diff local and remote records, then push creates, updates and deletes.
+
+let base = input().trim()
+let local = http.get("{base}/local.json").json
+let remote = http.get("{base}/remote.json").json
+
+fn by_id(records) {
+    let mut out = {}
+    for r in records {
+        out[r.id] = r
+    }
+    return out
+}
+
+let l = by_id(local)
+let r = by_id(remote)
+let local_ids = sort(keys(l))
+let remote_ids = sort(keys(r))
+
+let creates = filter(local_ids, fn(id) { return !has_key(r, id) })
+let updates = filter(local_ids, fn(id) { return has_key(r, id) && l[id].version > r[id].version })
+let conflicts = filter(local_ids, fn(id) { return has_key(r, id) && l[id].version < r[id].version })
+let unchanged = filter(local_ids, fn(id) { return has_key(r, id) && l[id].version == r[id].version })
+let deletes = filter(remote_ids, fn(id) { return !has_key(l, id) })
+
+let mut echoes = []
+for id in creates {
+    let rec = l[id]
+    let body = { id: rec.id, version: rec.version, title: rec.title, tags: rec.tags }
+    echoes.push(http.post("{base}/echo", { body: body }).json)
+}
+for id in updates {
+    let rec = l[id]
+    let body = { version: rec.version, title: rec.title, tags: rec.tags }
+    echoes.push(http.put("{base}/echo", { params: { id: id }, body: body }).json)
+}
+for id in deletes {
+    echoes.push(http.delete("{base}/echo", { params: { id: id } }).json)
+}
+for e in echoes {
+    println("{e.method} query={json.compact(e.query)} body={json.compact(e.body)}")
+}
+for id in conflicts {
+    println("conflict {id}: local v{l[id].version} < remote v{r[id].version}")
+}
+println("created={len(creates)} updated={len(updates)} deleted={len(deletes)} conflicts={len(conflicts)} unchanged={len(unchanged)}")

@@ -1,0 +1,127 @@
+let PI = 3.141592653589793
+
+interface Shape {
+    fn area() -> Float
+    fn perimeter() -> Float
+    fn label() -> String
+}
+
+struct Circle {
+    r: Float,
+    text: String
+}
+
+struct Rect {
+    w: Float,
+    h: Float,
+    text: String
+}
+
+struct Triangle {
+    a: Float,
+    b: Float,
+    c: Float,
+    text: String
+}
+
+impl Shape for Circle {
+    fn area(it) -> Float {
+        return PI * it.r * it.r
+    }
+    fn perimeter(it) -> Float {
+        return 2.0 * PI * it.r
+    }
+    fn label(it) -> String {
+        return "circle r={it.text}"
+    }
+}
+
+impl Shape for Rect {
+    fn area(it) -> Float {
+        return it.w * it.h
+    }
+    fn perimeter(it) -> Float {
+        return 2.0 * (it.w + it.h)
+    }
+    fn label(it) -> String {
+        return "rect {it.text}"
+    }
+}
+
+impl Shape for Triangle {
+    fn area(it) -> Float {
+        let s = (it.a + it.b + it.c) / 2.0
+        return math.sqrt(s * (s - it.a) * (s - it.b) * (s - it.c))
+    }
+    fn perimeter(it) -> Float {
+        return it.a + it.b + it.c
+    }
+    fn label(it) -> String {
+        return "triangle {it.text}"
+    }
+}
+
+fn positive_number(s: String) -> Bool {
+    return regex.test(s, "^[0-9]+(\\.[0-9]+)?$") && float(s) > 0.0
+}
+
+// The shape described by a line, or null when the line is invalid.
+fn parse_shape(line: String) {
+    let p = split(line.trim(), " ")
+    let kind = p[0]
+    let raw = slice(p, 1, len(p))
+    let arity = get({ circle: 1, rect: 2, triangle: 3 }, kind, -1)
+    if arity < 0 || len(raw) != arity || !all(raw, fn(v) { return positive_number(v) }) {
+        return null
+    }
+    // float(...) so the fields really hold Floats (an Int stays an Int)
+    let v = map(raw, fn(x) { return float(x) })
+    if kind == "circle" {
+        return Circle { r: v[0], text: raw[0] }
+    }
+    if kind == "rect" {
+        return Rect { w: v[0], h: v[1], text: "{raw[0]}x{raw[1]}" }
+    }
+    if v[0] >= v[1] + v[2] || v[1] >= v[0] + v[2] || v[2] >= v[0] + v[1] {
+        return null
+    }
+    return Triangle { a: v[0], b: v[1], c: v[2], text: join(raw, "-") }
+}
+
+let mut shapes = []
+for e in enumerate(split(fs.read("/dev/stdin"), "\n")) {
+    if e.value.trim() == "" {
+        continue
+    }
+    let s = parse_shape(e.value)
+    if s == null {
+        println("line {e.index + 1}: invalid")
+    } else {
+        shapes.push(s)
+    }
+}
+
+let by_area = sort(shapes, fn(x, y) {
+    if x.area() > y.area() {
+        return -1
+    }
+    if x.area() < y.area() {
+        return 1
+    }
+    return 0
+})
+for s in by_area {
+    println("{s.label()}: area={to_fixed(s.area(), 2)} perimeter={to_fixed(s.perimeter(), 2)}")
+}
+let mut total = 0.0
+for s in shapes {
+    total += s.area()
+}
+println("total area={to_fixed(total, 2)}")
+let mut best = shapes[0]
+for s in shapes {
+    if s.perimeter() > best.perimeter() {
+        best = s
+    }
+}
+println("largest perimeter: {best.label()}")

@@ -31,7 +31,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use axum::http::StatusCode;
 use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
 
@@ -39,7 +38,9 @@ use super::gc::Gc;
 use super::machine::VM;
 use super::profiler::Profiler;
 use super::value::*;
-use crate::runtime::server::{handler_args, HandlerRequest, HandlerWorker, ServeEngine};
+use crate::runtime::server::{
+    handler_args, HandlerOutcome, HandlerRequest, HandlerWorker, ServeEngine,
+};
 
 /// A heap object of the template. `Value`s inside refer to template slots
 /// (`GcRef(slot)`), not to any live heap.
@@ -47,7 +48,9 @@ enum FrozenObj {
     String(String),
     Array(Vec<Value>),
     Tuple(Vec<Value>),
-    Set(Vec<Value>),
+    /// Items remapped to slots; the stored hashes are those of the live
+    /// set (they depend on content, not on object identity).
+    Set(VmSet),
     Object(IndexMap<String, Value>),
     Map(Vec<(Value, Value)>),
     Function(ObjFunction),
@@ -259,7 +262,7 @@ fn thaw(object: &FrozenObj, refs: &[GcRef]) -> ObjKind {
         FrozenObj::String(s) => ObjKind::String(s.clone()),
         FrozenObj::Array(items) => ObjKind::Array(r_all(items)),
         FrozenObj::Tuple(items) => ObjKind::Tuple(r_all(items)),
-        FrozenObj::Set(items) => ObjKind::Set(r_all(items)),
+        FrozenObj::Set(items) => ObjKind::Set(items.map_same_hash(r)),
         FrozenObj::Object(map) => {
             ObjKind::Object(map.iter().map(|(k, v)| (k.clone(), r(v))).collect())
         }
@@ -342,22 +345,16 @@ impl VmWorker {
 }
 
 impl HandlerWorker for VmWorker {
-    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> (StatusCode, JsonValue) {
+    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> HandlerOutcome {
         let _limits = crate::runtime::limits::scope(self.budget.clone());
         let Some(func) = self.vm.globals.get(handler).copied() else {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"error": format!("handler '{}' not found", handler)}),
-            );
+            return Err(format!("handler '{}' not found", handler));
         };
         let args = self.http_args(func, request);
-        match self.vm.call_value(func, args) {
-            Ok(value) => (StatusCode::OK, value_to_json(&self.vm.gc, value)),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"error": e.message}),
-            ),
-        }
+        self.vm
+            .call_value(func, args)
+            .map(|value| value_to_json(&self.vm.gc, value))
+            .map_err(|e| e.message)
     }
 
     fn call_ws(&mut self, handler: &str, text: String) -> String {
@@ -398,7 +395,7 @@ impl ConnectionWorker {
 }
 
 impl HandlerWorker for ConnectionWorker {
-    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> (StatusCode, JsonValue) {
+    fn call_http(&mut self, handler: &str, request: &HandlerRequest) -> HandlerOutcome {
         let result = self.0.call_http(handler, request);
         self.assert_sendable();
         result
@@ -630,7 +627,7 @@ impl<'a> Freezer<'a> {
             ObjKind::String(s) => FrozenObj::String(s.clone()),
             ObjKind::Array(items) => FrozenObj::Array(m_all(items)),
             ObjKind::Tuple(items) => FrozenObj::Tuple(m_all(items)),
-            ObjKind::Set(items) => FrozenObj::Set(m_all(items)),
+            ObjKind::Set(items) => FrozenObj::Set(items.map_same_hash(m)),
             ObjKind::Object(map) => {
                 FrozenObj::Object(map.iter().map(|(k, v)| (k.clone(), m(v))).collect())
             }

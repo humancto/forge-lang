@@ -1,0 +1,193 @@
+type Expr = Num(Int) | Var(String) | Add(Expr, Expr) | Mul(Expr, Expr) | Neg(Expr)
+
+struct Parsed {
+    expr: Expr,
+    pos: Int
+}
+
+fn parse_at(tokens: [String], pos: Int) -> Result<Parsed, String> {
+    if pos >= len(tokens) {
+        return Err("parse error")
+    }
+    let t = tokens[pos]
+    if regex.test(t, "^-?[0-9]+$") {
+        return Ok(Parsed { expr: Num(int(t)), pos: pos + 1 })
+    }
+    if regex.test(t, "^[a-z]+$") {
+        return Ok(Parsed { expr: Var(t), pos: pos + 1 })
+    }
+    if t != "(" || pos + 1 >= len(tokens) {
+        return Err("parse error")
+    }
+    let op = tokens[pos + 1]
+    let mut node = Num(0)
+    let mut next = 0
+    if op == "+" || op == "*" {
+        let a = parse_at(tokens, pos + 2)?
+        let b = parse_at(tokens, a.pos)?
+        if op == "+" {
+            node = Add(a.expr, b.expr)
+        } else {
+            node = Mul(a.expr, b.expr)
+        }
+        next = b.pos
+    } else if op == "-" {
+        let a = parse_at(tokens, pos + 2)?
+        node = Neg(a.expr)
+        next = a.pos
+    } else {
+        return Err("parse error")
+    }
+    if next >= len(tokens) || tokens[next] != ")" {
+        return Err("parse error")
+    }
+    return Ok(Parsed { expr: node, pos: next + 1 })
+}
+
+fn parse(src: String) -> Result<Expr, String> {
+    let tokens = regex.find_all(src, "\\(|\\)|[^\\s()]+")
+    let p = parse_at(tokens, 0)?
+    if p.pos != len(tokens) {
+        return Err("parse error")
+    }
+    return Ok(p.expr)
+}
+
+fn is_num(e: Expr, n: Int) -> Bool {
+    return match e {
+        Num(v) => v == n,
+        _ => false,
+    }
+}
+
+// The integer of a Num, or null for any other expression.
+fn num_value(e: Expr) {
+    return match e {
+        Num(v) => v,
+        _ => null,
+    }
+}
+
+fn simplify_add(a: Expr, b: Expr) -> Expr {
+    let x = num_value(a)
+    let y = num_value(b)
+    if x != null && y != null {
+        return Num(x + y)
+    }
+    if is_num(b, 0) {
+        return a
+    }
+    if is_num(a, 0) {
+        return b
+    }
+    return Add(a, b)
+}
+
+fn simplify_mul(a: Expr, b: Expr) -> Expr {
+    let x = num_value(a)
+    let y = num_value(b)
+    if x != null && y != null {
+        return Num(x * y)
+    }
+    if is_num(b, 1) {
+        return a
+    }
+    if is_num(a, 1) {
+        return b
+    }
+    if is_num(a, 0) || is_num(b, 0) {
+        return Num(0)
+    }
+    return Mul(a, b)
+}
+
+fn simplify(e: Expr) -> Expr {
+    return match e {
+        Neg(inner) => {
+            let a = simplify(inner)
+            match a {
+                Num(v) => Num(0 - v),
+                Neg(x) => x,
+                _ => Neg(a),
+            }
+        },
+        Add(l, r) => simplify_add(simplify(l), simplify(r)),
+        Mul(l, r) => simplify_mul(simplify(l), simplify(r)),
+        _ => e,
+    }
+}
+
+fn show(e: Expr) -> String {
+    return match e {
+        Num(v) => str(v),
+        Var(name) => name,
+        Neg(inner) => {
+            match inner {
+                Add(_, _) => "-({show(inner)})",
+                Mul(_, _) => "-({show(inner)})",
+                _ => "-{show(inner)}",
+            }
+        },
+        Add(l, r) => "{show(l)} + {show(r)}",
+        Mul(l, r) => "{factor(l)} * {factor(r)}",
+    }
+}
+
+fn factor(e: Expr) -> String {
+    return match e {
+        Add(_, _) => "({show(e)})",
+        _ => show(e),
+    }
+}
+
+fn evaluate(e: Expr, env: Map<String, Int>) -> Result<Int, String> {
+    return match e {
+        Num(v) => Ok(v),
+        Var(name) => {
+            if env.has(name) {
+                Ok(env.get(name))
+            } else {
+                Err("unbound {name}")
+            }
+        },
+        Neg(inner) => {
+            let v = evaluate(inner, env)?
+            Ok(0 - v)
+        },
+        Add(l, r) => {
+            let a = evaluate(l, env)?
+            let b = evaluate(r, env)?
+            Ok(a + b)
+        },
+        Mul(l, r) => {
+            let a = evaluate(l, env)?
+            let b = evaluate(r, env)?
+            Ok(a * b)
+        },
+    }
+}
+
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    let bar = index_of(line, "|")
+    let mut env: Map<String, Int> = map()
+    for pair in split(substring(line, 0, bar).trim(), ",") {
+        if pair.trim() != "" {
+            let kv = split(pair.trim(), "=")
+            env = env.set(kv[0], int(kv[1]))
+        }
+    }
+    match parse(substring(line, bar + 1, len(line))) {
+        Err(msg) => println(msg),
+        Ok(tree) => {
+            let e = simplify(tree)
+            let value = match evaluate(e, env) {
+                Ok(v) => str(v),
+                Err(msg) => msg,
+            }
+            println("{show(e)} => {value}")
+        },
+    }
+}

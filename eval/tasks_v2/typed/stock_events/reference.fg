@@ -1,0 +1,116 @@
+type Event = Received(String, Int) | Shipped(String, Int) | Adjusted(String, Int, String) | Audit(String)
+
+impl Event {
+    fn sku(it) -> String {
+        return match it {
+            Received(s, _) => s,
+            Shipped(s, _) => s,
+            Adjusted(s, _, _) => s,
+            Audit(s) => s,
+        }
+    }
+}
+
+fn quantity(text: String) -> Result<Int, String> {
+    if !regex.test(text, "^[0-9]+$") || int(text) == 0 {
+        return Err("bad quantity {text}")
+    }
+    return Ok(int(text))
+}
+
+fn delta(text: String) -> Result<Int, String> {
+    if !regex.test(text, "^[+-]?[0-9]+$") {
+        return Err("bad quantity {text}")
+    }
+    let d = int(replace(text, "+", ""))
+    if d == 0 {
+        return Err("bad quantity {text}")
+    }
+    return Ok(d)
+}
+
+fn parse_event(line: String) -> Result<Event, String> {
+    let p = split(line.trim(), " ")
+    let kind = p[0]
+    if kind == "recv" || kind == "ship" {
+        if len(p) != 3 {
+            return Err("wrong number of fields")
+        }
+        let q = quantity(p[2])?
+        if kind == "recv" {
+            return Ok(Received(p[1], q))
+        }
+        return Ok(Shipped(p[1], q))
+    }
+    if kind == "adjust" {
+        if len(p) < 4 {
+            return Err("wrong number of fields")
+        }
+        let d = delta(p[2])?
+        return Ok(Adjusted(p[1], d, join(slice(p, 3, len(p)), " ")))
+    }
+    if kind == "audit" {
+        if len(p) != 2 {
+            return Err("wrong number of fields")
+        }
+        return Ok(Audit(p[1]))
+    }
+    return Err("unknown event {kind}")
+}
+
+fn signed(n: Int) -> String {
+    if n > 0 {
+        return "+{n}"
+    }
+    return str(n)
+}
+
+let mut stock = {}
+let mut adjustments: [String] = []
+for e in enumerate(split(fs.read("/dev/stdin"), "\n")) {
+    let n = e.index + 1
+    if e.value.trim() == "" {
+        continue
+    }
+    match parse_event(e.value) {
+        Err(msg) => println("line {n}: parse error: {msg}"),
+        Ok(ev) => {
+            let sku = ev.sku()
+            let have = get(stock, sku, 0)
+            match ev {
+                Received(_, q) => {
+                    stock[sku] = have + q
+                },
+                Shipped(_, q) => {
+                    if q > have {
+                        println("line {n}: rejected: only {have} {sku} in stock")
+                    } else {
+                        stock[sku] = have - q
+                    }
+                },
+                Adjusted(_, d, reason) => {
+                    if have + d < 0 {
+                        println("line {n}: rejected: adjustment would make {sku} negative")
+                    } else {
+                        stock[sku] = have + d
+                        adjustments.push("{sku} {signed(d)} ({reason})")
+                    }
+                },
+                Audit(_) => println("audit {sku}: {have}"),
+            }
+        },
+    }
+}
+println("stock:")
+for sku in sort(keys(stock)) {
+    if stock[sku] != 0 {
+        println("  {sku} {stock[sku]}")
+    }
+}
+println("adjustments:")
+if len(adjustments) == 0 {
+    println("  none")
+}
+for a in adjustments {
+    println("  {a}")
+}

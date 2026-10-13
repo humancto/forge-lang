@@ -1,5 +1,6 @@
 mod builtins; // VM builtin dispatch — extracted from machine.rs
 pub mod bytecode;
+mod callback; // calling Forge functions back from native builtins (map, filter, ...)
 pub mod compiler;
 #[cfg(feature = "host")]
 pub(crate) mod embed; // compile / call helpers for the sandbox and `forge mcp`
@@ -24,17 +25,25 @@ use crate::parser::ast::Program;
 use machine::{VMError, VM};
 
 /// Execute an already-compiled program, optionally printing a profile.
+///
+/// This is the CLI's `forge run` path, which exits right after it returns,
+/// so the VM is deliberately not dropped: freeing a large heap object by
+/// object (every string, array and object map) only delays the exit, by
+/// about a tenth of the run for a program that builds 100k records. Nothing
+/// in the VM has a destructor with an effect outside the process. Embedders
+/// that keep running create and drop their own `VM`.
 pub fn run_chunk(chunk: &bytecode::Chunk, profile: bool) -> Result<(), VMError> {
     let mut vm = if profile {
         VM::with_profiling()
     } else {
         VM::new()
     };
-    vm.execute(chunk)?;
-    if profile {
+    let result = vm.execute(chunk);
+    if result.is_ok() && profile {
         vm.profiler.print_report();
     }
-    Ok(())
+    std::mem::forget(vm);
+    result.map(|_| ())
 }
 
 /// Compile and execute in REPL mode (returns the last value).
@@ -49,6 +58,10 @@ pub fn run_repl(vm: &mut VM, program: &Program) -> Result<value::Value, VMError>
 
 #[cfg(test)]
 mod async_tests;
+#[cfg(test)]
+mod callback_tests;
+#[cfg(test)]
+mod container_ops_tests;
 #[cfg(test)]
 mod enum_methods_tests;
 #[cfg(test)]

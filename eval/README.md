@@ -12,12 +12,15 @@ standard library.
 ```
 eval/
   forge_eval.py              the harness (validate, generate, score, compare, blind-pack, selftest)
-  tasks/<category>/<id>/
+  tasks/<category>/<id>/     tier v1: the original 103 tasks
     task.toml                prompt, input, expected output, capabilities
     reference.fg             idiomatic classic Forge (passes on both engines, both editions)
     reference.py             Python 3, standard library only
     files/                   optional: copied into the working directory before a run
     www/                     optional: served by the local HTTP fixture (http tasks)
+    input.txt                optional: a large stdin (`stdin_file`)
+  tasks_v2/<category>/<id>/  tier v2: 50 harder tasks, same layout (see "Tier v2" below)
+  V2_FINDINGS.md             Forge bugs and llms.txt gaps found while writing tier v2
   runs/                      generated runs and reports (git-ignored)
   packs/, answers/           blind packs and the answers to them (git-ignored)
 ```
@@ -43,6 +46,20 @@ Every command accepts `--tasks id1,id2`, `--category a,b`, `--jobs N` and `--for
 default forge binary is `$FORGE_BIN`, then `target/debug/forge`, then `target/release/forge`,
 then `forge` on `PATH`.
 
+`--tier v1|v2|all` selects the task set: `v1` is `eval/tasks`, `v2` is `eval/tasks_v2`.
+`validate` and `score` default to `all` (`score` takes the task list from the run's
+`meta.json`), `generate` and `blind-pack` to `v1`, so commands written before tier v2
+existed behave as they did. To measure tier v2:
+
+```bash
+python3 eval/forge_eval.py validate --tier v2
+python3 eval/forge_eval.py generate --tier v2 --provider anthropic --lang forge --context llms \
+    --out eval/runs/sonnet-v2
+python3 eval/forge_eval.py score eval/runs/sonnet-v2                  # VM, edition 2026
+python3 eval/forge_eval.py score eval/runs/sonnet-v2 --edition 2027 --report-name report-2027
+python3 eval/forge_eval.py blind-pack --tier v2 --context llms --per-pack 10 --shuffle 1
+```
+
 ## Commands
 
 ### `validate`
@@ -50,9 +67,13 @@ then `forge` on `PATH`.
 This command runs every reference solution and compares its output with `expected_stdout`:
 
 - Forge runs on the VM and on the interpreter, in edition 2026 and edition 2027 (four runs).
-  `--quick` runs two of them: the VM in 2026 and the interpreter in 2027.
+  `--quick` runs two of them: the VM in 2026 and the interpreter in 2027. A task pinned to
+  editions (`editions = ["2027"]`) runs only in those: both engines, or with `--quick` the
+  VM in its first and the interpreter in its last edition.
 - `forge --edition 2027 check` must report no diagnostics, not even warnings, because 2027
-  turns mismatches against declared types into errors.
+  turns mismatches against declared types into errors (a task pinned to 2026 is checked in
+  2026). The reference is checked as `main.fg` next to a copy of the task's `files/`, so the
+  modules it imports are visible.
 - The Python reference also runs, unless you pass `--no-python`.
 - The schema of each `task.toml` is checked. The built-in TOML parser (used on Python < 3.11)
   must agree with `tomllib`.
@@ -106,10 +127,12 @@ and the solution saved as `main.fg` or `main.py`. Forge runs as:
 ```
 forge [--interp] [--edition E] --sandbox --error-format json --max-time T
       [--allow-read=<dir>] [--allow-write=<dir>] [--allow-net=127.0.0.1,localhost]
-      [--allow-env] [--allow-run] run main.fg
+      [--allow-env] [--allow-run] [--allow-db] run main.fg
 ```
 
-Only the grants named in the task's `needs` are passed. Python runs as `python3 main.py`
+Only the grants named in the task's `needs` are passed. Tasks pinned to other editions than
+the one being scored are left out of the report and listed as not scored (`skipped` in
+`report.json`); in a Forge prompt, a task pinned to one edition says which edition runs it. Python runs as `python3 main.py`
 with a timeout and no sandbox. `score` writes `report.json`, which is machine-readable and
 holds every task's result, stdout, stderr and diff, and `report.md`.
 
@@ -143,8 +166,12 @@ python3 eval/forge_eval.py score eval/runs/blind-none
 
 `selftest` scores known-bad programs (a syntax error, an undefined name, an index out of
 bounds, an infinite loop, a wrong output and a missing solution) and checks that each one is
-classified correctly. It also checks answer parsing, code extraction and the TOML parser. CI
-and `cargo test --test eval_tasks` run it.
+classified correctly. It also checks answer parsing, code extraction and the TOML parser,
+and, with throwaway tasks, the tier-v2 harness features: tier loading, edition pinning,
+`[[case]]` runs with exit codes and `stdin_file`, the server runner (a Forge and a Python
+server, `status_only`, request headers, a server that exits early) and the fixture's
+per-run `flaky/`, `auth/` and `headers` routes and `{closed_url}`. CI and
+`cargo test --test eval_tasks` run it.
 
 ## Metrics
 
@@ -178,9 +205,11 @@ tolerance).
 
 ## Adding a task
 
-1. Create `eval/tasks/<category>/<id>/`. The `id` must equal the directory name and be
-   unique. The category is one of `basics`, `strings`, `collections`, `structs_adts`,
-   `errors`, `json_csv`, `functional`, `algorithms`, `concurrency`, `http`, `files`.
+1. Create `eval/tasks/<category>/<id>/` (tier v1) or `eval/tasks_v2/<category>/<id>/`
+   (tier v2). The `id` must equal the directory name and be unique across both tiers. The
+   v1 categories are `basics`, `strings`, `collections`, `structs_adts`, `errors`,
+   `json_csv`, `functional`, `algorithms`, `concurrency`, `http`, `files`; the v2 ones are
+   `servers`, `http_client`, `multifile`, `parallel`, `error_handling`, `typed`, `data`.
 2. Write `task.toml`:
 
    ```toml
@@ -190,13 +219,23 @@ tolerance).
    prompt = """
    Read all of standard input as text. ... Print the 5 most frequent words as `<word> <count>` ...
    """
-   stdin = """..."""            # optional
-   needs = []                   # any of "read", "write", "net", "env", "run"
+   stdin = """..."""            # optional; or stdin_file = "input.txt" (in the task dir)
+   needs = []                   # any of "read", "write", "net", "env", "run", "db"
    timeout = 10                 # seconds (default 10)
+   timed = true                 # optional (default: true in `parallel`): the time limit proves
+                                # overlap, so the run goes alone, after the others
    expected_stdout = """..."""
+   # optional: exit_code = 1    (the status the program must exit with; default 0)
+   # optional: editions = ["2027"]  (scored and validated only in these editions)
    # optional: output_files = ["report.txt"]  (appended as "--- report.txt ---\n<content>")
    # optional: sort_lines = true, float_tolerance = 1e-6, trim = false
    ```
+
+   To run the program several times with different inputs, replace `stdin`/`stdin_file`,
+   `expected_stdout` and `exit_code` with `[[case]]` tables, each with an optional `name`,
+   `stdin` or `stdin_file`, `expected_stdout` and `exit_code`. The task passes when every
+   case prints its output and exits with its status; reports show each case's output under
+   `=== case <name> (exit <status>)`.
 
    Write the prompt the way a user would ask, without naming a language. Spell out the exact
    output format, including decimals, separators and tie-breaking. Programs get their input
@@ -221,12 +260,58 @@ order. A task that fails on Forge for a model shows something to fix.
   `echo` (any method, which returns `{method, path, query, body, content_type}`) and
   `status/<code>`. The Forge HTTP client needs `FORGE_HTTP_ALLOW_PRIVATE=1` for loopback,
   and the harness sets it.
+- Per run, `{base_url}` carries a fresh run token (`/t/<task id>~r<n>`), so state the
+  fixture keeps per run never leaks between runs. More routes: `flaky/<n>/<key>` answers
+  503 `{"error": "unavailable", "attempt": k}` to the first n requests of the run for that
+  key, then 200 `{"key", "attempt"}`; `auth/<file>` serves a `www/` file only with the
+  header `Authorization: Bearer eval-token-7f3a`, else 401 `{"error": "unauthorized"}`;
+  `headers` answers with the request's `x-*`, `accept` and `authorization` headers.
+  `{closed_url}` is replaced with `http://127.0.0.1:<port>` where nothing listens
+  (connection refused).
 - **Server tasks** set `mode = "server"` and list `[[request]]` tables (`method`, `path`,
-  optional `body`). The harness starts the program, waits for the port, sends the requests,
-  and compares the transcript `STATUS <code>` plus the canonical JSON body with
-  `expected_stdout`. Forge's `@server(port: ...)` needs a literal port, so a server task
-  names a fixed `port` in its prompt and in `port = ...`. Runs that share a port are
-  serialised within one harness process.
+  optional `body`, optional `headers` table, optional `status_only = true`). The harness
+  starts the program, waits for the port, sends the requests, and compares the transcript
+  `STATUS <code>` plus the canonical JSON body (only the status line with `status_only`)
+  with `expected_stdout`. Forge's `@server(port: ...)` needs a literal port, so a server
+  task names a fixed `port` in its prompt and in `port = ...` (tier v1 uses 18471, tier v2
+  18501-18510). Runs that share a port are serialised within one harness process. The
+  server's output goes to files, so a server that logs every request cannot block.
+
+## Tier v2
+
+Tier v1 is saturated: blind solvers score 100% on both editions. Tier v2 has 50 harder
+tasks (each still one file of roughly 40-150 lines) aimed at what trips models and matters
+in production:
+
+| Category | Tasks | What it exercises |
+|---|---:|---|
+| `servers` | 10 | `@server`/`@get`/`@post`/`@put`/`@delete` JSON APIs: path and query parameters, body validation, state that must survive requests (a JSON file, SQLite), data loaded at start-up |
+| `http_client` | 6 | pagination, retrying 5xx but not 4xx, bearer tokens and headers, POST/PUT/DELETE with bodies and query parameters, refused connections and invalid JSON, URL encoding |
+| `multifile` | 6 | `main.fg` imports modules the task provides in `files/` (their source is in the prompt): structs with methods, a library importing a sibling, a `forge_modules` package, two modules exporting the same names, module state |
+| `parallel` | 6 | `spawn`/`await`, `squad`, bounded channels, `select` with an idle timeout, a shared deadline, isolating failures, map-reduce; the time limits only pass when the work really overlaps |
+| `error_handling` | 6 | Result and `?`, `try`/`catch`, exit statuses (`[[case]]` runs with `exit_code`), precise error messages |
+| `typed` | 6 | edition 2027 only (`editions = ["2027"]`): interfaces, algebraic types and `match`, generic structs, typed JSON decoding, a recursive expression type |
+| `data` | 10 | quoted CSV with embedded newlines, nested JSON reshaping, ISO timestamps with offsets, business days, logfmt, joins with rounding rules, and 20,000-100,000-line inputs where quadratic code times out |
+
+Design rules:
+
+- Prompts stay language-neutral where they can. `multifile` and `typed` prompts are
+  Forge-shaped (they show Forge modules or ask for declared types), so the Python
+  references there only produce the expected output; compare Python pass rates on the
+  other categories.
+- Forge handlers can only answer status 200 (or 500 when the handler raises), so server
+  prompts report errors in the JSON body; unknown routes and methods are checked with
+  `status_only` requests. See `V2_FINDINGS.md`.
+- Concurrency tasks never depend on scheduling order: results are printed in input order
+  or per producer, and the references return values from tasks or use channels instead of
+  mutating captured state. Time limits leave large margins (a sequential solution takes
+  at least twice the limit; the concurrent one about half of it).
+- Rounding is specified exactly ("halves rounded up", integer arithmetic in the
+  references), so Python and Forge agree.
+
+Writing the references surfaced the Forge bugs, performance cliffs and `llms.txt` gaps
+listed in [`V2_FINDINGS.md`](V2_FINDINGS.md); where a reference avoids one of them, a
+comment in it says so.
 
 ## Notes
 

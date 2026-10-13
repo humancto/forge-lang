@@ -1,0 +1,55 @@
+// csv.parse / csv.read follow RFC 4180 and never lose information
+// (V2 finding 6). One implementation (src/stdlib/csv.rs) for both engines.
+
+@test
+fn quoted_fields_keep_commas_quotes_and_line_breaks() {
+    let text = "name,qty,note,zip\n\"Smith, J\",3,\"said \"\"hi\"\"\",02134\nBob,x,\"multi\nline\",00501\n"
+    let rows = csv.parse(text)
+    assert_eq(len(rows), 2)
+    assert_eq(rows[0].name, "Smith, J")
+    assert_eq(rows[0].qty, 3)
+    assert_eq(rows[0].note, "said \"hi\"")
+    assert_eq(rows[0].zip, "02134")
+    assert_eq(rows[1].qty, "x")
+    assert_eq(rows[1].note, "multi\nline")
+    assert_eq(rows[1].zip, "00501")
+}
+
+@test
+fn crlf_records_and_untrimmed_quoted_text() {
+    let rows = csv.parse("a,b\r\n\"  Ann  \", 7 \r\n")
+    assert_eq(rows[0].a, "  Ann  ")
+    assert_eq(rows[0].b, 7)
+}
+
+@test
+fn only_plain_numbers_and_booleans_are_converted() {
+    let rows = csv.parse("a,b,c,d,e,f,g\n42,-1.5,true,+1,1e5,007,\"12\"\n")
+    let r = rows[0]
+    assert_eq(typeof(r.a), "Int")
+    assert_eq(typeof(r.b), "Float")
+    assert_eq(r.c, true)
+    assert_eq(r.d, "+1")
+    assert_eq(r.e, "1e5")
+    assert_eq(r.f, "007")
+    assert_eq(r.g, "12")
+}
+
+@test
+fn options_turn_off_headers_and_types() {
+    let rows = csv.parse("x,1\ny,2\n", { header: false, types: false })
+    assert_eq(rows, [["x", "1"], ["y", "2"]])
+    let typed = csv.parse("x,1\n", { header: false })
+    assert_eq(typed, [["x", 1]])
+}
+
+@test
+fn unterminated_quotes_are_errors() {
+    assert_throws(fn() { csv.parse("a\n\"open\n") })
+}
+
+@test
+fn stringify_then_parse_round_trips() {
+    let rows = [{ id: "007", note: "a, \"b\"\nc", n: 5 }]
+    assert_eq(csv.parse(csv.stringify(rows)), rows)
+}

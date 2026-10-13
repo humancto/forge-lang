@@ -5,7 +5,8 @@ use std::io::{self, Write};
 
 const MAGIC: &[u8; 4] = b"FGC\0";
 const VERSION_MAJOR: u8 = 1;
-const VERSION_MINOR: u8 = 4;
+/// 5: in-place local opcodes (`UpdateSetLocal`, `GetIndexLocal` .. `CallPure`).
+const VERSION_MINOR: u8 = 5;
 
 #[derive(Debug)]
 pub struct SerializeError {

@@ -1,7 +1,8 @@
 use crate::interpreter::Value;
 use indexmap::IndexMap;
 use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+
+use super::db_share::Handle;
 
 pub fn create_module() -> Value {
     let mut m = IndexMap::new();
@@ -28,18 +29,98 @@ pub fn create_module() -> Value {
     Value::Object(m)
 }
 
-thread_local! {
-    static DB_CONN: std::cell::RefCell<Option<Arc<Mutex<Connection>>>> = const { std::cell::RefCell::new(None) };
-    /// Open-file slot (`runtime::limits`) of the open connection.
-    static DB_SLOT: std::cell::RefCell<Option<crate::runtime::limits::Slot>> = const { std::cell::RefCell::new(None) };
+/// A SQLite connection shared by the program's threads (`db_share`).
+pub struct Sqlite {
+    conn: Connection,
+    /// `db.last_insert_rowid()` per transaction owner: concurrent requests
+    /// share the connection, whose own last rowid is whichever INSERT ran
+    /// last. Entries go away when their owner releases the connection.
+    rowids: std::collections::HashMap<u64, i64>,
 }
 
-fn get_conn() -> Result<Arc<Mutex<Connection>>, String> {
-    DB_CONN.with(|c| {
-        c.borrow()
-            .clone()
-            .ok_or_else(|| "no database connection open (call db.open() first)".to_string())
-    })
+thread_local! {
+    /// The connection current on this thread (shared with the program's
+    /// other threads, see `db_share`).
+    static DB_CONN: std::cell::RefCell<Option<Handle<Sqlite>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The connection current on this thread.
+pub(crate) fn current_handle() -> Option<Handle<Sqlite>> {
+    DB_CONN.with(|c| c.borrow().clone())
+}
+
+/// Make `handle` current on this thread; returns the previous one.
+pub(crate) fn replace_handle(handle: Option<Handle<Sqlite>>) -> Option<Handle<Sqlite>> {
+    DB_CONN.with(|c| std::mem::replace(&mut *c.borrow_mut(), handle))
+}
+
+/// `handle`'s owner is done: roll back the transaction it left open.
+pub(crate) fn release(handle: &Handle<Sqlite>) {
+    let owner = handle.owner;
+    handle.release(|db, tx_open| {
+        if tx_open {
+            let _ = db.conn.execute_batch("ROLLBACK");
+        }
+        db.rowids.remove(&owner);
+    });
+}
+
+fn current_or_err() -> Result<Handle<Sqlite>, String> {
+    current_handle().ok_or_else(|| "no database connection open (call db.open() first)".to_string())
+}
+
+/// Whether `sql` starts with INSERT or REPLACE (after blanks and comments).
+fn starts_insert(sql: &str) -> bool {
+    let mut rest = sql.trim_start();
+    loop {
+        if let Some(r) = rest.strip_prefix("--") {
+            rest = r
+                .split_once('\n')
+                .map(|(_, r)| r)
+                .unwrap_or("")
+                .trim_start();
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            rest = r
+                .split_once("*/")
+                .map(|(_, r)| r)
+                .unwrap_or("")
+                .trim_start();
+        } else {
+            break;
+        }
+    }
+    let word: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    word == "INSERT" || word == "REPLACE"
+}
+
+/// Run `op` on the current connection. The connection's transaction owner
+/// follows SQLite's own state, so `db.begin()` and `BEGIN` in SQL both
+/// make the transaction private to this thread's owner (`db_share`). An
+/// INSERT `sql` records its rowid for this owner.
+fn with_conn<R>(
+    sql: Option<&str>,
+    op: impl FnOnce(&Connection) -> Result<R, String>,
+) -> Result<R, String> {
+    let handle = current_or_err()?;
+    let owner = handle.owner;
+    handle.run(
+        |db| {
+            let before = (db.conn.last_insert_rowid(), db.conn.total_changes());
+            let result = op(&db.conn);
+            let after = (db.conn.last_insert_rowid(), db.conn.total_changes());
+            let inserted =
+                after.1 != before.1 && (after.0 != before.0 || sql.is_some_and(starts_insert));
+            if result.is_ok() && inserted {
+                db.rowids.insert(owner, after.0);
+            }
+            result
+        },
+        |db, _, _| !db.conn.is_autocommit(),
+    )?
 }
 
 /// Convert a Vec<Value> into rusqlite params
@@ -129,8 +210,12 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
     match name {
         "db.open" => match args.first() {
             Some(Value::String(path)) => {
-                // Reopening replaces the connection: give its slot back first.
-                DB_SLOT.with(|cell| *cell.borrow_mut() = None);
+                // Reopening replaces this thread's connection: close it
+                // first (other threads keep theirs), which gives its slot
+                // back unless another thread still uses it.
+                if let Some(old) = replace_handle(None) {
+                    release(&old);
+                }
                 let file =
                     crate::runtime::limits::acquire(crate::runtime::limits::Resource::Files)?;
                 let conn = if path == ":memory:" {
@@ -159,12 +244,12 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                     Ok(c)
                 });
                 match conn {
-                    Ok(c) => {
-                        let arc = Arc::new(Mutex::new(c));
-                        DB_CONN.with(|cell| {
-                            *cell.borrow_mut() = Some(arc);
-                        });
-                        DB_SLOT.with(|cell| *cell.borrow_mut() = Some(file));
+                    Ok(conn) => {
+                        let db = Sqlite {
+                            conn,
+                            rowids: std::collections::HashMap::new(),
+                        };
+                        replace_handle(Some(Handle::open(db, file)));
                         Ok(Value::Bool(true))
                     }
                     Err(e) => Err(format!("db.open error: {}", e)),
@@ -174,9 +259,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         },
 
         "db.execute" => match args.first() {
-            Some(Value::String(sql)) => {
-                let conn = get_conn()?;
-                let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
+            Some(Value::String(sql)) => with_conn(Some(sql), |c| {
                 // Check for optional params array as second argument
                 if let Some(Value::Array(params)) = args.get(1) {
                     let sql_params = value_to_sql_params(params);
@@ -190,62 +273,60 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         .map(|_| Value::Null)
                         .map_err(|e| format!("db.execute error: {}", e))
                 }
-            }
+            }),
             _ => Err("db.execute() requires a SQL string".to_string()),
         },
 
         "db.query" => match args.first() {
-            Some(Value::String(sql)) => {
-                let conn = get_conn()?;
-                let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
+            Some(Value::String(sql)) => with_conn(Some(sql), |c| {
                 // Check for optional params array as second argument
                 let params = if let Some(Value::Array(p)) = args.get(1) {
                     value_to_sql_params(p)
                 } else {
                     vec![]
                 };
-                query_rows(&c, sql, &params)
-            }
+                query_rows(c, sql, &params)
+            }),
             _ => Err("db.query() requires a SQL string".to_string()),
         },
 
         "db.close" => {
-            DB_CONN.with(|cell| {
-                *cell.borrow_mut() = None;
-            });
-            DB_SLOT.with(|cell| *cell.borrow_mut() = None);
+            // Closes this thread's connection; a transaction it left open
+            // is rolled back. Other threads keep using a shared connection.
+            if let Some(old) = replace_handle(None) {
+                release(&old);
+            }
             Ok(Value::Null)
         }
 
+        // The rowid of this thread's (request's) last INSERT, not of
+        // whichever request inserted last on the shared connection.
         "db.last_insert_rowid" => {
-            let conn = get_conn()?;
-            let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
-            Ok(Value::Int(c.last_insert_rowid()))
+            let handle = current_or_err()?;
+            let owner = handle.owner;
+            handle.run(
+                |db| Value::Int(db.rowids.get(&owner).copied().unwrap_or(0)),
+                |db, _, _| !db.conn.is_autocommit(),
+            )
         }
 
-        "db.begin" => {
-            let conn = get_conn()?;
-            let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
+        "db.begin" => with_conn(None, |c| {
             c.execute_batch("BEGIN")
                 .map(|_| Value::Null)
                 .map_err(|e| format!("db.begin error: {}", e))
-        }
+        }),
 
-        "db.commit" => {
-            let conn = get_conn()?;
-            let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
+        "db.commit" => with_conn(None, |c| {
             c.execute_batch("COMMIT")
                 .map(|_| Value::Null)
                 .map_err(|e| format!("db.commit error: {}", e))
-        }
+        }),
 
-        "db.rollback" => {
-            let conn = get_conn()?;
-            let c = conn.lock().map_err(|e| format!("lock error: {}", e))?;
+        "db.rollback" => with_conn(None, |c| {
             c.execute_batch("ROLLBACK")
                 .map(|_| Value::Null)
                 .map_err(|e| format!("db.rollback error: {}", e))
-        }
+        }),
 
         _ => Err(format!("unknown db function: {}", name)),
     }

@@ -24,6 +24,12 @@ pub const DEFAULT_DOWNLOAD_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 /// Default ceiling on HTML body size for crawl (bytes).
 pub const DEFAULT_CRAWL_MAX_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
 
+/// Default request timeout of `http.*`, `fetch` and `http.crawl`.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default timeout of `http.download`.
+pub const DEFAULT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// A URL that has passed Forge's scheme/host/private-address checks, plus an
 /// optional pinned `(host, socket_addr)` tuple for use with `reqwest`'s
 /// `.resolve()` builder. Pinning short-circuits reqwest's own DNS lookup so
@@ -127,10 +133,74 @@ pub fn validate_url_full_with(raw: &str, deny_private: bool) -> Result<Validated
 
 fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
     use std::net::ToSocketAddrs;
-    let iter = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("dns resolution failed for '{}': {}", host, e))?;
+    let iter = (host, port).to_socket_addrs().map_err(|e| {
+        crate::semantics::net::connect_failed(
+            crate::semantics::net::Failure::UnknownHost,
+            host,
+            &e.to_string(),
+        )
+    })?;
     Ok(iter.collect())
+}
+
+/// `host:port` of a request target, for error messages (never the full
+/// URL: its query string can carry credentials).
+pub fn target_of(url: &url::Url) -> String {
+    let host = url.host_str().unwrap_or("");
+    match url.port_or_known_default() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host.to_string(),
+    }
+}
+
+/// The message for a request that failed before (or while) its response
+/// arrived: a timeout (E0036) or a connection that could not be made
+/// (E0037) get the shared wording of `semantics::net`; anything else
+/// (a rejected redirect, a protocol error) keeps reqwest's text after
+/// `request failed: `.
+pub fn describe_request_error(e: &reqwest::Error, timeout: Duration, url: &url::Url) -> String {
+    use crate::semantics::net::{self, Failure};
+    use std::error::Error as _;
+    if e.is_timeout() {
+        return net::timed_out(timeout, &target_of(url));
+    }
+    if !e.is_connect() {
+        return format!("request failed: {}", e);
+    }
+    let mut kind = Failure::Connect;
+    let mut detail = String::new();
+    let mut source = e.source();
+    while let Some(s) = source {
+        if s.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+        {
+            kind = Failure::Refused;
+        }
+        let text = s.to_string();
+        let lower = text.to_ascii_lowercase();
+        if kind == Failure::Connect {
+            if lower.contains("dns error")
+                || lower.contains("failed to lookup address")
+                || lower.contains("name or service not known")
+                || lower.contains("nodename nor servname")
+                || lower.contains("no such host")
+            {
+                kind = Failure::UnknownHost;
+            } else if lower.contains("certificate")
+                || lower.contains("tls")
+                || lower.contains("ssl")
+                || lower.contains("handshake")
+            {
+                kind = Failure::Tls;
+            }
+        }
+        detail = text;
+        source = s.source();
+    }
+    match kind {
+        Failure::UnknownHost => net::connect_failed(kind, url.host_str().unwrap_or(""), &detail),
+        _ => net::connect_failed(kind, &target_of(url), &detail),
+    }
 }
 
 fn ip_is_private(ip: &std::net::IpAddr) -> bool {
@@ -254,7 +324,14 @@ pub fn inject_trace_context(
 
 /// Stream a response body up to `max_bytes` then abort. Pre-checks
 /// `Content-Length` for fast-fail when the server advertises an oversized body.
-pub async fn read_body_capped(resp: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, String> {
+/// `timeout` and `url` only word a timeout that strikes while the body is
+/// read (see [`describe_request_error`]).
+pub async fn read_body_capped(
+    resp: reqwest::Response,
+    max_bytes: u64,
+    timeout: Duration,
+    url: &url::Url,
+) -> Result<Vec<u8>, String> {
     if let Some(len) = resp.content_length() {
         if len > max_bytes {
             return Err(format!(
@@ -267,7 +344,13 @@ pub async fn read_body_capped(resp: reqwest::Response, max_bytes: u64) -> Result
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("body read error: {}", e))?;
+        let chunk = chunk.map_err(|e| {
+            if e.is_timeout() {
+                describe_request_error(&e, timeout, url)
+            } else {
+                format!("body read error: {}", e)
+            }
+        })?;
         if buf.len() as u64 + chunk.len() as u64 > max_bytes {
             return Err(format!("response body exceeded cap of {} bytes", max_bytes));
         }
@@ -283,7 +366,7 @@ pub async fn fetch(
     method: &str,
     body: Option<String>,
     headers: Option<&HashMap<String, String>>,
-    timeout_secs: Option<u64>,
+    timeout: Option<Duration>,
     max_redirects: Option<usize>,
     max_bytes: Option<u64>,
 ) -> Result<Value, String> {
@@ -295,7 +378,7 @@ pub async fn fetch(
         method,
         body,
         headers,
-        timeout_secs,
+        timeout,
         max_redirects,
         max_bytes,
         &span,
@@ -311,12 +394,12 @@ async fn fetch_validated(
     method: &str,
     body: Option<String>,
     headers: Option<&HashMap<String, String>>,
-    timeout_secs: Option<u64>,
+    timeout: Option<Duration>,
     max_redirects: Option<usize>,
     max_bytes: Option<u64>,
     span: &tracing::Span,
 ) -> Result<Value, String> {
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(30));
+    let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
     let redirects = max_redirects.unwrap_or(DEFAULT_MAX_REDIRECTS);
     let cap = max_bytes.unwrap_or(DEFAULT_FETCH_MAX_BYTES);
     let client = build_client(timeout, redirects, validated.pinned.clone())?;
@@ -355,7 +438,7 @@ async fn fetch_validated(
     let resp = req
         .send()
         .await
-        .map_err(|e| format!("request failed: {}", e))?;
+        .map_err(|e| describe_request_error(&e, timeout, &validated.url))?;
 
     let status = resp.status().as_u16();
     let ok = resp.status().is_success();
@@ -372,7 +455,7 @@ async fn fetch_validated(
         })
         .collect();
 
-    let body_bytes = read_body_capped(resp, cap).await?;
+    let body_bytes = read_body_capped(resp, cap, timeout, &validated.url).await?;
     let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
 
     // Build response object
@@ -399,7 +482,7 @@ pub fn fetch_blocking(
     method: &str,
     body: Option<String>,
     headers: Option<&HashMap<String, String>>,
-    timeout_secs: Option<u64>,
+    timeout: Option<Duration>,
     max_redirects: Option<usize>,
     max_bytes: Option<u64>,
 ) -> Result<Value, String> {
@@ -423,7 +506,7 @@ pub fn fetch_blocking(
                     &method,
                     body,
                     headers.as_ref(),
-                    timeout_secs,
+                    timeout,
                     max_redirects,
                     max_bytes,
                 ))
@@ -437,7 +520,7 @@ pub fn fetch_blocking(
                 method,
                 body,
                 headers,
-                timeout_secs,
+                timeout,
                 max_redirects,
                 max_bytes,
             ))

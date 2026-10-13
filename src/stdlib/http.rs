@@ -28,6 +28,12 @@ pub fn create_module() -> Value {
         "pretty".to_string(),
         Value::BuiltIn("http.pretty".to_string()),
     );
+    // Server side: a handler's response with its own status, headers and
+    // body (`runtime::http_response`).
+    m.insert(
+        "response".to_string(),
+        Value::BuiltIn("http.response".to_string()),
+    );
     Value::Object(m)
 }
 
@@ -41,6 +47,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
         "http.head" => do_request("HEAD", &args),
         "http.download" => do_download(&args),
         "http.crawl" => do_crawl(&args),
+        "http.response" => crate::runtime::http_response::make_response(&args),
         "http.pretty" => match args.first() {
             Some(Value::Object(resp)) => {
                 let status = resp
@@ -112,7 +119,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
 
     let mut headers_map = std::collections::HashMap::new();
     let mut body_str = None;
-    let mut timeout_secs: Option<u64> = None;
+    let mut timeout: Option<std::time::Duration> = None;
     let mut max_redirects: Option<usize> = None;
     let mut max_bytes: Option<u64> = None;
     let mut final_url = url.clone();
@@ -210,9 +217,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
                 headers_map.insert("Content-Type".to_string(), content_type.to_string());
             }
         }
-        if let Some(Value::Int(t)) = opt_map.get("timeout") {
-            timeout_secs = Some(*t as u64);
-        }
+        timeout = timeout_option(&format!("http.{}", method.to_lowercase()), opt_map)?;
         if let Some(Value::Int(r)) = opt_map.get("max_redirects") {
             if *r >= 0 {
                 max_redirects = Some(*r as usize);
@@ -238,7 +243,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
         method,
         body_str,
         headers_ref,
-        timeout_secs,
+        timeout,
         max_redirects,
         max_bytes,
     ) {
@@ -256,14 +261,38 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
     }
 }
 
-/// Extract `timeout`, `max_redirects`, and `max_bytes` from an options object.
-/// Returns `(timeout_secs, max_redirects, max_bytes)` with `None` for any
-/// field that wasn't present or wasn't a valid integer.
-fn parse_http_opts(opts: &IndexMap<String, Value>) -> (Option<u64>, Option<usize>, Option<u64>) {
-    let timeout = match opts.get("timeout") {
-        Some(Value::Int(t)) if *t >= 0 => Some(*t as u64),
-        _ => None,
+/// The `timeout` option: a number of seconds (Int or Float, at least 0;
+/// `null` or absent means the default). Anything else is an error rather
+/// than a silently ignored option.
+fn timeout_option(
+    op: &str,
+    opts: &IndexMap<String, Value>,
+) -> Result<Option<std::time::Duration>, String> {
+    // Longer than any program runs; keeps deadline arithmetic far from
+    // overflowing.
+    const CENTURY: std::time::Duration = std::time::Duration::from_secs(100 * 365 * 24 * 3600);
+    let secs = match opts.get("timeout") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Int(t)) if *t >= 0 => *t as f64,
+        Some(Value::Float(t)) if *t >= 0.0 => *t,
+        Some(_) => {
+            return Err(format!(
+                "{}() requires the timeout option to be a number of seconds (0 or more)",
+                op
+            ))
+        }
     };
+    Ok(Some(crate::semantics::seconds_f64(secs).min(CENTURY)))
+}
+
+/// Extract `timeout`, `max_redirects`, and `max_bytes` from an options object.
+/// Returns `(timeout, max_redirects, max_bytes)` with `None` for any
+/// field that wasn't present (`max_redirects`/`max_bytes`: or wasn't a
+/// valid integer); an invalid `timeout` is an error.
+type HttpOpts = (Option<std::time::Duration>, Option<usize>, Option<u64>);
+
+fn parse_http_opts(op: &str, opts: &IndexMap<String, Value>) -> Result<HttpOpts, String> {
+    let timeout = timeout_option(op, opts)?;
     let max_redirects = match opts.get("max_redirects") {
         Some(Value::Int(r)) if *r >= 0 => Some(*r as usize),
         _ => None,
@@ -272,7 +301,7 @@ fn parse_http_opts(opts: &IndexMap<String, Value>) -> (Option<u64>, Option<usize
         Some(Value::Int(b)) if *b >= 0 => Some(*b as u64),
         _ => None,
     };
-    (timeout, max_redirects, max_bytes)
+    Ok((timeout, max_redirects, max_bytes))
 }
 
 fn do_download(args: &[Value]) -> Result<Value, String> {
@@ -300,8 +329,10 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
         ),
     };
 
-    let (timeout_secs, max_redirects, max_bytes) =
-        opts.map(parse_http_opts).unwrap_or((None, None, None));
+    let (timeout, max_redirects, max_bytes) = match opts {
+        Some(o) => parse_http_opts("http.download", o)?,
+        None => (None, None, None),
+    };
 
     crate::permissions::require_net(&url)?;
     // Write to the checked path, never the original string.
@@ -311,9 +342,10 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
     crate::color::ceprintln!("  Downloading {}...", url);
 
     let url_string = validated.url.as_str().to_string();
+    let target_url = validated.url.clone();
     let pinned = validated.pinned.clone();
     let dest_clone = dest.clone();
-    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(300));
+    let timeout = timeout.unwrap_or(crate::runtime::client::DEFAULT_DOWNLOAD_TIMEOUT);
     let redirects = max_redirects.unwrap_or(crate::runtime::client::DEFAULT_MAX_REDIRECTS);
     let cap = max_bytes.unwrap_or(crate::runtime::client::DEFAULT_DOWNLOAD_MAX_BYTES);
     let span = crate::runtime::client::request_span("GET", &validated.url);
@@ -325,14 +357,21 @@ fn do_download(args: &[Value]) -> Result<Value, String> {
             crate::runtime::client::inject_trace_context(client.get(&url_string), &span, None)
                 .send()
                 .await
-                .map_err(|e| format!("download error: {}", e))?;
+                .map_err(|e| {
+                    format!(
+                        "download error: {}",
+                        crate::runtime::client::describe_request_error(&e, timeout, &target_url)
+                    )
+                })?;
 
         let status = resp.status().as_u16();
         if status >= 400 {
             return Err(format!("download failed: HTTP {}", status));
         }
 
-        let bytes = crate::runtime::client::read_body_capped(resp, cap).await?;
+        let bytes = crate::runtime::client::read_body_capped(resp, cap, timeout, &target_url)
+            .await
+            .map_err(|e| format!("download error: {}", e))?;
 
         std::fs::write(&dest_path, &bytes).map_err(|e| format!("write error: {}", e))?;
 
@@ -354,16 +393,17 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
     };
 
     // http.crawl(url) or http.crawl(url, opts)
-    let (timeout_secs, max_redirects, max_bytes) = match args.get(1) {
-        Some(Value::Object(o)) => parse_http_opts(o),
+    let (timeout, max_redirects, max_bytes) = match args.get(1) {
+        Some(Value::Object(o)) => parse_http_opts("http.crawl", o)?,
         _ => (None, None, None),
     };
 
     crate::permissions::require_net(&url)?;
     let validated = crate::runtime::client::validate_url_full(&url)?;
     let url_clone = validated.url.as_str().to_string();
+    let target_url = validated.url.clone();
     let pinned = validated.pinned.clone();
-    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(30));
+    let timeout = timeout.unwrap_or(crate::runtime::client::DEFAULT_TIMEOUT);
     let redirects = max_redirects.unwrap_or(crate::runtime::client::DEFAULT_MAX_REDIRECTS);
     let cap = max_bytes.unwrap_or(crate::runtime::client::DEFAULT_CRAWL_MAX_BYTES);
     let span = crate::runtime::client::request_span("GET", &validated.url);
@@ -375,10 +415,17 @@ fn do_crawl(args: &[Value]) -> Result<Value, String> {
             crate::runtime::client::inject_trace_context(client.get(&url_clone), &span, None)
                 .send()
                 .await
-                .map_err(|e| format!("crawl error: {}", e))?;
+                .map_err(|e| {
+                    format!(
+                        "crawl error: {}",
+                        crate::runtime::client::describe_request_error(&e, timeout, &target_url)
+                    )
+                })?;
 
         let status = resp.status().as_u16();
-        let body_bytes = crate::runtime::client::read_body_capped(resp, cap).await?;
+        let body_bytes = crate::runtime::client::read_body_capped(resp, cap, timeout, &target_url)
+            .await
+            .map_err(|e| format!("crawl error: {}", e))?;
         let html = String::from_utf8_lossy(&body_bytes).into_owned();
 
         let title = extract_between(&html, "<title>", "</title>").unwrap_or_default();

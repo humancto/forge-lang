@@ -1,0 +1,16 @@
+{
+  "edges": [
+    {"a": "Ash", "b": "Birch", "minutes": 4},
+    {"a": "Birch", "b": "Cedar", "minutes": 3},
+    {"a": "Ash", "b": "Cedar", "minutes": 7},
+    {"a": "Cedar", "b": "Dogwood", "minutes": 5},
+    {"a": "Birch", "b": "Elm", "minutes": 6},
+    {"a": "Elm", "b": "Dogwood", "minutes": 2},
+    {"a": "Dogwood", "b": "Fir", "minutes": 9},
+    {"a": "Elm", "b": "Fir", "minutes": 11},
+    {"a": "Fir", "b": "Grove", "minutes": 1},
+    {"a": "Hazel", "b": "Ivy", "minutes": 3},
+    {"a": "Cedar", "b": "Juniper", "minutes": 2},
+    {"a": "Juniper", "b": "Dogwood", "minutes": 3}
+  ]
+}

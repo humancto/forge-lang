@@ -1,0 +1,43 @@
+id = "retry_transient"
+category = "http_client"
+title = "Retry transient HTTP failures, but not client errors"
+prompt = """
+The first line of standard input is a base URL; each following non-blank line is a path.
+For each path, in order, send `GET <base><path>` with this retry policy:
+
+- a 2xx response is a success: stop;
+- a 5xx response is transient: try again immediately (no waiting), up to 4 attempts in
+  total for that path;
+- any other status (such as 404) is permanent: stop without retrying.
+
+Successful responses have a JSON body with a field `attempt`. For each path print one line:
+
+- success: `<path>: ok after <attempts> attempt(s), server saw attempt <attempt field>`
+- permanent failure: `<path>: failed with <status> after <attempts> attempt(s)`
+- transient failure on all 4 attempts: `<path>: gave up after 4 attempts (last status <status>)`
+
+Finally print `ok=<n> failed=<n> requests=<total number of requests sent>`.
+"""
+stdin = """
+{base_url}
+/flaky/0/alpha
+/flaky/2/beta
+/flaky/3/gamma
+/status/404
+/flaky/4/delta
+/flaky/1/beta
+/status/503
+/flaky/9/epsilon
+"""
+needs = ["net"]
+expected_stdout = """
+/flaky/0/alpha: ok after 1 attempt(s), server saw attempt 1
+/flaky/2/beta: ok after 3 attempt(s), server saw attempt 3
+/flaky/3/gamma: ok after 4 attempt(s), server saw attempt 4
+/status/404: failed with 404 after 1 attempt(s)
+/flaky/4/delta: gave up after 4 attempts (last status 503)
+/flaky/1/beta: ok after 1 attempt(s), server saw attempt 4
+/status/503: gave up after 4 attempts (last status 503)
+/flaky/9/epsilon: gave up after 4 attempts (last status 503)
+ok=4 failed=4 requests=22
+"""

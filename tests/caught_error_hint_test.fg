@@ -1,0 +1,50 @@
+// `catch e`: `e.message` is the error without its hint line; the hint is
+// `e.hint` (null when the error has none). V2 finding 24; both engines
+// build the object from `semantics::errors::caught_error_fields`.
+
+@test
+fn the_hint_is_separate_from_the_message() {
+    let mut message = ""
+    let mut hint = ""
+    let mut code = ""
+    try {
+        let o = { a: 1 }
+        println(o.b.c)
+    } catch e {
+        message = e.message
+        hint = e.hint
+        code = e.code
+    }
+    assert_eq(message, "no field 'b' on object")
+    assert_eq(hint, "available fields: a")
+    assert_eq(code, "E0013")
+    assert(!contains(message, "\n"))
+}
+
+@test
+fn errors_without_a_hint_have_a_null_hint() {
+    let mut hint = "unset"
+    let mut message = ""
+    try {
+        unwrap(Err("bad config"))
+    } catch e {
+        hint = e.hint
+        message = e.message
+    }
+    assert_eq(hint, null)
+    assert(contains(message, "bad config"))
+}
+
+@test
+fn the_object_has_message_type_code_and_hint() {
+    let mut fields = []
+    try {
+        let z = 1 / 0
+    } catch e {
+        fields = keys(e)
+        assert_eq(e.message, "division by zero")
+        assert_eq(e.type, "ArithmeticError")
+        assert_eq(e.hint, "check that the divisor is not zero before dividing")
+    }
+    assert_eq(fields, ["message", "type", "code", "hint"])
+}

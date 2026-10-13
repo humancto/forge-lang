@@ -1,0 +1,75 @@
+id = "json_path_errors"
+category = "error_handling"
+title = "Evaluate JSON paths and explain exactly why one fails"
+prompt = """
+Standard input is a JSON document, then a line `---`, then one path query per line (blank
+lines ignored). A path is a sequence of steps: a key step is a name made of letters,
+digits and `_` (the first step is written as just the name, later ones as `.name`), and an
+index step is `[<integer>]` (negative integers count from the end, `-1` is the last
+element). Examples: `users[0].name`, `[1][-1]`, `meta.tags[2]`. A path must contain at
+least one step.
+
+Evaluate each path from the document root and print `<path> => <result>`, where the result
+is the value found, as compact JSON (no spaces, keys in document order, non-ASCII
+characters written as they are), or `error: <reason>` for the first failing step:
+
+- `bad path` if the path does not follow the syntax above;
+- `no key '<name>' at <location>` for a key step on an object without that key;
+- `index <i> out of range at <location>` for an index step outside an array (i as written);
+- `cannot index <type> at <location>` for a key step on a non-object or an index step on a
+  non-array, where type is one of `object`, `array`, `string`, `number`, `boolean`,
+  `null` (the type of the value being indexed);
+
+where `<location>` is the part of the path before the failing step, or `$` when the
+failing step is the first one.
+"""
+stdin = """
+{"users": [{"name": "Ada", "tags": ["admin", "ops"], "age": 36},
+           {"name": "Zoë", "tags": [], "age": null}],
+ "meta": {"count": 2, "ok": true, "version": "1.2", "nested": [[1, 2], [3, [4, 5]]]}}
+---
+users[0].name
+users[1]
+users[1].name
+users[-1].tags
+users[2]
+users[0].tags[-3]
+users[0].email
+meta.count.value
+meta.ok[0]
+users.name
+users[1].age.years
+meta.nested[1][1][-1]
+meta.nested[1][1][-1][0]
+meta
+meta.version
+users[x]
+users..name
+.users
+users[0]name
+
+[0]
+"""
+needs = []
+expected_stdout = """
+users[0].name => "Ada"
+users[1] => {"name":"Zoë","tags":[],"age":null}
+users[1].name => "Zoë"
+users[-1].tags => []
+users[2] => error: index 2 out of range at users
+users[0].tags[-3] => error: index -3 out of range at users[0].tags
+users[0].email => error: no key 'email' at users[0]
+meta.count.value => error: cannot index number at meta.count
+meta.ok[0] => error: cannot index boolean at meta.ok
+users.name => error: cannot index array at users
+users[1].age.years => error: cannot index null at users[1].age
+meta.nested[1][1][-1] => 5
+meta.nested[1][1][-1][0] => error: cannot index number at meta.nested[1][1][-1]
+meta => {"count":2,"ok":true,"version":"1.2","nested":[[1,2],[3,[4,5]]]}
+meta.version => "1.2"
+users[x] => error: bad path
+users..name => error: bad path
+.users => error: bad path
+users[0]name => error: bad path
+[0] => error: cannot index object at $
+"""

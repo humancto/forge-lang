@@ -1,0 +1,38 @@
+// events.fg: a tiny in-process event bus. The module keeps its own state:
+// the registered handlers, in registration order.
+
+let mut subscriptions = []
+let mut next_token = 1
+
+// Register handler (a function taking the payload and returning a value)
+// for an event name. Returns a token that identifies the subscription.
+fn on(event: String, handler) -> Int {
+    let token = next_token
+    next_token += 1
+    subscriptions = subscriptions + [{ token: token, event: event, handler: handler }]
+    return token
+}
+
+// Remove a subscription; true if it existed.
+fn off(token: Int) -> Bool {
+    let before = len(subscriptions)
+    subscriptions = filter(subscriptions, fn(s) { return s.token != token })
+    return len(subscriptions) < before
+}
+
+// Call every handler of the event, in registration order, with the payload.
+// Returns the array of their results.
+fn publish(event: String, payload) {
+    let mut results = []
+    for s in subscriptions {
+        if s.event == event {
+            let h = s.handler
+            results.push(h(payload))
+        }
+    }
+    return results
+}
+
+fn listener_count(event: String) -> Int {
+    return len(filter(subscriptions, fn(s) { return s.event == event }))
+}

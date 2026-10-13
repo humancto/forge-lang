@@ -1,0 +1,36 @@
+{
+ "page": 1,
+ "items": [
+  {
+   "id": 1,
+   "owner": "dee",
+   "amount": 55.58,
+   "currency": "USD"
+  },
+  {
+   "id": 2,
+   "owner": "bo",
+   "amount": 17.57,
+   "currency": "EUR"
+  },
+  {
+   "id": 3,
+   "owner": "cy",
+   "amount": 45.75,
+   "currency": "EUR"
+  },
+  {
+   "id": 4,
+   "owner": "cy",
+   "amount": 50.33,
+   "currency": "EUR"
+  },
+  {
+   "id": 5,
+   "owner": "fay",
+   "amount": 34.73,
+   "currency": "JPY"
+  }
+ ],
+ "next": "p-2.json"
+}

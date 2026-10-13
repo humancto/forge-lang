@@ -1,0 +1,116 @@
+// logfmt parsing with a small character scanner (quoted values may contain
+// spaces and escaped quotes, which a split on spaces cannot handle).
+
+fn is_key_start(c: String) -> Bool {
+    return regex.test(c, "^[A-Za-z_]$")
+}
+
+fn is_key_char(c: String) -> Bool {
+    return regex.test(c, "^[A-Za-z0-9_.]$")
+}
+
+// The record as an object, or null when the line is invalid.
+fn parse_line(line: String) {
+    let cs = split(line, "")
+    let n = len(cs)
+    let mut rec = {}
+    let mut i = 0
+    loop {
+        while i < n && cs[i] == " " {
+            i += 1
+        }
+        if i >= n {
+            return rec
+        }
+        if !is_key_start(cs[i]) {
+            return null
+        }
+        let mut key = ""
+        while i < n && is_key_char(cs[i]) {
+            key += cs[i]
+            i += 1
+        }
+        if i >= n || cs[i] != "=" {
+            return null
+        }
+        i += 1
+        let mut value = ""
+        if i < n && cs[i] == "\"" {
+            i += 1
+            let mut closed = false
+            while i < n {
+                let c = cs[i]
+                if c == "\\" && i + 1 < n && (cs[i + 1] == "\"" || cs[i + 1] == "\\") {
+                    value += cs[i + 1]
+                    i += 2
+                } else if c == "\"" {
+                    i += 1
+                    closed = true
+                    break
+                } else {
+                    value += c
+                    i += 1
+                }
+            }
+            if !closed || (i < n && cs[i] != " ") {
+                return null
+            }
+        } else {
+            let start = i
+            while i < n && cs[i] != " " && cs[i] != "\"" {
+                value += cs[i]
+                i += 1
+            }
+            if i == start || (i < n && cs[i] == "\"") {
+                return null
+            }
+        }
+        rec[key] = value
+    }
+}
+
+fn dur_ms(d: String) -> Int {
+    if ends_with(d, "ms") {
+        return int(replace(d, "ms", ""))
+    }
+    let parts = split(substring(d, 0, len(d) - 1), ".")
+    let mut ms = int(parts[0]) * 1000
+    if len(parts) > 1 {
+        ms += int(substring(pad_end(parts[1], 3, "0"), 0, 3))
+    }
+    return ms
+}
+
+let mut level_names = []
+let mut durs = []
+let mut invalid = 0
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    let rec = parse_line(line)
+    if rec == null {
+        invalid += 1
+        continue
+    }
+    level_names.push(rec.level)
+    if rec.level == "warn" || rec.level == "error" {
+        println("{rec.level.upper()} {rec.time} {get(rec, "msg", "-")}")
+    }
+    if has_key(rec, "route") && has_key(rec, "dur") {
+        durs.push({ route: rec.route, ms: dur_ms(rec.dur) })
+    }
+}
+
+let levels = frequencies(level_names)
+let parts = map(sort(keys(levels)), fn(k) { return "{k}={levels[k]}" })
+println("levels: " + join(parts, " "))
+let by_route = group_by(durs, fn(d) { return d.route })
+for route in sort(keys(by_route)) {
+    let ds = by_route[route]
+    let n = len(ds)
+    let total = sum(map(ds, fn(d) { return d.ms }))
+    let tenths = (total * 20 + n) / (2 * n)
+    println("route {route}: n={n} avg={tenths / 10}.{tenths % 10}ms")
+}
+println("invalid: {invalid}")

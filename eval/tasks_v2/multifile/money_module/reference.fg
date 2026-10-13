@@ -1,0 +1,30 @@
+// Import the whole module: Money, its methods, zero and parse_money.
+import "money.fg"
+
+let mut totals = {}
+let mut counts = {}
+let lines = split(fs.read("/dev/stdin"), "\n")
+for e in enumerate(lines) {
+    let n = e.index + 1
+    let line = e.value
+    if line.trim() == "" {
+        continue
+    }
+    let f = split(line, " ")
+    if len(f) != 6 || f[1] != "x" || f[3] != "@" || !regex.test(f[0], "^-?[0-9]+$") {
+        println("line {n}: bad format")
+        continue
+    }
+    match parse_money(f[4], f[5]) {
+        Err(msg) => println("line {n}: {msg}"),
+        Ok(price) => {
+            let cur = price.currency
+            let total = get(totals, cur, zero(cur))
+            totals[cur] = total.plus(price.times(int(f[0])))
+            counts[cur] = get(counts, cur, 0) + 1
+        },
+    }
+}
+for cur in sort(keys(totals)) {
+    println("{cur}: {totals[cur].show()} over {counts[cur]} line(s)")
+}

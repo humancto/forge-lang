@@ -391,8 +391,10 @@ fn every_request_fork_gets_a_fresh_budget() {
         },
     );
     let call = |handler: &str| {
-        t.fork_request(Arc::new(AtomicBool::new(false)))
-            .call_http(handler, &HandlerRequest::default())
+        crate::runtime::server::status_and_body(
+            t.fork_request(Arc::new(AtomicBool::new(false)))
+                .call_http(handler, &HandlerRequest::default()),
+        )
     };
     // Each request costs ~10k steps: 20 of them would exhaust one shared
     // 50k budget, but every fork starts fresh.

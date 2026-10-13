@@ -1,0 +1,75 @@
+id = "expression_lib"
+category = "multifile"
+title = "A calculator on top of an imported parser library"
+prompt = '''
+Write `main.fg`, a tiny calculator. The working directory contains a Forge library in
+`lib/`: `lib/parser.fg` (which itself uses `lib/tokenizer.fg`). Import `parse` from
+`lib/parser.fg`; do not copy or rewrite the parser. The top of `lib/parser.fg`:
+
+```forge
+// lib/parser.fg: parse an arithmetic expression into a tree.
+//
+// parse(src) returns Ok(node) or Err(message). Nodes are objects:
+//   { kind: "num", value: Int }
+//   { kind: "var", name: String }
+//   { kind: "neg", expr: node }
+//   { kind: "bin", op: "+" | "-" | "*" | "/" | "%", left: node, right: node }
+// Precedence: unary minus binds tightest, then * / %, then + -; binary
+// operators are left-associative; parentheses group.
+import { tokenize } from "tokenizer.fg"
+
+fn parse(src: String) { ... }
+```
+
+Read standard input line by line, skipping blank lines, with a set of variables that
+starts empty:
+
+- `let <name> = <expression>`: evaluate the expression and store it under name (a name is
+  a lower-case letter or `_` followed by lower-case letters, digits or `_`; otherwise
+  print `error: bad name`). Print `<name> = <value>`.
+- any other line is an expression: print its value.
+
+Evaluate the tree that `parse` returns with integer arithmetic: `/` divides and rounds
+toward zero (`-7 / 2` is `-3`), `%` is the remainder with the sign of the left operand
+(`-7 % 2` is `-1`). On failure print `error: <message>` and store nothing, where message
+is the parser's error message, `unknown variable: <name>` or `division by zero`.
+'''
+stdin = """
+1 + 2 * 3
+(1 + 2) * 3
+let x = 10
+let y = x * x - 1
+y / 7
+-y % 7
+-(x - 25) / 2
+let z = q + 1
+z
+x / (y - 99)
+2 * (3 + 4
+3 $ 4
+let 9lives = 1
+let total = x + y + -3
+total % 0
+8 / -3
+1 2
+"""
+needs = ["read"]
+expected_stdout = """
+7
+9
+x = 10
+y = 99
+14
+-1
+7
+error: unknown variable: q
+error: unknown variable: z
+error: division by zero
+error: missing )
+error: unexpected character '$' at 3
+error: bad name
+total = 106
+error: division by zero
+-2
+error: unexpected '2'
+"""

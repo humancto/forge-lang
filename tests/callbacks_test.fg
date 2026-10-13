@@ -1,0 +1,133 @@
+// callbacks_test.fg — Forge functions called back from builtins (map,
+// filter, reduce, sort, find, any, all, flat_map, streams, method forms).
+// Arrays are long enough (300 items) for a callback to become hot and run
+// natively on the VM, so every case covers the cached-callback fast path
+// as well as the first calls.
+
+@test
+fn hot_callbacks_give_the_same_results() {
+    let xs = range(0, 300)
+    let ys = map(xs, fn(x) { return x * 3 })
+    let zs = filter(ys, fn(x) { return x % 2 == 0 })
+    assert_eq(len(zs), 150)
+    assert_eq(reduce(zs, 0, fn(acc, x) { return acc + x }), 67050)
+    assert_eq(find(xs, fn(x) { return x * x > 1000 }), 32)
+    assert(any(xs, fn(x) { return x == 299 }))
+    assert(all(xs, fn(x) { return x >= 0 }))
+    assert_eq(len(flat_map(xs, fn(x) { return [x, x] })), 600)
+    let desc = sort(xs, fn(a, b) { return b - a })
+    assert_eq(desc[0], 299)
+    assert_eq(desc[299], 0)
+}
+
+@test
+fn method_forms_and_streams() {
+    let xs = range(0, 300)
+    let total = xs.map(fn(x) { return x + 1 }).filter(fn(x) { return x % 5 == 0 }).reduce(0, fn(a, x) { return a + x })
+    assert_eq(total, 9150)
+    let lazy = xs.stream().filter(fn(x) { return x % 3 == 0 }).map(fn(x) { return x * 2 }).reduce(0, fn(a, x) { return a + x })
+    assert_eq(lazy, 29700)
+    let mut seen = 0
+    xs.stream().for_each(fn(x) { seen = seen + 1 })
+    assert_eq(seen, 300)
+}
+
+@test
+fn builtins_as_callbacks() {
+    assert_eq(map(["1", "22", "333"], int), [1, 22, 333])
+    assert_eq(map([1, 2], str), ["1", "2"])
+    assert_eq(map(["a", "bb"], len), [1, 2])
+}
+
+@test
+fn a_local_map_shadows_the_builtin() {
+    let map = fn(xs, f) { return "mine" }
+    assert_eq(map([1, 2], fn(x) { return x }), "mine")
+}
+
+@test
+fn callbacks_are_lenient_about_arity() {
+    assert_eq(map([1, 2], fn(x, i) { return i }), [null, null])
+    assert_eq(map([1, 2], fn() { return 0 }), [0, 0])
+}
+
+@test
+fn nested_callbacks() {
+    let grid = map(range(0, 30), fn(r) { return map(range(0, 30), fn(c) { return r * c }) })
+    assert_eq(grid[29][29], 841)
+    assert_eq(reduce(map(grid, fn(row) { return reduce(row, 0, fn(a, v) { return a + v }) }), 0, fn(a, v) { return a + v }), 189225)
+}
+
+@test
+fn callbacks_mutate_captured_state() {
+    let mut count = 0
+    let mut last = -1
+    let ys = map(range(0, 300), fn(x) {
+        count = count + 1
+        last = x
+        return x
+    })
+    assert_eq(count, 300)
+    assert_eq(last, 299)
+    assert_eq(len(ys), 300)
+}
+
+@test
+fn a_stage_replaces_a_function_another_stage_calls() {
+    let mut h = fn(y) { return y + 1 }
+    let swap = fn(y) { return y * 100 }
+    let out = range(0, 600).stream().map(fn(x) {
+        if x == 300 { h = swap }
+        return x
+    }).map(fn(x) { return h(x) }).collect()
+    assert_eq(out[299], 300)
+    assert_eq(out[300], 30000)
+    assert_eq(out[599], 59900)
+}
+
+@test
+fn argument_kinds_change_while_hot() {
+    let f = fn(x) { return x + x }
+    let mut items = []
+    for i in range(0, 300) { items.push(i) }
+    items.push(1.5)
+    items.push("ab")
+    items.push(7)
+    let r = map(items, f)
+    assert_eq(r[299], 598)
+    assert_eq(r[300], 3.0)
+    assert_eq(r[301], "abab")
+    assert_eq(r[302], 14)
+}
+
+@test
+fn errors_inside_hot_callbacks_are_caught() {
+    let mut got = ""
+    try {
+        map(range(0, 300), fn(x) {
+            assert(x != 290, "bad item")
+            return x
+        })
+    } catch e {
+        got = e.message
+    }
+    assert_eq(got, "assertion failed: bad item")
+    let inner = map([1, 2, 3], fn(x) {
+        try { assert(x != 2, "two") } catch e { return e.message }
+        return x
+    })
+    assert_eq(inner, [1, "assertion failed: two", 3])
+}
+
+@test
+fn records_pipeline() {
+    let mut rows = []
+    for i in range(0, 300) {
+        rows.push({id: i, price: i % 10, qty: i % 7})
+    }
+    let big = rows.filter(fn(r) { return r.qty > 2 })
+    let totals = big.map(fn(r) { return r.price * r.qty })
+    assert_eq(len(big), 171)
+    assert_eq(totals.reduce(0, fn(a, t) { return a + t }), 3456)
+    assert_eq(rows[299].id, 299)
+}

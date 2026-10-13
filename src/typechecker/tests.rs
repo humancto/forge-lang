@@ -1310,6 +1310,24 @@ fn immutable_assignment_is_reported() {
 }
 
 #[test]
+fn nested_push_on_an_immutable_root_is_reported() {
+    // The method form updates the place, so its root must be mutable.
+    assert_eq!(
+        codes("let grid = [[1]]\ngrid[0].push(2)"),
+        vec![Code::ImmutableAssign]
+    );
+    assert_eq!(
+        codes("struct Bag { items: [Int] }\nlet b = Bag { items: [] }\nb.items.pop()"),
+        vec![Code::ImmutableAssign]
+    );
+    assert!(codes("let mut grid = [[1]]\ngrid[0].push(2)\ngrid[0].pop()").is_empty());
+    // Unknown receivers may have their own `push` method: not reported.
+    assert!(codes("let o = { a: [1] }\no.a.push(2)").is_empty());
+    // A plain variable keeps its rule (an immutable `xs.push(v)` is pure).
+    assert!(codes("let xs = [1]\nlet ys = xs.push(2)").is_empty());
+}
+
+#[test]
 fn not_callable() {
     assert_eq!(codes("let c = 5\nc()"), vec![Code::NotCallable]);
 }
@@ -1376,11 +1394,10 @@ fn check_in(source: &str, strict: bool, edition: Edition) -> Vec<Diagnostic> {
 /// contradicts a declaration or is an edition rule.
 #[test]
 fn edition_2027_promotes_exactly_the_declared_type_codes() {
-    use crate::typechecker::diagnostics::tests::example_of;
+    use crate::typechecker::diagnostics::tests::check_example;
     for code in Code::ALL {
-        let example = example_of(code.explanation());
-        let in_2026 = check_in(&example, false, Edition::E2026);
-        let in_2027 = check_in(&example, false, Edition::E2027);
+        let in_2026 = check_example(*code, Edition::E2026);
+        let in_2027 = check_example(*code, Edition::E2027);
         assert!(
             in_2026.iter().all(|d| !d.is_error()),
             "{}: 2026 must only warn: {:?}",
@@ -1411,7 +1428,7 @@ fn edition_2027_promoted_codes() {
     // docs/editions/2027.md lists these; change both together.
     assert_eq!(
         promoted,
-        vec!["T0001", "T0002", "T0003", "T0012", "T0015", "T0016"]
+        vec!["T0001", "T0002", "T0003", "T0012", "T0015", "T0016", "T0020", "T0021"]
     );
 }
 
@@ -1623,4 +1640,195 @@ fn edition_2026_statement_push_is_not_reported() {
         );
         assert!(ds.iter().all(|d| d.code != Code::DiscardedResult), "{ds:?}");
     }
+}
+
+// V2 finding 7: an import that cannot be found is reported (T0020), and the
+// names it would bring in are unknown, never the builtins of that name.
+#[test]
+fn unresolved_imports_are_reported_without_cascading() {
+    for source in [
+        "import { title } from \"no_such_module_here.fg\"\nprintln(title())\nlet f = title\nprintln(f())\n",
+        "import \"no_such_module_here.fg\"\nprintln(title())\nprintln(len())\n",
+    ] {
+        for edition in [Edition::E2026, Edition::E2027] {
+            let ds = check_in(source, false, edition);
+            assert_eq!(ds.len(), 1, "{edition:?} {source}: {ds:?}");
+            let d = &ds[0];
+            assert_eq!(d.code, Code::UnresolvedImport);
+            assert_eq!(d.span.start.line, 1);
+            assert!(
+                d.message.starts_with(
+                    "cannot import 'no_such_module_here.fg': file not found (looked for no_such_module_here.fg)"
+                ),
+                "{}",
+                d.message
+            );
+            assert_eq!(d.is_error(), edition == Edition::E2027);
+        }
+    }
+    // Builtin modules are not files.
+    let ds = check_in(
+        "import { sqrt } from \"math\"\nprintln(sqrt(4))\n",
+        false,
+        Edition::E2027,
+    );
+    assert!(ds.is_empty(), "{ds:?}");
+}
+
+// An imported module's own names (a module-level `let mut count`, a helper
+// called `title`) shadow the builtins of that spelling inside its function
+// bodies, as at run time; the inferred return types must not be builtins.
+#[test]
+fn imported_module_names_shadow_builtins_in_its_bodies() {
+    let dir = std::env::temp_dir().join(format!(
+        "forge_tc_module_names_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("counter.fg"),
+        "let mut count = 0\n\
+         fn bump() {\n    count = count + 1\n    return count\n}\n\
+         fn get_count() { return count }\n\
+         fn title() { return \"T\" }\n\
+         fn heading() { return title() + \"!\" }\n\
+         fn twice(n) { return bump() + n }\n",
+    )
+    .expect("write module");
+    let main = dir.join("main.fg");
+    for source in [
+        "import { bump, get_count, heading } from \"counter.fg\"\nlet n = bump() + 1\nprintln(get_count() * 2 + n)\nprintln(heading() + \"?\")\n",
+        "import { bump as inc, twice } from \"counter.fg\"\nprintln(inc() + twice(1) + 1)\n",
+        "import \"counter.fg\"\nprintln(get_count() * 2 + bump())\n",
+    ] {
+        for edition in [Edition::E2026, Edition::E2027] {
+            let ds = analyze(
+                source,
+                &CheckOptions {
+                    file: Some(main.clone()),
+                    edition: Some(edition),
+                    ..CheckOptions::default()
+                },
+            )
+            .expect("parses")
+            .diagnostics;
+            assert!(ds.is_empty(), "{edition:?} {source}: {ds:?}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// `import { P as Q }` of a struct, type, variant or interface is reported
+// statically (T0021, at the alias) with the engines' E0019 text; renaming a
+// function or variable is fine.
+#[test]
+fn renaming_a_type_in_an_import_is_reported() {
+    let dir = std::env::temp_dir().join(format!(
+        "forge_tc_import_rename_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("shapes.fg"),
+        "struct P { x: Int }\ntype Shape = Circle(Float) | Square(Float)\ninterface Named { fn name() -> String }\nfn helper() { return 1 }\nlet limit = 3\n",
+    )
+    .expect("write module");
+    let main = dir.join("main.fg");
+    let check = |source: &str, edition| {
+        analyze(
+            source,
+            &CheckOptions {
+                file: Some(main.clone()),
+                edition: Some(edition),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("parses")
+        .diagnostics
+    };
+    let source = "import { helper as h, limit as max_n, P as Point, Shape as S, Circle as C, Named as N } from \"shapes.fg\"\nprintln(h() + max_n)\n";
+    for edition in [Edition::E2026, Edition::E2027] {
+        let ds = check(source, edition);
+        let found: Vec<(&str, usize, usize, bool)> = ds
+            .iter()
+            .map(|d| {
+                (
+                    d.code.as_str(),
+                    d.span.start.line,
+                    d.span.start.col,
+                    d.is_error(),
+                )
+            })
+            .collect();
+        let error = edition == Edition::E2027;
+        assert_eq!(
+            found,
+            vec![
+                ("T0021", 1, 44, error),
+                ("T0021", 1, 60, error),
+                ("T0021", 1, 73, error),
+                ("T0021", 1, 85, error),
+            ],
+            "{edition:?}: {ds:?}"
+        );
+        assert_eq!(
+            ds[0].message,
+            "cannot import 'P' as 'Point' from 'shapes.fg': 'P' is a struct, and only functions and variables can be renamed"
+        );
+        assert_eq!(
+            ds[0].help.as_deref(),
+            Some("import it under its own name: import { P } from \"shapes.fg\"")
+        );
+        assert!(
+            ds[2].message.contains("'Circle' is a variant"),
+            "{}",
+            ds[2].message
+        );
+        assert!(
+            ds[3].message.contains("'Named' is an interface"),
+            "{}",
+            ds[3].message
+        );
+    }
+    assert!(check(
+        "import { helper as h, P } from \"shapes.fg\"\nprintln(h())\n",
+        Edition::E2027
+    )
+    .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn imports_are_not_resolved_when_skipped() {
+    let ds = analyze(
+        "import { title } from \"no_such_module_here.fg\"\nprintln(title())\n",
+        &CheckOptions {
+            skip_imports: true,
+            edition: Some(Edition::E2027),
+            ..CheckOptions::default()
+        },
+    )
+    .expect("parses")
+    .diagnostics;
+    assert!(
+        ds.iter().all(|d| d.code != Code::UnresolvedImport),
+        "{ds:?}"
+    );
+}
+
+#[test]
+fn structs_fit_interfaces_inside_generic_types() {
+    let src = "interface Shape { fn area() -> Float }\nstruct Circle { r: Float }\nimpl Shape for Circle { fn area(it) -> Float { return it.r } }\nfn wrapped() -> Result<Shape, String> { return Ok(Circle { r: 2.0 }) }\nfn arr() -> [Shape] { return [Circle { r: 3.0 }] }\nfn opt() -> ?Shape { return Some(Circle { r: 1.0 }) }";
+    let w = warnings_for(src);
+    assert!(w.is_empty(), "{:?}", w);
+    // A struct that does not satisfy the interface is still reported.
+    let bad = "interface Shape { fn area() -> Float }\nstruct Point { x: Int }\nfn arr() -> [Shape] { return [Point { x: 1 }] }";
+    let w = warnings_for(bad);
+    assert!(
+        w.iter().any(|w| w.message.contains("does not satisfy")),
+        "{:?}",
+        w
+    );
 }

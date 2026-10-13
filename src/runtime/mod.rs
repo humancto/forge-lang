@@ -9,6 +9,8 @@ pub mod client;
 pub mod embedded;
 #[cfg(feature = "host")]
 pub mod host;
+#[cfg(feature = "host")]
+pub mod http_response;
 pub mod imports;
 pub mod limits;
 pub mod metadata;

@@ -139,9 +139,9 @@ character that has no meaning in Forge, or a malformed number literal.
 
 Example:
 
-    say \"hello
+    println(\"hello)
 
-Fix: close the string (`say \"hello\"`), remove the stray character, or fix
+Fix: close the string (`println(\"hello\")`), remove the stray character, or fix
 the literal. The caret in the snippet points at where scanning stopped.",
         matches: |_| false,
     },
@@ -177,7 +177,7 @@ the message suggests it.
 Example:
 
     let count = 1
-    say coutn          // undefined variable: 'coutn' — did you mean 'count'?
+    println(coutn)     // undefined variable: 'coutn' — did you mean 'count'?
 
 Fix: correct the spelling, or define the name before the line that uses it.
 Names defined inside a block or function are not visible outside it. The
@@ -263,7 +263,7 @@ strings, see E0034), but no other operator converts implicitly.
 Example:
 
     let n = \"3\"
-    say n * 2          // invalid operator
+    println(n * 2)     // invalid operator
 
 Fix: convert explicitly — `int(n) * 2`, `str(count) + \" items\"` — or check
 for null before doing arithmetic. Reported statically as T0005.",
@@ -313,7 +313,7 @@ The message gives the index and the length.
 Example:
 
     let a = [1, 2, 3]
-    say a[3]           // index out of bounds: index 3 on array of length 3
+    println(a[3])      // index out of bounds: index 3 on array of length 3
 
 Fix: index with `len(a) - 1` (or `-1`) for the last element, check
 `if i < len(a)` first, or iterate with `for x in a` instead of indices.",
@@ -331,7 +331,7 @@ null.
 Example:
 
     let m = {a: 1}
-    say m[\"b\"]          // key 'b' not found
+    println(m[\"b\"])    // key 'b' not found
 
 Fix: use `get(m, \"b\", 0)` for a default, test with `has_key(m, \"b\")`, or
 fix the key's spelling.",
@@ -340,7 +340,7 @@ fix the key's spelling.",
     ErrorCode {
         code: "E0011",
         title: "value cannot be indexed",
-        hint: "index arrays and strings with integers, objects and maps with keys",
+        hint: "index arrays with integers and objects with keys; for a string use `substring(s, i, i + 1)`, for a Map `m.get(k)`",
         explanation: "\
 `container[index]` (or `container[index] = value`) was used with a
 container/index combination that does not support it: indexing a number,
@@ -349,7 +349,7 @@ indexing an array with a string, assigning into a tuple or a set, ...
 Example:
 
     let n = 42
-    say n[0]           // invalid index operation: cannot index Int with Int
+    println(n[0])      // invalid index operation: cannot index Int with Int
 
 Fix: index only arrays, tuples and strings (with integers) or objects and
 maps (with keys). Sets are unordered — use `.has(x)` or iterate.",
@@ -380,16 +380,16 @@ Example:
 
     fn find_user(id) { if id == 1 { return {name: \"Ada\"} } }
     let user = find_user(2)
-    say user.name      // cannot access field 'name' on Null
+    println(user.name) // cannot access field 'name' on Null
 
-Fix: handle the missing case — `if user != null { say user.name }` — or
+Fix: handle the missing case — `if user != null { println(user.name) }` — or
 make the function return an Option/Result so callers must handle it.",
         matches: |h| h.starts_with("cannot access field") && h.ends_with(" on Null"),
     },
     ErrorCode {
         code: "E0013",
         title: "unknown field or method",
-        hint: "check the spelling; print the value with sus(x) to see what it contains",
+        hint: "check the spelling; print the value with println(x) (or its type with typeof(x)) to see what it contains",
         explanation: "\
 A field or method that the value does not have was accessed. For objects
 the message suggests a field with a similar name when there is one.
@@ -397,7 +397,7 @@ the message suggests a field with a similar name when there is one.
 Example:
 
     let user = {name: \"Ada\"}
-    say user.nmae      // no field 'nmae' on object — did you mean 'name'?
+    println(user.nmae) // no field 'nmae' on object — did you mean 'name'?
 
 Fix: correct the name. To read a field that may be absent, use
 `get(user, \"nickname\", \"none\")` or `has_key(user, \"nickname\")`.",
@@ -417,10 +417,10 @@ a boolean, a function, ...
 Example:
 
     let n = 5
-    say n.value        // cannot access field 'value' on Int
+    println(n.value)   // cannot access field 'value' on Int
 
 Fix: access fields only on objects and struct instances; check what the
-variable holds (`say typeof(n)`).",
+variable holds (`println(typeof(n))`).",
         matches: |h| h.starts_with("cannot access field") || h.starts_with("cannot set field"),
     },
     ErrorCode {
@@ -434,7 +434,7 @@ expects and (in parentheses) the types it got.
 
 Example:
 
-    say len(5)         // len() requires string, array, tuple, set, map, or object (got Int)
+    println(len(5))    // len() requires string, array, tuple, set, map, or object (got Int)
 
 Fix: pass the expected type, converting first when needed (`str(5)`,
 `int(\"5\")`, `[x]`).",
@@ -544,8 +544,8 @@ forge.toml. Grant the narrowest scope that works.",
         title: "assertion failed",
         hint: "the asserted condition was false; the message shows the values involved",
         explanation: "\
-An `assert`, `assert_eq`, `assert_ne`, `assert_throws` (or the GenZ kit's
-`bet`, `no_cap`, `ick`) check failed. In `forge test` this fails the test.
+An `assert`, `assert_eq`, `assert_ne`, `assert_throws` (or, in edition 2026,
+the GenZ kit's `bet`, `no_cap`, `ick`) check failed. In `forge test` this fails the test.
 
 Example:
 
@@ -565,7 +565,8 @@ both values.",
         title: "check failed",
         hint: "the value did not satisfy the `check` rule",
         explanation: "\
-A declarative `check` statement rejected a value.
+A declarative `check` statement (edition 2026; edition 2027 removes it,
+use `assert`) rejected a value.
 
 Example:
 
@@ -581,8 +582,9 @@ Fix: validate input before it reaches the check, or handle the failure with
         title: "unwrap of a missing value",
         hint: "handle the Err/None case with unwrap_or(x, default), match, or `?`",
         explanation: "\
-`unwrap(x)`, `unwrap_err(x)` or `must expr` was used on a value that does not
-hold what was asked for: `unwrap(None)`, `unwrap(Err(...))`, `must null`.
+`unwrap(x)`, `unwrap_err(x)` (or `must expr` in edition 2026) was used on a
+value that does not hold what was asked for: `unwrap(None)`,
+`unwrap(Err(...))`.
 
 Example:
 
@@ -644,10 +646,10 @@ match.
 
 Example:
 
-    match status { \"ok\" => say \"fine\" }      // status is \"error\"
+    match status { \"ok\" => println(\"fine\") } // status is \"error\"
     let size = match n { x if x > 9 => \"big\" }   // n is 3
 
-Fix: add the missing arms, or a wildcard arm: `_ => say \"unexpected\"`.
+Fix: add the missing arms, or a wildcard arm: `_ => println(\"unexpected\")`.
 The type checker reports missing ADT variants statically (T0011).",
         matches: |h| h.starts_with("non-exhaustive match"),
     },
@@ -682,12 +684,12 @@ Fix: return a value from the function and `break` in the loop itself:
         title: "destructuring failed",
         hint: "destructure arrays with [..], objects with {..} and tuples with (..)",
         explanation: "\
-A destructuring pattern did not fit the value: `unpack {a} from` a
-non-object, `unpack [x] from` a non-array, `let (a, b) =` a non-tuple.
+A destructuring pattern did not fit the value: `let {a} =` a non-object,
+`let [x] =` a non-array, `let (a, b) =` a non-tuple.
 
 Example:
 
-    unpack {name} from 42      // cannot destructure non-object
+    let {name} = 42            // cannot destructure non-object
 
 Fix: destructure the right kind of value, or check its type first.",
         matches: |h| h.starts_with("cannot destructure"),
@@ -712,6 +714,11 @@ Fix: build a modified copy (`merge(config, {debug: true})`) instead.",
                     "cannot mutate a frozen",
                     "cannot modify frozen",
                     "cannot mutate frozen",
+                    // `semantics::frozen_method`
+                    "cannot push a frozen",
+                    "cannot pop a frozen",
+                    "cannot add a frozen",
+                    "cannot remove a frozen",
                 ],
             )
         },
@@ -835,6 +842,48 @@ Fix: write the replacement (`let total = 0`), or run
 docs/editions/2027.md lists each form and its replacement.",
         matches: |h| h.starts_with(crate::semantics::edition::REMOVED_PREFIX),
     },
+    ErrorCode {
+        code: "E0036",
+        title: "network request timed out",
+        hint: "the server did not answer in time; raise the `timeout` option (seconds) or retry",
+        explanation: "\
+An HTTP request (`http.get`, `http.post`, ..., `fetch`, `http.download`,
+`http.crawl`) did not complete within its time limit: the `timeout` option,
+in seconds (default 30; 300 for `http.download`). The server accepted the
+connection, or was still being reached, but did not send the whole response
+in time. A connection that could not be made at all is E0037.
+
+Example:
+
+    http.get(\"https://slow.example.com/report\", { timeout: 2 })
+    // http.get error: timed out after 2 seconds waiting for slow.example.com:443
+
+Fix: raise the limit (`{ timeout: 60 }`, fractions such as `0.5` work too),
+or catch the error and retry: `try { ... } catch e { if e.code == \"E0036\" { ... } }`.",
+        matches: crate::semantics::net::is_timeout_headline,
+    },
+    ErrorCode {
+        code: "E0037",
+        title: "network connection failed",
+        hint: "check the URL's host and port, that the server is running, and the network",
+        explanation: "\
+An HTTP request could not connect to the server: the connection was refused
+(nothing listens on that port), the host name could not be resolved, the TLS
+handshake failed (for example an invalid certificate), or the network is
+unreachable. The message says which. No request was sent, so retrying is
+safe. A server that is reached but answers too slowly is E0036; a server
+that answers with an error status (404, 500, ...) is not an error at all:
+the response has `ok == false` and its `status`.
+
+Example:
+
+    http.get(\"http://localhost:9999/health\")
+    // http.get error: connection refused by localhost:9999
+
+Fix: check the URL, start the server, or catch the error:
+`try { ... } catch e { if e.code == \"E0037\" { ... } }`.",
+        matches: crate::semantics::net::is_connect_headline,
+    },
 ];
 
 /// The code of a syntax error: `E0001` for the lexer, `E0002` for the
@@ -895,6 +944,42 @@ pub fn message_hint(message: &str) -> Option<&str> {
         .map(str::trim)
 }
 
+/// A message without its hint line(s): what `catch e` exposes as
+/// `e.message` (the hint is `e.hint`, see [`caught_error_fields`]). Other
+/// lines (an assertion's `left:`/`right:`) are kept.
+pub fn without_hint(message: &str) -> String {
+    if !message.contains(HINT_PREFIX) {
+        return message.to_string();
+    }
+    message
+        .split('\n')
+        .filter(|l| !l.starts_with(HINT_PREFIX))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The fields of the object a `catch e { }` block receives, in order:
+/// `message` (without the hint line), `type` (legacy), `code`, and `hint`
+/// (the message's own hint, `None` → `null`). Both engines build the
+/// object from this, so it is the same everywhere.
+pub fn caught_error_fields(message: &str) -> CaughtError {
+    CaughtError {
+        message: without_hint(message),
+        error_type: legacy_error_type(message),
+        code: classify(message).code,
+        hint: message_hint(message).map(str::to_string),
+    }
+}
+
+/// See [`caught_error_fields`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaughtError {
+    pub message: String,
+    pub error_type: &'static str,
+    pub code: &'static str,
+    pub hint: Option<String>,
+}
+
 /// The hint to show for a message: its own, else its code's default.
 pub fn hint_for(message: &str) -> &str {
     message_hint(message).unwrap_or(classify(message).hint)
@@ -906,7 +991,11 @@ pub fn hint_for(message: &str) -> &str {
 /// did-you-mean) cannot change it.
 pub fn legacy_error_type(message: &str) -> &'static str {
     let message = headline(message);
-    if message.contains("type") || message.contains("Type") {
+    if crate::semantics::net::is_timeout_headline(message) {
+        "TimeoutError"
+    } else if crate::semantics::net::is_connect_headline(message) {
+        "ConnectionError"
+    } else if message.contains("type") || message.contains("Type") {
         "TypeError"
     } else if message.contains("division by zero") || message.contains("modulo by zero") {
         "ArithmeticError"
@@ -1013,6 +1102,44 @@ mod tests {
         }
     }
 
+    /// Hints and `forge explain` examples never suggest a builtin that
+    /// edition 2027 removed (`sus(x)`, `say x`), except for the errors only
+    /// those 2026 features raise (E0022 `check`, E0025 `bruh`).
+    #[test]
+    fn hints_and_examples_do_not_suggest_removed_names() {
+        for e in RUNTIME_ERRORS {
+            if matches!(e.code, "E0022" | "E0025") {
+                continue;
+            }
+            let example: String = e
+                .explanation
+                .lines()
+                .filter(|l| l.starts_with("    "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for removed in crate::builtins_registry::REMOVED {
+                // `name(` or `name ` as a whole word.
+                let used = |text: &str| {
+                    text.match_indices(removed.name).any(|(at, _)| {
+                        let before = text[..at].chars().next_back();
+                        let after = text[at + removed.name.len()..].chars().next();
+                        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                            && matches!(after, Some('(' | ' '))
+                    })
+                };
+                for text in [e.hint, example.as_str()] {
+                    assert!(
+                        !used(text),
+                        "{} mentions `{}`, removed in 2027: {}",
+                        e.code,
+                        removed.name,
+                        text
+                    );
+                }
+            }
+        }
+    }
+
     /// Every shared message helper classifies to its code. A wording change
     /// that would re-code an error fails here.
     #[test]
@@ -1029,6 +1156,8 @@ mod tests {
                 "E0005",
             ),
             (s::immutable_reassign("x"), "E0006"),
+            (s::frozen_method("push"), "E0029"),
+            (s::frozen_method("remove"), "E0029"),
             (
                 s::binary(
                     s::BinaryOp::Sub,
@@ -1075,6 +1204,22 @@ mod tests {
             ),
             (s::import_not_found("utils"), "E0019"),
             (s::import_missing_name("utils", "x"), "E0019"),
+            (
+                s::check_import_alias(
+                    "m.fg",
+                    &crate::parser::Parser::new(
+                        crate::lexer::Lexer::new("struct P { x: Int }")
+                            .tokenize()
+                            .expect("lex"),
+                    )
+                    .parse_program()
+                    .expect("parse"),
+                    "P",
+                    "Q",
+                )
+                .expect_err("a struct cannot be renamed"),
+                "E0019",
+            ),
             ("circular import: a.fg -> b.fg -> a.fg".to_string(), "E0019"),
             (
                 "permission denied: run — run with --allow-run".to_string(),
@@ -1122,10 +1267,55 @@ mod tests {
                 "E0009",
             ),
             ("something odd happened".to_string(), "E0000"),
+            (
+                format!(
+                    "http.get error: {}",
+                    s::net::timed_out(std::time::Duration::from_secs(2), "h:80")
+                ),
+                "E0036",
+            ),
+            (
+                format!(
+                    "fetch error: {}",
+                    s::net::connect_failed(s::net::Failure::Refused, "h:80", "")
+                ),
+                "E0037",
+            ),
+            (
+                format!(
+                    "http.post error: {}",
+                    s::net::connect_failed(s::net::Failure::UnknownHost, "h", "no such host")
+                ),
+                "E0037",
+            ),
+            (
+                format!(
+                    "download error: {}",
+                    s::net::connect_failed(s::net::Failure::Tls, "h:443", "bad certificate")
+                ),
+                "E0037",
+            ),
+            (
+                "http.get error: request failed: bad redirect".to_string(),
+                "E0016",
+            ),
         ];
         for (message, code) in cases {
             assert_eq!(classify(&message).code, code, "{:?}", message);
         }
+    }
+
+    #[test]
+    fn caught_errors_keep_the_hint_out_of_the_message() {
+        use crate::semantics as s;
+        let caught = caught_error_fields(&s::no_field("b", ["a"]));
+        assert_eq!(caught.message, "no field 'b' on object");
+        assert_eq!(caught.hint.as_deref(), Some("available fields: a"));
+        assert_eq!(caught.code, "E0013");
+        assert_eq!(caught.error_type, "RuntimeError");
+        let plain = caught_error_fields("assert_eq failed\n  left: 1\n  right: 2");
+        assert_eq!(plain.message, "assert_eq failed\n  left: 1\n  right: 2");
+        assert_eq!(plain.hint, None);
     }
 
     #[test]
@@ -1156,6 +1346,16 @@ mod tests {
             "RuntimeError"
         );
         assert_eq!(legacy_error_type(&s::immutable_reassign("x")), "TypeError");
+        let timeout = format!(
+            "http.get error: {}",
+            s::net::timed_out(std::time::Duration::from_secs(1), "h:80")
+        );
+        assert_eq!(legacy_error_type(&timeout), "TimeoutError");
+        let refused = format!(
+            "http.get error: {}",
+            s::net::connect_failed(s::net::Failure::Refused, "h:80", "")
+        );
+        assert_eq!(legacy_error_type(&refused), "ConnectionError");
     }
 
     fn s_div() -> &'static str {

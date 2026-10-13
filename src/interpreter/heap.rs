@@ -338,9 +338,8 @@ impl<'a> Graph<'a> {
                     let to = self.intern(key(t), || Handle::Task(t.clone()));
                     self.edge(from, to);
                 }
-                Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
-                    stack.extend(items.iter())
-                }
+                Value::Array(items) | Value::Tuple(items) => stack.extend(items.iter()),
+                Value::Set(items) => stack.extend(items.iter()),
                 Value::Map(pairs) => {
                     for (k, val) in pairs {
                         stack.push(k);

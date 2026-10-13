@@ -1,0 +1,75 @@
+// Per-customer summaries from nested JSON orders, printed as compact JSON.
+
+fn order_total(o) -> Int {
+    let mut total = 0
+    for item in o.items {
+        total += item.qty * item.unit_cents
+    }
+    if has_key(o, "coupon") {
+        total = total * (100 - o.coupon.percent) / 100
+    }
+    return total
+}
+
+let orders = json.parse(fs.read("/dev/stdin")).orders
+let by_customer = group_by(orders, fn(o) { return o.customer.id })
+
+let mut summaries = []
+let mut paid_orders = 0
+let mut revenue = 0
+let mut refunded = 0
+for cid in keys(by_customer) {
+    let list = by_customer[cid]
+    let mut paid = 0
+    let mut spent = 0
+    let mut skus = []
+    let mut best = null
+    let mut best_total = -1
+    for o in list {
+        if o.status == "refunded" {
+            refunded += 1
+        }
+        if o.status != "paid" {
+            continue
+        }
+        let total = order_total(o)
+        paid += 1
+        spent += total
+        for item in o.items {
+            skus.push(item.sku)
+        }
+        if total > best_total {
+            best = o.id
+            best_total = total
+        }
+    }
+    paid_orders += paid
+    revenue += spent
+    summaries.push({
+        customer: cid,
+        name: list[0].customer.name,
+        paid_orders: paid,
+        spent_cents: spent,
+        skus: sort(unique(skus)),
+        largest_order: best,
+    })
+}
+
+let ranked = sort(summaries, fn(a, b) {
+    if a.spent_cents != b.spent_cents {
+        return b.spent_cents - a.spent_cents
+    }
+    if a.customer < b.customer {
+        return -1
+    }
+    return 1
+})
+for s in ranked {
+    println(json.compact(s))
+}
+println(json.compact({
+    customers: len(summaries),
+    paid_orders: paid_orders,
+    revenue_cents: revenue,
+    refunded_orders: refunded,
+}))

@@ -1,0 +1,2 @@
+import { Tally as Count } from "../parity/modules/shared_counter.fg"
+println(Count)

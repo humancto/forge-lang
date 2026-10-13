@@ -1,0 +1,78 @@
+id = "package_textkit"
+category = "multifile"
+title = "Use an installed package from forge_modules"
+prompt = '''
+Write `main.fg`. The project has the package `textkit` installed in
+`forge_modules/textkit/` (entry point `forge_modules/textkit/main.fg`); import it by its
+package name and use its functions. Its public functions, with their doc comments:
+
+```forge
+// textkit: small text utilities (package entry point).
+// Lower-case, runs of non-alphanumeric characters become one "-", no
+// leading or trailing "-".
+fn slug(s: String) -> String { ... }
+// Greedy word wrap: lines of at most `width` characters; a single word
+// longer than width gets a line of its own.
+fn wrap(text: String, width: Int) -> [String] { ... }
+fn word_count(text: String) -> Int { ... }
+```
+
+Standard input is a document. A line starting with `# ` is a heading (its text is the rest
+of the line, trimmed). Other non-blank lines are text: consecutive text lines form one
+paragraph (joined with single spaces, each line trimmed), and a blank line or a heading
+ends the paragraph. The document starts with a heading.
+
+Print:
+1. `Contents`, then one line per heading: `<n>. <heading> (#<anchor>)`, numbered from 1.
+   The anchor is `slug(heading)`; if an earlier heading already has that anchor, append
+   `-2`, `-3`, ... (the first unused one).
+2. Then for each section: an empty line, `== <heading> (<word count> words) ==` where the
+   word count is the sum of `word_count` over its paragraphs, then each paragraph wrapped
+   with `wrap(paragraph, 40)`, one output line per wrapped line, with an empty line between
+   paragraphs of the same section.
+'''
+stdin = """
+# Getting Started!
+Forge is a small language for
+   internet programs.
+It ships with HTTP, JSON and a database.
+
+Install it with one command and run hello world.
+# FAQ: Why "Forge"?
+Because   it forges things.
+# Getting started
+Duplicate headings get numbered anchors so links stay unique.
+# Getting -- Started
+Supercalifragilisticexpialidocious-words-are-never-split ok.
+# 2026 Roadmap
+"""
+needs = ["read"]
+expected_stdout = """
+Contents
+1. Getting Started! (#getting-started)
+2. FAQ: Why "Forge"? (#faq-why-forge)
+3. Getting started (#getting-started-2)
+4. Getting -- Started (#getting-started-3)
+5. 2026 Roadmap (#2026-roadmap)
+
+== Getting Started! (25 words) ==
+Forge is a small language for internet
+programs. It ships with HTTP, JSON and a
+database.
+
+Install it with one command and run
+hello world.
+
+== FAQ: Why "Forge"? (4 words) ==
+Because it forges things.
+
+== Getting started (9 words) ==
+Duplicate headings get numbered anchors
+so links stay unique.
+
+== Getting -- Started (2 words) ==
+Supercalifragilisticexpialidocious-words-are-never-split
+ok.
+
+== 2026 Roadmap (0 words) ==
+"""

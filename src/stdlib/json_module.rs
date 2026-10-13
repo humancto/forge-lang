@@ -241,8 +241,14 @@ fn validate_json_value(v: &Value) -> Result<(), String> {
         ));
     };
     match v {
-        Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
+        Value::Array(items) | Value::Tuple(items) => {
             for item in items {
+                validate_json_value(item)?;
+            }
+            Ok(())
+        }
+        Value::Set(items) => {
+            for item in items.iter() {
                 validate_json_value(item)?;
             }
             Ok(())
@@ -299,6 +305,21 @@ fn forge_to_json_line(v: &Value, sep: &Separators) -> String {
     out
 }
 
+fn write_json_items<'a>(
+    out: &mut String,
+    items: impl Iterator<Item = &'a Value>,
+    sep: &Separators,
+) {
+    out.push('[');
+    for (i, item) in items.enumerate() {
+        if i > 0 {
+            out.push_str(sep.item);
+        }
+        write_json_line(out, item, sep);
+    }
+    out.push(']');
+}
+
 fn write_json_line(out: &mut String, v: &Value, sep: &Separators) {
     match v {
         Value::Int(n) => out.push_str(&n.to_string()),
@@ -306,16 +327,8 @@ fn write_json_line(out: &mut String, v: &Value, sep: &Separators) {
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Null => out.push_str("null"),
         Value::String(s) => out.push_str(&escape_json_string(s)),
-        Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(sep.item);
-                }
-                write_json_line(out, item, sep);
-            }
-            out.push(']');
-        }
+        Value::Array(items) | Value::Tuple(items) => write_json_items(out, items.iter(), sep),
+        Value::Set(items) => write_json_items(out, items.iter(), sep),
         Value::Object(map) => {
             out.push('{');
             for (i, (k, v)) in map.iter().enumerate() {
@@ -359,12 +372,17 @@ fn forge_to_json_pretty(v: &Value, depth: usize, indent: usize) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
         Value::String(s) => escape_json_string(s),
-        Value::Array(items) | Value::Tuple(items) | Value::Set(items) => {
+        Value::Array(_) | Value::Tuple(_) | Value::Set(_) => {
+            let items: Vec<&Value> = match v {
+                Value::Array(items) | Value::Tuple(items) => items.iter().collect(),
+                Value::Set(items) => items.iter().collect(),
+                _ => Vec::new(),
+            };
             if items.is_empty() {
                 return "[]".to_string();
             }
             let entries: Vec<String> = items
-                .iter()
+                .into_iter()
                 .map(|v| {
                     format!(
                         "{}{}",

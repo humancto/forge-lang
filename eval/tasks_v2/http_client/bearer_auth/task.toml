@@ -1,0 +1,38 @@
+id = "bearer_auth"
+category = "http_client"
+title = "Call an API with bearer tokens and custom headers"
+prompt = """
+Standard input has two lines: a base URL and an API token. The endpoints under
+`<base>/auth/` require the header `Authorization: Bearer <token>`; without a valid token
+they respond with status 401 and the JSON body `{"error": "unauthorized"}`.
+
+1. `GET <base>/auth/profile.json` with no Authorization header; print
+   `no token: <status> <error field of the body>`.
+2. The same request with `Authorization: Bearer not-the-token`; print
+   `wrong token: <status> <error field>`.
+3. The same request with the real token. The body is `{"id", "name", "email", "plan"}`;
+   print `profile: <name> <<email>> (<plan>)`, e.g. `profile: Ada <ada@x.org> (free)`.
+4. `GET <base>/auth/orders.json` with the token. The body is
+   `{"orders": [{"id", "total_cents"}, ...]}`; print `orders: <count> total <sum as
+   dollars with 2 decimals>` (e.g. `orders: 2 total 12.50`).
+5. `GET <base>/headers` with these request headers: `Authorization: Bearer <token>`,
+   `Accept: application/json`, `X-Request-Id: req-<profile id>` and
+   `X-Client: eval/1.0`. It responds with a JSON object of the `x-*`, `accept` and
+   `authorization` headers it received (names in lower case). Print each as
+   `<name>: <value>`, sorted by name.
+"""
+stdin = """
+{base_url}
+eval-token-7f3a
+"""
+needs = ["net"]
+expected_stdout = """
+no token: 401 unauthorized
+wrong token: 401 unauthorized
+profile: Grace Hopper <grace@navy.example> (pro)
+orders: 3 total 145.49
+accept: application/json
+authorization: Bearer eval-token-7f3a
+x-client: eval/1.0
+x-request-id: req-4711
+"""

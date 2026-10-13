@@ -17,11 +17,12 @@ runtime/server.rs builds axum Router
 axum + tokio serve requests
     |
     v
-Each request locks the Interpreter mutex,
-calls the handler function, serializes the return value as JSON
+Each request forks the program's state (VM template or interpreter),
+decodes the body, calls the handler on the blocking pool,
+and builds the response from its return value
 ```
 
-The server implementation lives in `src/runtime/server.rs` (~354 lines).
+The server implementation lives in `src/runtime/server.rs`, with response values and body decoding in `src/runtime/http_response.rs`.
 
 ## Server Configuration
 
@@ -65,6 +66,10 @@ fn create_user(body) {
 
 Registers a function as a PUT handler.
 
+### @patch(path?)
+
+Registers a function as a PATCH handler.
+
 ### @delete(path?)
 
 Registers a function as a DELETE handler.
@@ -96,24 +101,34 @@ The Forge path syntax (`:id`) is internally converted to axum's brace syntax (`{
 
 ## Handler Parameters
 
-Handler functions receive arguments based on their parameter names:
+Handler functions receive arguments based on their parameter names (`runtime::server::handler_args`, shared by both engines):
 
-| Parameter Name              | Source                     |
-| --------------------------- | -------------------------- |
-| Name matching a path param  | URL path parameter         |
-| `body` or `data`            | Parsed JSON request body   |
-| `query` or `qs`             | Query string as an object  |
-| Name matching a query param | Individual query parameter |
-| Other                       | `null`                     |
+| Parameter Name              | Source                                                        |
+| --------------------------- | ------------------------------------------------------------- |
+| Name matching a path param  | URL path parameter                                            |
+| `body` or `data`            | Request body, decoded by content type (`{}` when absent)      |
+| `query` or `qs`             | Query string as an object                                     |
+| `headers`                   | Request headers, lower-case names                             |
+| `raw_body`                  | The body's exact text (`""` when there is none)               |
+| `req` or `request`          | `{ method, path, params, query, headers, body, raw_body }`    |
+| Name matching a query param | Individual query parameter                                    |
+| Other                       | `null`                                                        |
 
 ```forge
 @post("/search")
-fn search(body, query) {
+fn search(body, query, req) {
     say "Search body: " + str(body)
     say "Query params: " + str(query)
+    say "Method: " + req.method
     return { results: [] }
 }
 ```
+
+Request bodies are decoded before the handler runs (`runtime::http_response::read_body`): a body that is not UTF-8 is refused (`415`), JSON content types are parsed (`400` if invalid), `application/x-www-form-urlencoded` becomes an object of Strings, and anything else is a String. The undecoded text is kept as `raw_body`. These errors, like every error the server answers itself, have a JSON `{"error": ...}` body.
+
+## Responses
+
+A handler's return value is encoded as JSON on the engine that ran it, and the server builds the response from that JSON, so both engines answer byte-identically. A value built by `http.response(status, body?, headers?)` is an object tagged `__type__: "HttpResponse"`; the server validates it (`ResponseSpec::from_json`) and sends its status, headers and body (`null`: no body; String: as is, `text/plain` by default; anything else: JSON). Every other value is a `200` JSON body.
 
 ## JSON Serialization
 
@@ -140,12 +155,14 @@ If a handler function throws a runtime error, the server returns HTTP 500 with:
 { "error": "error message here" }
 ```
 
+An invalid response value (an out-of-range status, a header value with a line break, ...) also answers 500, with `invalid http.response: ...`.
+
 ## CORS
 
-CORS is enabled by default with a permissive policy (all origins, all methods, all headers). This is suitable for development; production deployments should add appropriate restrictions at the reverse proxy level.
+CORS is same-origin by default. `@server(cors: "permissive")` allows any origin, method and header.
 
 ## Concurrency Model
 
-The interpreter is wrapped in an `Arc<Mutex<Interpreter>>`. Each incoming request acquires the mutex lock, calls the handler, and releases it. This means handlers execute serially -- only one request is processed at a time.
+Each request runs in its own fork of the program's state after the top level ran (a frozen VM template, or the interpreter's `fork_for_serving`), on tokio's blocking pool. Handlers run in parallel; mutations a handler makes to top-level variables are private to its request.
 
-For high-throughput scenarios, consider running multiple Forge server instances behind a load balancer.
+Database connections opened by the top level are shared by the forks (`stdlib::db_share`): a mutex serializes statements, and a transaction belongs to the request that opened it (other requests wait for it, at most 30 seconds) and is rolled back when that request ends.

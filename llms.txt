@@ -57,6 +57,7 @@ println("{join(["a", "b"], ", ")}")       // any expression, including string li
 println(typeof(pi))           // Float
 println(user.name)
 println(nums[0])
+println(nums[-1])             // 3: negative indexes count from the end
 println(len(nums))
 println(str(42) + "!")        // + joins two Strings; convert other values with str() or "{x}"
 println(int("7") + 1)
@@ -73,7 +74,7 @@ println("{who} {age} {first} {rest}")
 
 Numbers: a whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max`, `round`, `floor` and `ceil` keep Ints as Ints (`floor`/`ceil` of a Float is an Int).
 
-Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` are literal.
+Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. `typeof(x)` returns one of `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object` (also for struct and algebraic values), `Tuple`, `Set`, `Map`, `Result`, `Option`, `Function` (a named `fn`), `Lambda` (an anonymous `fn`), `BuiltIn`, `Channel`. Strings cannot be indexed (`s[0]` is an error): use `substring(s, start, end)`. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` and Unicode classes such as `\\p{L}` are literal.
 
 ## Type annotations and checking
 
@@ -86,9 +87,9 @@ let names = ["ada", "bob"]
 let lens = map(names, fn(s) { len(s) })        // lens: [Int]
 ```
 
-Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition, T0019 discarded `push(xs, v)` result (edition 2027). Edition 2026 (default): warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
+Every program is type-checked before it runs (gradual: unannotated code is inferred, unknown things are `Any`). Diagnostics have stable codes: T0001 type mismatch, T0002 argument type, T0003 return type, T0004 argument count, T0005 invalid operator (`"a" - 1`), T0006 unknown name (with did-you-mean), T0007 unknown struct field, T0008 unknown module member (`math.sqr`), T0009 missing return, T0010 unreachable code, T0011 non-exhaustive match, T0012 interface not satisfied, T0013 not callable, T0014 Option used as its value, T0015 unknown type, T0016 missing struct field, T0017 assignment to immutable `let`, T0018 used before definition, T0019 discarded `push(xs, v)` result (edition 2027), T0020 import not found (the message shows the path it looked for), T0021 an import renames a struct/type/variant/interface (`import { Point as P }`). Edition 2026 (default): warnings, the program still runs. `forge run --strict file.fg`: diagnostics are errors, and annotated function arguments/results are also checked at run time (`type error: argument 'n' of 'double' must be Int, got String`).
 
-Edition 2027 (`edition = "2027"` in forge.toml, or `forge --edition 2027`): annotations are enforced. A contradiction of a declared type (T0001, T0002, T0003, T0012, T0015, T0016) is an error and nothing runs; annotated function arguments and results are checked at run time on every call (E0017); unannotated code is not checked and costs nothing. Generic parameters must agree within a call: `fn pair<T>(a: T, b: T)` accepts `pair(1, 2)` and `pair(1, 2.5)` (T is Float) but not `pair(1, "x")`. So annotate function signatures with the types you mean (`fn total(xs: [Int]) -> Int`), and leave unknowns unannotated rather than guessing.
+Edition 2027 (`edition = "2027"` in forge.toml, or `forge --edition 2027`): annotations are enforced. A contradiction of a declared type (T0001, T0002, T0003, T0012, T0015, T0016) or an import that cannot be found or renames a type (T0020, T0021) is an error and nothing runs; annotated function arguments and results are checked at run time on every call (E0017); unannotated code is not checked and costs nothing. Generic parameters must agree within a call: `fn pair<T>(a: T, b: T)` accepts `pair(1, 2)` and `pair(1, 2.5)` (T is Float) but not `pair(1, "x")`. So annotate function signatures with the types you mean (`fn total(xs: [Int]) -> Int`), and leave unknowns unannotated rather than guessing. A declared `Float` (parameter, return type, annotated `let`, struct field) turns an Int into a Float in 2027 and under `--strict`: `fn half(x: Float) -> Float { return x / 2 }` gives `half(3) == 1.5`, `let y: Float = 7` is `7.0`. Edition 2026 without `--strict` never converts (`half(3)` is `1`): write `float(x)` there when a value may be an Int.
 
 ## Control flow
 
@@ -124,6 +125,8 @@ loop {
     if m >= 4 { break }
 }
 println(score > 0 && score < 100)
+let grade = if score >= 50 { "pass" } else if score >= 30 { "retry" } else { "fail" }   // `if` is an expression (with `else if`); there is no `cond ? a : b`
+println(grade)
 ```
 
 ## Functions and closures
@@ -253,7 +256,7 @@ let label = match s {
 println(label)
 ```
 
-Patterns: literals (including negative numbers), `_`, bindings, constructors `Name(a, b)` (nested: `Ok(Some(x))`), and or-patterns `p1 | p2` whose alternatives bind the same names. A guard `pattern if cond` sees the pattern's bindings. If no arm matches, it is a runtime error (E0026); end with `_ => ...` when the cases are open.
+Patterns: literals (including negative numbers), `_`, bindings, constructors `Name(a, b)` (nested: `Ok(Some(x))`), and or-patterns `p1 | p2` whose alternatives bind the same names. There are no array or tuple patterns (`[a, b] =>` and `(a, b) =>` are syntax errors): destructure first (`let [a, b] = pair`) or nest matches. A guard `pattern if cond` sees the pattern's bindings. If no arm matches, it is a runtime error (E0026); end with `_ => ...` when the cases are open.
 
 ## Result, Option, errors
 
@@ -301,7 +304,7 @@ try {
 
 There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `unwrap(expr)` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. To ignore a block's errors, use `try { ... } catch e { }`.
 
-Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, ...); type-checker diagnostics are `T0001`–`T0019`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error has `e.code`. For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
+Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, `E0036` HTTP request timed out, `E0037` HTTP connection failed, ...); type-checker diagnostics are `T0001`–`T0021`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error `e` has `e.message` (without the hint), `e.type`, `e.code` and `e.hint` (the error's suggestion, or `null`). For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
 
 ```forge
 try {
@@ -317,13 +320,16 @@ try {
 ```forge
 import { double, shout } from "utils.fg"   // selected names
 println(double(21))
+import { name as user_name } from "lib/user.fg"   // renamed: binds user_name
 import { sqrt, pi } from "math"            // members of a built-in module
 println(sqrt(16))                          // math.* stays available too
 ```
 
+`as` renames functions and variables (use it when two modules export the same name); a struct, `type`, variant or interface keeps its own name (renaming one is an import error). A module runs once per program: importing it again — from another module, or with `import "m.fg"` after `import { f } from "m.fg"` — reuses it, so its top-level code runs once and every importer shares its state (`let mut` counters, caches). Import modules at the top level: a `spawn` task works on a copy of the program's state, so a module imported first inside a task is not shared with the rest of the program. Import cycles are an error (`circular import: a.fg -> b.fg -> a.fg`).
+
 Native plugins (Rust/C shared libraries built with `crates/forge-plugin`): `import native "target/release/libfoo" as foo` then `foo.add(1, 2)`, or `import { add } from native "path/libfoo"`. The platform suffix is added; paths resolve like `.fg` imports. Needs `--allow-ffi` (full trust; denied under `--sandbox` and `forge mcp`). Plugin errors are catchable runtime errors.
 
-`import "utils.fg"` brings every top-level name into scope. Paths resolve relative to the current working directory, then `forge_modules/<name>/main.fg`. Stdlib modules (`math`, `fs`, `http`, ...) are always in scope; never import them. Packages are declared in `forge.toml` (`forge add <pkg>`).
+`import "utils.fg"` brings every top-level name into scope. A path resolves relative to the importing file first, then the current working directory, then the installed packages (`forge_modules/<name>/main.fg`, `forge_modules/<name>.fg`, `forge_modules/<name>/src/main.fg`); the `.fg` suffix is optional. Stdlib modules (`math`, `fs`, `http`, ...) are always in scope; never import them. Packages are declared in `forge.toml` (`forge add <pkg>`).
 
 ## Collections and builtins
 
@@ -333,6 +339,9 @@ let mut xs = [1, 2]
 xs = push(xs, 3)              // push returns a new array: reassign it
 xs.push(4)                    // or append in place (method form)
 let top = pop(xs)             // pop(xs) / xs.pop() remove and return the last element
+let mut groups = { a: [] }
+groups["a"].push(1)           // the method form also updates a field/index place
+groups.a.push(2)              // (the root must be `let mut`); groups is { a: [1, 2] }
 println(map(nums, fn(x) { return x * 2 }))
 println(filter(nums, fn(x) { return x > 2 }))
 println(reduce(nums, 0, fn(acc, x) { return acc + x }))   // (array, initial, fn)
@@ -362,12 +371,14 @@ println(contains(s, "lo, W"))
 let st = set([1, 2, 2, 3])
 println(st.has(2))
 let mut m = map()
-m = m.set("k", 1)
+m = m.set("k", 1)             // set/remove return a new Map: reassign
 println(m.get("k"))
 println([1, 2, 3, 4].stream().filter(fn(x) { return x > 1 }).take(2).collect())
 ```
 
-Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
+Maps: `m.set(k, v)` and `m.remove(k)` return a new Map (a bare `m.set(k, v)` statement changes nothing), `m.get(k)` (`null` if absent), `m.has(k)`, `m.keys()`, `m.values()`, `m.len()`, `m.to_array()` (an array of `(key, value)` tuples), `for k, v in m`; `m[k]` is an error. Keys may be any value; for String keys an object (`obj[k] = v`) is simpler.
+
+Other builtins: `exit(code)` (ends the program at once with that exit status; output already printed is kept), `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stderr: warnings and errors of CLI programs), `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
 
 ## Standard library (always in scope)
 
@@ -376,17 +387,17 @@ Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digi
 | `math` | `sqrt(x)`, `pow(b, e)`, `abs`, `max(a, b)`, `min`, `floor`, `ceil`, `round`, `random_int(lo, hi)`, `pi`, `e` |
 | `fs` | `read(path)`, `write(path, text)`, `append`, `exists`, `list(dir)`, `remove`, `mkdir`, `copy(src, dst)`, `rename` |
 | `json` | `parse(text)` (keeps the document's key order), `stringify(value)` → `{"a": 1, "b": [1, 2]}`, `compact(value)` → `{"a":1,"b":[1,2]}` (no whitespace), `pretty(value, indent?)` |
-| `regex` | `test(text, pattern)`, `find(text, pattern)`, `find_all(text, pattern)`, `replace(text, pattern, repl)`, `split(text, pattern)` — text FIRST |
+| `regex` | `test(text, pattern)`, `find(text, pattern)` (first match or `null`), `find_all(text, pattern)`, `captures(text, pattern)` (first match's groups `[whole, g1, g2, ...]`, an unmatched group `null`; `null` when nothing matches), `captures_all(text, pattern)` (one such array per match), `replace(text, pattern, repl)` (`repl` may use `$1`, `$0`, `$$`, and `${name}` for `(?<name>...)` in a `"""..."""` string), `split(text, pattern)` — text FIRST |
 | `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
-| `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body) |
-| `db` | SQLite: `open(path)`, `execute(sql, params?)`, `query(sql, params?)` → array of objects, `close()` |
+| `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON; `timeout` is in seconds, default 30, `0.5` allowed); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body); a 4xx/5xx answer is a normal response with `ok == false`; no answer raises `E0036` (timed out) or `E0037` (refused, unknown host, TLS) |
+| `db` | SQLite: `open(path)`, `execute(sql, params?)`, `query(sql, params?)` → array of objects, `last_insert_rowid()`, `begin()`/`commit()`/`rollback()`, `close()` |
 | `pg`, `mysql` | `connect(url)`, `query(conn, sql, params?)`, `execute(conn, sql, params?)`, `close(conn)`; mysql adds `begin/commit/rollback` |
 | `jwt` | `sign(claims, secret, opts?)`, `verify(token, secret)`, `decode(token)`, `valid(token, secret)` |
-| `csv` | `parse(text)`, `stringify(rows)`, `read(path)`, `write(path, rows)` |
+| `csv` | `parse(text, opts?)` (RFC 4180: quoted fields keep commas, quotes and line breaks; rows are objects keyed by the header; unquoted fields that are exactly an integer, a decimal or `true`/`false` become numbers/booleans, anything else (`02134`, `+1`, `1e5`, quoted text) stays a String; `opts`: `{ header: false }` gives arrays, `{ types: false }` keeps every field a String), `stringify(rows)`, `read(path, opts?)`, `write(path, rows)` |
 | `env` | `get(name, default?)`, `set`, `has`, `keys` |
 | `log` | `info`, `warn`, `error`, `debug` (structured, via tracing) |
 | `term` | `red`, `green`, `bold`, `table(rows)`, `bar`, `sparkline`, `banner`, `box` |
-| `time` | `now()`, `format`, `parse`, `add`, `diff`, `unix`, `sleep` |
+| `time` | `now()` → `{ iso, unix, unix_ms, year, month, day, hour, minute, second, weekday, weekday_short, day_of_year, timezone }` (UTC); `unix()` (Int seconds); `parse(s)` (`2024-03-05`, `2024-03-05 10:20:30`, `2024-03-05T10:20:30Z` or with an offset, converted to UTC) → the same object; `format(t, "%Y-%m-%d")` (`t` an object or Unix seconds, strftime pattern, default `%Y-%m-%d %H:%M:%S`, always UTC); `add(t, secs)` / `add(t, { days: 1, hours: 2 })`, `sub` → object; `diff(a, b)` (a − b) → `{ seconds, minutes, hours, days, weeks, human }`; `sleep(seconds)` |
 | `os`, `path` | `os.platform()`, `os.cpus()`; `path.join(a, b)`, `path.extname(p)`, `path.basename(p)` |
 | `io` | `prompt`, `args_parse`, `args_get`, `args_has` |
 
@@ -396,6 +407,9 @@ Other builtins: `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digi
 println(math.sqrt(16.0))
 println(regex.find_all("a1b22c333", "\\d+"))
 println(regex.replace("a1b2", "\\d", "#"))
+let kv = regex.captures("user=ada id=7", "user=(\\w+) id=(\\d+)")   // ["user=ada id=7", "ada", "7"]
+println("{kv[1]} {int(kv[2]) + 1}")
+println(regex.replace("2024-01-15", "(\\d+)-(\\d+)-(\\d+)", "$3.$2.$1"))   // 15.01.2024
 println(json.stringify({ a: [1, 2] }))
 println(json.compact({ b: 1, a: [1, 2] }))   // {"b":1,"a":[1,2]}
 println(json.parse("[1, 2]")[1])
@@ -437,7 +451,7 @@ let t = spawn {
 println(await_timeout(t, 10))  // null on timeout (milliseconds)
 ```
 
-Also: `try_send`, `try_receive`, `select(channels, timeout_ms?)`, `close(ch)`.
+Also: `try_send(ch, v)` (true when sent), `try_receive(ch)` (`Some(v)`, or `None` when nothing is waiting), `select(channels, timeout_ms?)` (`[index, value]` from the first channel with a value; `null` on timeout and also when the channels are closed), `close(ch)` (then `receive` returns `null` once the channel is drained). A program ends when its top level ends: detached `spawn` tasks still running are abandoned (`await` them to wait).
 
 Tasks communicate through return values (`squad` results, `await`) and channels. Do not mutate captured variables from inside `spawn` and expect the parent to see it: the default VM gives each task its own copy (the `--interp` engine shares closure state).
 
@@ -460,9 +474,47 @@ fn search(query) -> Json {
 fn echo(body: Json) -> Json {
     return { received: body }
 }
+
+db.open("app.db")                      // opened once; every handler uses it
+db.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT)")
+
+@post("/items")
+fn create(body, req) {
+    if typeof(body) != "Object" || !has_key(body, "name") {
+        return http.response(400, { error: "name is required" })
+    }
+    let token = get(req.headers, "authorization")   // lower-case names; null if absent
+    if token != "Bearer secret" {
+        return http.response(401, { error: "unauthorized" }, { "WWW-Authenticate": "Bearer" })
+    }
+    db.execute("INSERT INTO items (name) VALUES (?)", [body.name])
+    let id = db.last_insert_rowid()
+    return http.response(201, { id: id, name: body.name }, { Location: "/items/{id}" })
+}
+
+@get("/items/:id")
+fn show(id) {
+    let rows = db.query("SELECT id, name FROM items WHERE id = ?", [int(id)])
+    if len(rows) == 0 {
+        return http.response(404, { error: "no item {id}" })
+    }
+    return rows[0]
+}
+
+@delete("/items/:id")
+fn remove(id) {
+    db.execute("DELETE FROM items WHERE id = ?", [int(id)])
+    return http.response(204)              // no body
+}
 ```
 
-Handler parameters bind by name: path params (`:name`), `body`/`data` (parsed JSON body), `query`/`qs` (all query params), or a single query param by its name. Return an object to send JSON. Decorators: `@server(port:, host:, cors:)`, `@get`, `@post`, `@put`, `@delete`, `@ws`. The server binds `127.0.0.1` by default with same-origin CORS (`cors: "permissive"` to open it). Each request runs in an isolated fork, so handler mutations of top-level variables do not persist across requests. Server programs run on the bytecode VM by default (`forge --interp run` serves on the interpreter; responses are identical). Unknown decorators or non-literal `@server` arguments make the program fall back to the interpreter automatically.
+Handler parameters bind by name: path params (`:name`), `body`/`data` (the request body, `{}` when there is none), `query`/`qs` (all query params), `headers` (request headers, lower-case names), `raw_body` (the body's exact text before decoding, `""` when there is none: use it to check webhook signatures), `req`/`request` (the whole request: `method`, `path`, `params`, `query`, `headers`, `body` — `null` when there is none — and `raw_body`), or a single query param by its name. Path, query and header values are Strings; read an optional one with `get(obj, key)` (indexing a missing key is an error).
+
+Request bodies are decoded by `Content-Type`: JSON (`application/json`, `*+json`) is parsed, a form (`application/x-www-form-urlencoded`) becomes an object of Strings, anything else (text, or no content type) is a String. Invalid JSON is answered `400 {"error": "invalid JSON body: ..."}` and a body that is not UTF-8 text `415` (whatever the content type), before the handler runs.
+
+Returning a value answers `200` with it as JSON. `http.response(status, body?, headers?)` chooses the response: `status` is an Int from 200 to 599; a `null` body sends no body (`204`, redirects), a String is sent as is (`text/plain; charset=utf-8` unless a `Content-Type` header is given), anything else as JSON. Header values are Strings (numbers and Bools are converted; an array sends the header once per value, e.g. `Set-Cookie`); a value with a line break, an invalid name or `Content-Length` is a runtime error. A handler error (or `must Err(...)`) answers `500 {"error": message}`.
+
+Decorators: `@server(port:, host:, cors:)`, `@get`, `@post`, `@put`, `@patch`, `@delete`, `@ws`. The server binds `127.0.0.1` by default with same-origin CORS (`cors: "permissive"` to open it). Each request runs in an isolated fork, so handler mutations of top-level variables do not persist across requests. A database the top level opens (`db.open`, `pg.connect`) is shared by every handler (and by `spawn`ed tasks): statements of concurrent requests run one at a time, a transaction (`db.begin()` ... `db.commit()`) is private to the request that opened it and is rolled back if the request ends without committing, and `db.last_insert_rowid()` is the request's own last insert. `db.open` inside a handler opens a connection for that request only. Server programs run on the bytecode VM by default (`forge --interp run` serves on the interpreter; responses are identical). Unknown decorators or non-literal `@server` arguments make the program fall back to the interpreter automatically.
 
 ## Tests
 
@@ -494,7 +546,7 @@ fn cities() { return ["Oslo"] }
 - Words like `order`, `from`, `to`, `limit`, `where`, `select`, `table`, `take`, `times`, `safe` are fine as variable, function, parameter and field names. Reserved: `let mut fn return if else match for in while loop break continue struct type interface impl pub import spawn squad try catch async await yield true false null`.
 - `for i, x in array` does not work. Use `for e in enumerate(array) { e.index, e.value }`.
 - No `|x| ...` closures and no arrow functions. Write `fn(x) { return ... }`.
-- No `throw`, no `elif`, no `??` operator. Use `Err`/`?`, `else if`, and `get(obj, key, default)`.
+- No `throw`, no `elif`, no `??` and no `? :` operator. Use `Err`/`?`, `else if`, `get(obj, key, default)` and `if c { a } else { b }`.
 - Method chains cannot start a line with `.`; keep `a.filter(...).map(...)` on one line.
 - `regex.*` takes `(text, pattern)`, not `(pattern, text)`. Escape backslashes in patterns: `"\\d+"`.
 - `reduce(array, initial, fn)` — the initial value comes second.

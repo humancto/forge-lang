@@ -1,0 +1,36 @@
+id = "shared_deadline"
+category = "parallel"
+title = "Concurrent jobs under one shared deadline"
+prompt = """
+Each non-blank line of standard input is a job `<name> <duration_ms>`. Start all jobs at
+once; a job sleeps for its duration and then produces `<name in upper case>-<duration>`.
+
+All jobs share one deadline: 1 second after they were started. A job that has not
+finished by then counts as timed out; do not wait for it any longer. The program must
+print its output and exit within 2 seconds in total, even though some jobs would run for
+much longer (no job's duration is between 400 ms and 3000 ms).
+
+Print one line per job in input order, `<name>: <result>` or `<name>: timed out`, then
+`done=<n> timed_out=<n>`.
+"""
+stdin = """
+fetch 120
+render 5000
+index 300
+compress 4000
+upload 50
+notify 6000
+audit 10
+"""
+needs = []
+timeout = 2
+expected_stdout = """
+fetch: FETCH-120
+render: timed out
+index: INDEX-300
+compress: timed out
+upload: UPLOAD-50
+notify: timed out
+audit: AUDIT-10
+done=4 timed_out=3
+"""

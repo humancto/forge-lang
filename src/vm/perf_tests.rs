@@ -227,6 +227,40 @@ fn push_assignment_compiles_to_push_local_in_every_edition() {
 }
 
 #[test]
+fn pushing_object_and_tuple_literals_compiles_to_push_local() {
+    use crate::semantics::edition::Edition;
+    for value in ["{id: i, tags: [i, 1]}", "(i, \"x\")", "{nested: {a: i}}"] {
+        let source = format!(
+            "fn f(n) {{\n let mut xs = []\n for i in range(n) {{ xs.push({value}) }}\n return xs\n}}"
+        );
+        assert!(uses_push_local(&source, Edition::E2026), "{value}");
+    }
+    // A value holding a call runs user code; the statement still appends in
+    // place, because `PushLocal` (like the generic method call) evaluates
+    // the value before it reads the local.
+    let call = "fn g() { return 1 }\nfn f() {\n let mut xs = []\n xs.push({v: g()})\n return xs\n}";
+    assert!(uses_push_local(call, Edition::E2026));
+}
+
+#[test]
+fn pushed_object_literals_are_invisible_to_aliases() {
+    assert_fn_output(
+        r#"
+        let mut rows = []
+        rows.push({id: 1})
+        let before = rows
+        rows.push({id: 2, tags: [1, 2]})
+        rows.push((3, "x"))
+        say len(before)
+        say len(rows)
+        say rows[1].tags
+        say rows[2]
+        "#,
+        &["1", "3", "[1, 2]", "(3, x)"],
+    );
+}
+
+#[test]
 fn push_assignment_in_place_is_invisible_to_aliases() {
     for edition in crate::semantics::edition::Edition::ALL {
         let _edition = crate::semantics::edition::scope(Some(*edition));
@@ -353,4 +387,99 @@ fn interned_strings_are_not_mutated_by_in_place_append() {
         "#,
         &["abc", "abcd", "true"],
     );
+}
+
+// ---------------------------------------------------------------------------
+// Sets: `s.add(x)` / `s.remove(x)` statements update an owned set in place
+// (`UpdateSetLocal`), and the hash index answers lookups.
+// ---------------------------------------------------------------------------
+
+fn uses_update_set_local(source: &str) -> bool {
+    fn walk(chunk: &crate::vm::bytecode::Chunk) -> bool {
+        chunk.code.iter().any(|&i| {
+            crate::vm::bytecode::decode_op(i) == crate::vm::bytecode::OpCode::UpdateSetLocal as u8
+        }) || chunk.prototypes.iter().any(walk)
+    }
+    walk(&compiler::compile(&parse_program(source)).expect("compile error"))
+}
+
+#[test]
+fn set_add_and_remove_statements_compile_to_update_set_local() {
+    assert!(uses_update_set_local(
+        "fn f() {\n let mut s = set([])\n s.add(1)\n return s\n}"
+    ));
+    assert!(uses_update_set_local("let mut s = set([1])\ns.remove(1)"));
+    // Expression position, an immutable binding or a non-simple argument
+    // keep the generic lowering.
+    assert!(!uses_update_set_local(
+        "fn f() {\n let mut s = set([])\n let t = s.add(1)\n return t\n}"
+    ));
+    assert!(!uses_update_set_local("let s = set([])\ns.add(1)"));
+    assert!(!uses_update_set_local(
+        "fn g() { return 1 }\nlet mut s = set([])\ns.add(g())"
+    ));
+}
+
+#[test]
+fn set_updates_in_place_are_invisible_to_aliases() {
+    assert_fn_output(
+        r#"
+        let mut s = set([])
+        s.add(1)
+        s.add(2)
+        let a = s
+        s.add(3)
+        s.remove(1)
+        let holder = [s]
+        s.add(4)
+        s.remove(2)
+        let f = fn() { return len(s) }
+        s.add(5)
+        say a
+        say holder[0]
+        say s
+        say f()
+        "#,
+        &["set(1, 2)", "set(2, 3)", "set(3, 4, 5)", "3"],
+    );
+}
+
+#[test]
+fn set_updates_keep_set_semantics_in_place() {
+    assert_fn_output(
+        r#"
+        let mut s = set([])
+        for i in range(40) {
+            s.add(i % 20)
+            s.add(float(i % 20))
+        }
+        say len(s)
+        for i in range(20) {
+            if i % 4 != 0 { s.remove(float(i)) }
+        }
+        say s
+        let mut items = []
+        for x in s { items.push(x) }
+        say items
+        s.add(1)
+        say [s.has(1.0), s.has(2), len(s)]
+        "#,
+        &[
+            "20",
+            "set(0, 4, 8, 12, 16)",
+            "[0, 4, 8, 12, 16]",
+            "[true, false, 6]",
+        ],
+    );
+}
+
+#[test]
+fn update_set_local_with_an_unknown_operation_is_rejected() {
+    use crate::vm::bytecode::{encode_abc, Chunk, OpCode};
+    let mut chunk = Chunk::new("bad");
+    chunk.max_registers = 2;
+    chunk.emit_at(encode_abc(OpCode::UpdateSetLocal, 0, 1, 7), 1, 0);
+    chunk.emit_at(encode_abc(OpCode::ReturnNull, 0, 0, 0), 1, 0);
+    let err = crate::vm::verify::verify_chunk(&chunk).expect_err("must be rejected");
+    assert!(err.to_string().contains("unknown operation"), "{}", err);
 }

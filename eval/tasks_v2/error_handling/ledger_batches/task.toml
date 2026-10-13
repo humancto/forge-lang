@@ -1,0 +1,75 @@
+id = "ledger_batches"
+category = "error_handling"
+title = "Bank ledger with all-or-nothing batches and an exit code"
+prompt = """
+Standard input is a list of ledger commands, one per line (blank lines ignored, leading and
+trailing spaces ignored). Account names are words; amounts must be positive integers
+(digits only, greater than 0).
+
+- `open <account> <amount>`: create an account with that balance (amount may be 0 here);
+  errors: `account exists`, `invalid amount`.
+- `deposit <account> <amount>`, `withdraw <account> <amount>`,
+  `transfer <from> <to> <amount>`; errors: `unknown account <name>` (check accounts in the
+  order they appear in the command, before the amount), `invalid amount`,
+  `insufficient funds` (a balance may not go below 0), `same account` (transfer to itself,
+  checked after the accounts exist).
+- Any other command fails with `unknown command`.
+- `batch` starts a group of commands that ends with `end`. A batch is all-or-nothing:
+  if any command in it fails, none of its commands take effect.
+
+Output: for a command outside a batch print `<command line>: ok` or
+`<command line>: error <message>`. For a batch print `batch <k>: ok (<number of commands>
+commands)` or `batch <k>: failed at command <i>: <message>` (k counts batches from 1, i
+counts the commands inside the batch from 1; later commands of a failed batch are not
+checked). Finally print every account as `<account> <balance>` sorted by name, then
+`total <sum of balances>`. Exit with status 1 if any command or batch failed, else 0.
+"""
+stdin = """
+open alice 100
+open bob 50
+open alice 5
+deposit carol 10
+batch
+  transfer alice bob 30
+  withdraw bob 70
+end
+batch
+  open carol 0
+  transfer alice carol 50
+  withdraw carol 60
+  deposit bob 1
+end
+transfer bob bob 1
+transfer bob dave 1
+withdraw alice 0
+deposit alice 12x
+withdraw alice 51
+batch
+  deposit alice 25
+  open carol 1
+end
+refund alice 3
+transfer alice bob 51
+"""
+needs = []
+exit_code = 1
+expected_stdout = """
+open alice 100: ok
+open bob 50: ok
+open alice 5: error account exists
+deposit carol 10: error unknown account carol
+batch 1: ok (2 commands)
+batch 2: failed at command 3: insufficient funds
+transfer bob bob 1: error same account
+transfer bob dave 1: error unknown account dave
+withdraw alice 0: error invalid amount
+deposit alice 12x: error invalid amount
+withdraw alice 51: ok
+batch 3: ok (2 commands)
+refund alice 3: error unknown command
+transfer alice bob 51: error insufficient funds
+alice 44
+bob 10
+carol 1
+total 55
+"""

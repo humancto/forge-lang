@@ -1,0 +1,101 @@
+// INI validation: syntax errors stop at once (exit 2); validation errors
+// are collected (exit 1).
+
+let SCHEMA = [
+    { name: "server.host", kind: "string", default: null },
+    { name: "server.port", kind: "port", default: null },
+    { name: "limits.max_conn", kind: "count", default: "10" },
+    { name: "limits.timeout", kind: "positive", default: "30" },
+    { name: "limits.debug", kind: "bool", default: "false" },
+]
+
+fn kind_of(name: String) {
+    let entry = find(SCHEMA, fn(s) { return s.name == name })
+    if entry == null {
+        return null
+    }
+    return entry.kind
+}
+
+// The problem with a value, or null when it is fine.
+fn check(kind: String, v: String) {
+    if kind == "string" {
+        return null
+    }
+    if kind == "port" || kind == "count" {
+        if !regex.test(v, "^-?[0-9]+$") {
+            return "must be an integer"
+        }
+        let n = int(v)
+        if (kind == "port" && (n < 1 || n > 65535)) || (kind == "count" && n < 1) {
+            return "out of range"
+        }
+        return null
+    }
+    if kind == "positive" {
+        if !regex.test(v, "^-?[0-9]+(\\.[0-9]+)?$") {
+            return "must be a number"
+        }
+        if float(v) <= 0.0 {
+            return "out of range"
+        }
+        return null
+    }
+    if v != "true" && v != "false" {
+        return "must be true or false"
+    }
+    return null
+}
+
+let mut section = ""
+let mut values = {}
+let mut errors = []
+for e in enumerate(split(fs.read("/dev/stdin"), "\n")) {
+    let n = e.index + 1
+    let line = e.value.trim()
+    if line == "" || starts_with(line, "#") || starts_with(line, ";") {
+        continue
+    }
+    if regex.test(line, "^\\[[a-z_]+\\]$") {
+        section = substring(line, 1, len(line) - 1)
+        continue
+    }
+    let eq = index_of(line, "=")
+    let mut key = ""
+    let mut value = ""
+    if eq > 0 {
+        key = substring(line, 0, eq).trim()
+        value = substring(line, eq + 1, len(line)).trim()
+    }
+    if eq <= 0 || !regex.test(key, "^[a-z_]+$") || value == "" || section == "" {
+        println("line {n}: syntax error")
+        exit(2)
+    }
+    let name = "{section}.{key}"
+    let kind = kind_of(name)
+    if kind == null {
+        errors.push("line {n}: unknown key {name}")
+    } else if has_key(values, name) {
+        errors.push("line {n}: duplicate key {name}")
+    } else {
+        values[name] = value
+        let problem = check(kind, value)
+        if problem != null {
+            errors.push("line {n}: {name} {problem}")
+        }
+    }
+}
+for s in SCHEMA {
+    if s.default == null && !has_key(values, s.name) {
+        errors.push("missing {s.name}")
+    }
+}
+if len(errors) > 0 {
+    for err in errors {
+        println(err)
+    }
+    exit(1)
+}
+for s in SCHEMA {
+    println("{s.name}={get(values, s.name, s.default)}")
+}

@@ -1,0 +1,38 @@
+// Sessionize events per user with a 30-minute inactivity gap.
+
+let mut events = []
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    let parts = split(line.trim(), " ")
+    // time.parse understands ISO 8601 offsets; .unix is seconds since the epoch (UTC)
+    events.push({ user: parts[1], at: time.parse(parts[0]).unix })
+}
+
+fn utc(unix: Int) -> String {
+    return time.format(unix, "%Y-%m-%d %H:%M:%S")
+}
+
+let by_user = group_by(events, fn(e) { return e.user })
+for user in sort(keys(by_user)) {
+    let times = sort(map(by_user[user], fn(e) { return e.at }))
+    let mut sessions = []
+    let mut current = [times[0]]
+    for t in slice(times, 1, len(times)) {
+        if t - current[len(current) - 1] > 1800 {
+            sessions.push(current)
+            current = [t]
+        } else {
+            current.push(t)
+        }
+    }
+    sessions.push(current)
+    println("{user}: {len(sessions)} session(s)")
+    for s in sessions {
+        let first = s[0]
+        let last = s[len(s) - 1]
+        let d = last - first
+        println("  {utc(first)} -> {utc(last)} {d / 60}m{pad_start(str(d % 60), 2, "0")}s {len(s)} events")
+    }
+}

@@ -231,6 +231,27 @@ pub struct Checker<'a> {
     /// dropped too.
     pub suppressed_regions: Vec<Span>,
     facts: TypeFacts,
+    /// A wildcard import could not be read: any global name may be
+    /// something it defines, so none is checked as the builtin.
+    pub(crate) unknown_wildcard: bool,
+    /// Set while the bodies of an imported module's functions are inferred
+    /// (`import_declarations`): their names resolve in that module, not in
+    /// the file being checked.
+    foreign: Option<ForeignModule>,
+}
+
+/// Name resolution for an imported module's function bodies. The syntax
+/// index and resolution belong to the importing file, so they say nothing
+/// about these bodies: a module-level name (`let mut count = 0`) must not
+/// resolve to a builtin of the same spelling, nor to the importer's names.
+struct ForeignModule {
+    /// Names the module's top level may bind (over-approximated).
+    binders: HashSet<String>,
+    /// The module has a wildcard import: any name may be defined there.
+    unknown: bool,
+    /// Module functions imported under their own name: they are in
+    /// `functions` with the module's signature.
+    kept: HashSet<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -258,6 +279,8 @@ impl<'a> Checker<'a> {
             interfaces: HashMap::new(),
             methods: HashMap::new(),
             functions: HashMap::new(),
+            unknown_wildcard: false,
+            foreign: None,
             cx: InferCtx::default(),
             scopes: vec![HashMap::new()],
             frames: Vec::new(),
@@ -299,8 +322,14 @@ impl<'a> Checker<'a> {
 
     /// Bring in the declarations of an imported module (all of them for a
     /// wildcard import, only `names` otherwise).
-    pub fn import_declarations(&mut self, program: &Program, names: Option<&[String]>) {
-        let wanted = |name: &str| names.is_none_or(|n| n.iter().any(|x| x == name));
+    pub fn import_declarations(&mut self, program: &Program, names: Option<&[ImportName]>) {
+        let wanted = |name: &str| names.is_none_or(|n| n.iter().any(|x| x.name == name));
+        // `import { f as g }` declares the function under its alias.
+        let alias = |name: &str| {
+            names
+                .and_then(|n| n.iter().find(|x| x.name == name))
+                .and_then(|x| x.alias.clone())
+        };
         let stmts: Vec<SpannedStmt> = program
             .statements
             .iter()
@@ -314,16 +343,42 @@ impl<'a> Checker<'a> {
                 Stmt::ImplBlock { type_name, .. } => wanted(type_name),
                 _ => false,
             })
-            .cloned()
+            .map(|s| {
+                let mut s = s.clone();
+                if let Stmt::FnDef { name, .. } = &mut s.stmt {
+                    if let Some(alias) = alias(name) {
+                        *name = alias;
+                    }
+                }
+                s
+            })
             .collect();
         self.collect_declarations(&stmts);
         // Imported function bodies are not checked here, but their return
-        // types are still inferred so calls get useful result types.
+        // types are still inferred so calls get useful result types. Names
+        // in those bodies resolve in the module (`ForeignModule`).
+        let (binders, unknown) = crate::semantics::hoist::module_binders(&program.statements);
+        let kept = program
+            .statements
+            .iter()
+            .filter_map(|s| match &s.stmt {
+                Stmt::FnDef { name, .. } if wanted(name) && alias(name).is_none() => {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let saved_foreign = self.foreign.replace(ForeignModule {
+            binders,
+            unknown,
+            kept,
+        });
         let before = std::mem::take(&mut self.diagnostics);
         let mute = std::mem::replace(&mut self.mute, true);
         self.infer_return_types(&stmts);
         self.mute = mute;
         self.diagnostics = before;
+        self.foreign = saved_foreign;
     }
 
     fn walk_program(&mut self, program: &Program) {
@@ -538,14 +593,29 @@ impl<'a> Checker<'a> {
 
     /// Is `name` (as used in the current statement) the builtin/module of
     /// that name, i.e. not shadowed by a user definition?
+    /// The user function `name` denotes here. In an imported module's
+    /// body only the module's own imported functions are known (the
+    /// importer's functions are not visible there).
+    fn function_here(&self, name: &str) -> Option<&Callable> {
+        match &self.foreign {
+            Some(f) if !f.kept.contains(name) => None,
+            _ => self.functions.get(name),
+        }
+    }
+
     fn is_global_here(&self, name: &str) -> bool {
         if self.lookup(name).is_some() || self.functions.contains_key(name) {
             return false;
+        }
+        if let Some(f) = &self.foreign {
+            return !f.unknown && !f.binders.contains(name) && builtins::is_global(name);
         }
         match (self.index, self.resolution) {
             (Some(_), Some(res)) => {
                 let occs = self.occs_in_stmt(name, NameClass::Value);
                 match occs.first() {
+                    // An unreadable `import "m.fg"` may define it.
+                    Some(_) if self.unknown_wildcard => false,
                     Some(id) => matches!(res.resolved[*id], Resolved::Global),
                     // Synthesized names (`say` → println) have no
                     // occurrence; they are always the builtin.
@@ -624,6 +694,17 @@ impl<'a> Checker<'a> {
         let ty = self.lower(ann);
         self.type_params.pop();
         ty
+    }
+
+    /// The declared type of field `field` of struct `name` (generic
+    /// parameters stay `Ty::Param`).
+    pub(crate) fn struct_field_type(&self, name: &str, field: &str) -> Option<Ty> {
+        self.structs
+            .get(name)?
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .map(|f| f.ty.clone())
     }
 
     pub(crate) fn is_interface(&self, name: &str) -> bool {
@@ -2011,6 +2092,7 @@ impl<'a> Checker<'a> {
                 };
             }
         }
+        let a = self.upcast_to_interfaces(&e, &a, span);
         let snap = self.cx.snapshot();
         if self.cx.assign(&e, &a) {
             return true;
@@ -2019,6 +2101,47 @@ impl<'a> Checker<'a> {
         let m = msg(&self.cx.finalize(&e), &self.cx.finalize(&a));
         self.simple(code, span, m);
         false
+    }
+
+    /// `actual` with every struct that sits where `expected` has an
+    /// interface replaced by that interface, so `Ok(Circle {..})` fits
+    /// `Result<Shape, E>` and `[Circle {..}]` fits `[Shape]` (collections
+    /// are values, so element types may be upcast). A struct that does not
+    /// satisfy the interface is reported (T0012) where it is found.
+    fn upcast_to_interfaces(&mut self, expected: &Ty, actual: &Ty, span: Span) -> Ty {
+        let e = self.cx.resolve(expected);
+        let a = self.cx.resolve(actual);
+        match (&e, &a) {
+            (Ty::Named(iface, _), Ty::Named(st, _))
+                if st != iface && self.interfaces.contains_key(iface) =>
+            {
+                let (st, iface) = (st.clone(), iface.clone());
+                self.check_interface_satisfaction(&st, &iface, span);
+                e.clone()
+            }
+            (Ty::Array(x), Ty::Array(y)) => {
+                Ty::Array(Box::new(self.upcast_to_interfaces(x, y, span)))
+            }
+            (Ty::Set(x), Ty::Set(y)) => Ty::Set(Box::new(self.upcast_to_interfaces(x, y, span))),
+            (Ty::Option(x), Ty::Option(y)) => {
+                Ty::Option(Box::new(self.upcast_to_interfaces(x, y, span)))
+            }
+            (Ty::Result(x1, x2), Ty::Result(y1, y2)) => Ty::Result(
+                Box::new(self.upcast_to_interfaces(x1, y1, span)),
+                Box::new(self.upcast_to_interfaces(x2, y2, span)),
+            ),
+            (Ty::Map(k1, v1), Ty::Map(k2, v2)) => Ty::Map(
+                Box::new(self.upcast_to_interfaces(k1, k2, span)),
+                Box::new(self.upcast_to_interfaces(v1, v2, span)),
+            ),
+            (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => Ty::Tuple(
+                xs.iter()
+                    .zip(ys)
+                    .map(|(x, y)| self.upcast_to_interfaces(x, y, span))
+                    .collect(),
+            ),
+            _ => a,
+        }
     }
 
     /// Does `type_name` provide everything `iface` requires? Reports T0012
@@ -2270,14 +2393,18 @@ impl<'a> Checker<'a> {
             "None" => return Ty::option(Ty::Any),
             _ => {}
         }
-        if let Some(c) = self.functions.get(name) {
+        if let Some(c) = self.function_here(name) {
             return Ty::Fn(c.sig.clone());
         }
         if let Some(t) = self.variant_value_type(name) {
             return t;
         }
-        if let Some(sig) = builtins::function(name) {
-            return Ty::Fn(sig.clone());
+        // Only the builtin itself: an imported name of the same spelling
+        // (from a module that could not be read) is unknown, not the builtin.
+        if self.is_global_here(name) {
+            if let Some(sig) = builtins::function(name) {
+                return Ty::Fn(sig.clone());
+            }
         }
         Ty::Any
     }
@@ -2766,7 +2893,7 @@ impl<'a> Checker<'a> {
             let ty = self.cx.resolve(&b.ty);
             return self.call_value(&ty, name, args, has_spread, span, true);
         }
-        if let Some(c) = self.functions.get(name).cloned() {
+        if let Some(c) = self.function_here(name).cloned() {
             return self.call_signature(name, &c.sig, args, has_spread, span, CallKind::User);
         }
         if let Some(t) = self.variant_value_type(name) {
@@ -3219,6 +3346,19 @@ impl<'a> Checker<'a> {
 
         let ot = self.infer(object, None);
         let ot = self.cx.resolve(&ot);
+        // `o.items.push(x)` updates the place `o.items` (both engines), so
+        // like `o.items = v` it needs a mutable root. Reported only when
+        // the receiver is known to be an array/set: anything else may have
+        // its own `push` method, which updates nothing.
+        if matches!(object, Expr::FieldAccess { .. } | Expr::Index { .. })
+            && crate::semantics::is_mutating_method(method, args.len())
+            && matches!(
+                (&ot, method),
+                (Ty::Array(_), "push" | "pop") | (Ty::Set(_), "add" | "remove")
+            )
+        {
+            self.check_mutable_root(object);
+        }
         if let Ty::Named(type_name, _) = &ot {
             let type_name = type_name.clone();
             if let Some(m) = self.find_method(&type_name, method, 0) {

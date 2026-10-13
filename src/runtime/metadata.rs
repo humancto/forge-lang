@@ -117,7 +117,7 @@ pub fn top_level_fn_params(program: &Program) -> std::collections::HashMap<Strin
 }
 
 /// Route decorators the HTTP server understands (see [`extract_runtime_plan`]).
-const ROUTE_DECORATORS: &[&str] = &["get", "post", "put", "delete", "ws"];
+const ROUTE_DECORATORS: &[&str] = &["get", "post", "put", "patch", "delete", "ws"];
 
 /// Decorators that only tag functions for `forge test`.
 const TEST_DECORATORS: &[&str] = &["test", "skip", "before", "after"];
@@ -174,6 +174,7 @@ fn extract_routes(name: &str, decorators: &[Decorator]) -> Vec<Route> {
             "get" => "GET",
             "post" => "POST",
             "put" => "PUT",
+            "patch" => "PATCH",
             "delete" => "DELETE",
             "ws" => "WS",
             _ => continue,

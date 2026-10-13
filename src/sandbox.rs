@@ -67,7 +67,7 @@
 //! * HTTP servers, `schedule` and `watch` blocks are host-runtime features
 //!   and are not started.
 //! * Call depth is bounded by the engine's recursion limit.
-//! * stderr output (`log`, `term`, warnings) is not captured.
+//! * stderr output (`eprintln`, `log`, `term`, warnings) is not captured.
 //! * The host's stdin is only readable with the `process` capability
 //!   (denied by default): without it `input()` / `io.prompt` see an empty
 //!   stream, so a script can never consume a host's stdin (e.g. the

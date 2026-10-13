@@ -1,0 +1,7 @@
+// expect: [42, 1, 2, 2]
+// Imported functions reach their module's top-level bindings declared
+// after them (and their updates persist in the module).
+import { module_late, module_bump, module_hits } from "tests/parity/modules/forward_helper.fg"
+let first = module_bump()
+let second = module_bump()
+[module_late(), first, second, module_hits()]

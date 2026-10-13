@@ -1,0 +1,19 @@
+// expect: true
+// try_receive returns Some(value) or None on both engines.
+let c = channel(3)
+send(c, 5)
+let got = try_receive(c)
+println(got)
+println(typeof(got))
+match got {
+    Some(v) => println("got " + str(v)),
+    None => println("empty"),
+}
+let empty = try_receive(c)
+println(empty)
+println(is_none(empty))
+match empty {
+    Some(v) => println("got " + str(v)),
+    None => println("empty"),
+}
+is_none(try_receive(c))

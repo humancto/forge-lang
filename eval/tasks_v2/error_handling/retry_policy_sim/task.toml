@@ -1,0 +1,59 @@
+id = "retry_policy_sim"
+category = "error_handling"
+title = "Simulate a retry policy with backoff, caps and Retry-After"
+prompt = """
+Simulate (do not actually sleep) a retry policy. The first line of standard input is
+`max_attempts=<n> base_ms=<b> factor=<f> cap_ms=<c>` (keys always in this order, integer
+values). Each following non-blank line is `<job> <outcomes>`, where outcomes is a
+comma-separated list of what each attempt returns, in order (if a job makes more attempts
+than listed, the last outcome repeats). An outcome is:
+
+- `ok`: success;
+- `timeout`, `429`, or any status from `500` to `599`: a transient error (retry);
+- any other 3-digit status: a permanent error (stop, no retry);
+- `429:<ms>`: a transient error whose server asks to wait at least `<ms>` milliseconds.
+
+Before retry k (k = 1 for the second attempt) wait `min(cap, base * factor^(k-1))` ms, or
+the server's requested wait if that is larger (the cap does not apply to it). A job makes
+at most max_attempts attempts.
+
+For each job print one line per failed attempt that is retried,
+`<job>: attempt <i> <outcome> -> wait <ms>ms` (the outcome as written), then one of:
+`<job>: ok after <attempts> attempt(s), waited <total ms>ms`,
+`<job>: permanent error <status> after <attempts> attempt(s)`,
+`<job>: gave up after <attempts> attempts, waited <total ms>ms` (last attempt transient).
+Finally print `succeeded=<n> failed=<n> total_wait=<ms>ms`.
+"""
+stdin = """
+max_attempts=5 base_ms=100 factor=3 cap_ms=1000
+fast ok
+flaky timeout,503,ok
+busy 429:2500,500,ok
+bad 404
+late 502,401
+stuck timeout
+mixed 500,429:50,429:900,ok
+"""
+needs = []
+expected_stdout = """
+fast: ok after 1 attempt(s), waited 0ms
+flaky: attempt 1 timeout -> wait 100ms
+flaky: attempt 2 503 -> wait 300ms
+flaky: ok after 3 attempt(s), waited 400ms
+busy: attempt 1 429:2500 -> wait 2500ms
+busy: attempt 2 500 -> wait 300ms
+busy: ok after 3 attempt(s), waited 2800ms
+bad: permanent error 404 after 1 attempt(s)
+late: attempt 1 502 -> wait 100ms
+late: permanent error 401 after 2 attempt(s)
+stuck: attempt 1 timeout -> wait 100ms
+stuck: attempt 2 timeout -> wait 300ms
+stuck: attempt 3 timeout -> wait 900ms
+stuck: attempt 4 timeout -> wait 1000ms
+stuck: gave up after 5 attempts, waited 2300ms
+mixed: attempt 1 500 -> wait 100ms
+mixed: attempt 2 429:50 -> wait 300ms
+mixed: attempt 3 429:900 -> wait 900ms
+mixed: ok after 4 attempt(s), waited 1300ms
+succeeded=4 failed=3 total_wait=6900ms
+"""

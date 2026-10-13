@@ -1,0 +1,107 @@
+// Each check returns Err(message); `?` stops a record at its first failure.
+
+fn digits(s: String) -> Bool {
+    return regex.test(s, "^[0-9]+$")
+}
+
+fn check_fields(line: String) -> Result<[String], String> {
+    let f = split(line, ",")
+    if len(f) != 5 {
+        return Err("expected 5 fields, got {len(f)}")
+    }
+    return Ok(f)
+}
+
+fn check_id(s: String) -> Result<Int, String> {
+    if !digits(s) || int(s) == 0 {
+        return Err("id: not a positive integer")
+    }
+    return Ok(int(s))
+}
+
+fn check_age(s: String) -> Result<Int, String> {
+    if !digits(s) {
+        return Err("age: not an integer")
+    }
+    if int(s) > 150 {
+        return Err("age: out of range")
+    }
+    return Ok(int(s))
+}
+
+fn check_email(s: String) -> Result<String, String> {
+    let parts = split(s, "@")
+    if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+        return Err("email: invalid")
+    }
+    return Ok(s)
+}
+
+fn check_scores(s: String) -> Result<[Int], String> {
+    if s == "" {
+        return Err("scores: empty")
+    }
+    let mut out = []
+    for tok in split(s, "|") {
+        if !digits(tok) || int(tok) > 100 {
+            return Err("scores: '{tok}' is not a score")
+        }
+        out.push(int(tok))
+    }
+    return Ok(out)
+}
+
+fn validate(line: String, seen: [Int]) {
+    let f = check_fields(line)?
+    let id = check_id(f[0])?
+    check_age(f[2])?
+    check_email(f[3])?
+    let scores = check_scores(f[4])?
+    if contains(seen, id) {
+        return Err("id: duplicate {id}")
+    }
+    return Ok({ id: id, name: f[1], total: sum(scores), count: len(scores) })
+}
+
+fn grade(total: Int, count: Int) -> String {
+    for g in [["A", 90], ["B", 80], ["C", 70], ["D", 60]] {
+        if total >= g[1] * count {
+            return g[0]
+        }
+    }
+    return "F"
+}
+
+let lines = filter(split(fs.read("/dev/stdin"), "\n"), fn(l) { return l.trim() != "" })
+let mut seen = []
+let mut valid = []
+let mut invalid = 0
+for e in enumerate(lines) {
+    let n = e.index + 1
+    match validate(e.value, seen) {
+        Err(msg) => {
+            invalid += 1
+            println("line {n}: error {msg}")
+        },
+        Ok(rec) => {
+            seen.push(rec.id)
+            valid.push(rec)
+            let tenths = (rec.total * 20 + rec.count) / (2 * rec.count)
+            println("line {n}: ok {rec.name} avg={tenths / 10}.{tenths % 10} grade={grade(rec.total, rec.count)}")
+        },
+    }
+}
+println("valid={len(valid)} invalid={invalid}")
+if len(valid) == 0 {
+    println("best: -")
+} else {
+    // compare averages exactly: a.total / a.count vs b.total / b.count
+    let mut top = valid[0]
+    for r in valid {
+        if r.total * top.count > top.total * r.count {
+            top = r
+        }
+    }
+    let best = filter(valid, fn(r) { return r.total * top.count == top.total * r.count })
+    println("best: " + join(map(best, fn(r) { return r.name }), ", "))
+}

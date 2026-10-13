@@ -58,3 +58,42 @@ Fresh solvers, the 0.11.0 `llms.txt`, scored on the release branch:
 
 Round 3's only failure before `floor`/`ceil` became globals was a call to
 `floor(x)`.
+
+## 2026-10-12: tier v2 added
+
+Tier v1 no longer finds anything to fix, so `eval/tasks_v2/` adds 50 harder tasks
+(servers, HTTP clients, multi-file programs, concurrency, error handling, edition-2027
+typed programs, large data inputs). No solver has been scored on it yet; every reference
+passes on both engines and the editions it applies to. Writing the references found the
+issues in [`V2_FINDINGS.md`](V2_FINDINGS.md). Score a run on both editions:
+`score <run> --tier v2` and `score <run> --tier v2 --edition 2027` (the `typed` tasks
+count only in 2027).
+
+## 2026-10-12: tier v2, two blind rounds
+
+Same solver model as before; Forge solvers see only `llms.txt`.
+
+| Run | Answers written against | Scored on | Forge 2026 | Forge 2027 | Python |
+|---|---|---|---:|---:|---:|
+| v2 round 1 | `llms.txt` of v0.11.0 | v0.11.0 | 95.5% (42/44) | 96.0% (48/50) | |
+| v2 round 1 | same answers | after this round's fixes | 100% | 100% | |
+| All tiers, round 2 (fresh) | updated `llms.txt` | integration branch | 98.6% (145/147) | 98.7% (151/153) | 94.0% (v2 only, 47/50) |
+| All tiers, round 2 | same answers | + else-if expressions, `\p{L}` | 100% | 100% | |
+
+Python is scored on tier v2 only. Its three misses are wrong error text and
+a wrong status code (405 vs 501); the multi-file prompts are Forge-specific,
+so its solver reimplemented the modules instead of importing them.
+
+### What each fix was worth
+
+| Failure cause | Fix |
+|---|---|
+| `obj[k] = v` copied the object (word count over 100k words: 57 s on the VM) — 2 timeouts | In-place updates of single-owner containers on the VM; interpreter `get`/`has_key` borrow |
+| A struct inside `Result<Interface, _>` / `[Interface]` was a T0003 | Interface satisfaction is checked inside generic types |
+| `if a { } else if b { } else { }` as an expression was a syntax error | `else if` chains in if-expressions |
+| `"\\p{L}"` interpolated `L` | `\p{..}` / `\P{..}` stay literal, like `{4}` |
+
+Writing the v2 references found 26 issues (`V2_FINDINGS.md`). All the bugs
+are fixed in this round. Two items stay open: `Map` operations are still
+linear per call (sets are hash-indexed now; objects are the usual
+dictionary), and there is no typed dictionary that accepts object literals.

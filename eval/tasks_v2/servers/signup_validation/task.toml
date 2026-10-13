@@ -1,0 +1,103 @@
+id = "signup_validation"
+category = "servers"
+title = "Validate a JSON sign-up request and report every error"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18502 with one endpoint, `POST /signup`, whose
+request body is JSON. The response always has status 200 and a JSON body.
+
+If the body is not a JSON object, respond `{"ok": false, "errors": [{"field": "body",
+"message": "must be an object"}]}`. Otherwise check these fields in this order and report,
+for each field, only its first failing rule as `{"field": <name>, "message": <text>}`:
+
+- `username`: missing or null → `is required`; not a string, or not 3 to 16 characters →
+  `must be 3-16 characters`; contains a character other than `a`-`z`, `0`-`9`, `_` →
+  `may only contain a-z, 0-9 and _`; equal to `admin` or `root` → `is taken`.
+- `email`: missing or null → `is required`; not a string matching
+  `<one or more chars except @ and whitespace>@<one or more chars except @ and whitespace>.<two or more letters a-z>`
+  (the last dot starts the final part; matching is case-insensitive) → `is invalid`.
+- `age`: missing or null → `is required`; not an integer (strings, booleans and numbers
+  with a fractional part or written with a decimal point do not count) →
+  `must be an integer`; below 13 or above 120 → `must be between 13 and 120`.
+- `password`: missing or null → `is required`; not a string or shorter than 8 characters
+  → `must be at least 8 characters`; without at least one letter (`a`-`z` or `A`-`Z`) and
+  at least one digit → `must contain a letter and a digit`.
+
+With errors, respond `{"ok": false, "errors": [...]}` (in field order). Otherwise respond
+`{"ok": true, "user": {"username": <username>, "email": <email in lower case>, "age": <age>}}`.
+Other fields of the body are ignored. The server runs until it is stopped.
+"""
+needs = ["net"]
+timeout = 20
+mode = "server"
+port = 18502
+expected_stdout = """
+STATUS 200
+{"ok": true, "user": {"age": 36, "email": "ada@example.org", "username": "ada_l"}}
+STATUS 200
+{"errors": [{"field": "username", "message": "is required"}, {"field": "email", "message": "is required"}, {"field": "age", "message": "is required"}, {"field": "password", "message": "is required"}], "ok": false}
+STATUS 200
+{"errors": [{"field": "username", "message": "may only contain a-z, 0-9 and _"}, {"field": "email", "message": "is invalid"}, {"field": "age", "message": "must be an integer"}, {"field": "password", "message": "must be at least 8 characters"}], "ok": false}
+STATUS 200
+{"errors": [{"field": "username", "message": "must be 3-16 characters"}, {"field": "email", "message": "is invalid"}, {"field": "age", "message": "must be between 13 and 120"}, {"field": "password", "message": "must contain a letter and a digit"}], "ok": false}
+STATUS 200
+{"errors": [{"field": "username", "message": "is taken"}, {"field": "age", "message": "must be an integer"}, {"field": "password", "message": "must contain a letter and a digit"}], "ok": false}
+STATUS 200
+{"errors": [{"field": "username", "message": "must be 3-16 characters"}, {"field": "email", "message": "is required"}, {"field": "age", "message": "must be an integer"}, {"field": "password", "message": "must be at least 8 characters"}], "ok": false}
+STATUS 200
+{"errors": [{"field": "body", "message": "must be an object"}], "ok": false}
+STATUS 200
+{"errors": [{"field": "username", "message": "must be 3-16 characters"}, {"field": "email", "message": "is invalid"}, {"field": "age", "message": "must be between 13 and 120"}, {"field": "password", "message": "must contain a letter and a digit"}], "ok": false}
+STATUS 200
+{"ok": true, "user": {"age": 120, "email": "bo@mail.co", "username": "bo_2"}}
+STATUS 405
+"""
+
+[[request]]
+method = "POST"
+path = "/signup"
+body = '{"username": "ada_l", "email": "Ada@Example.ORG", "age": 36, "password": "engine42", "extra": true}'
+
+[[request]]
+method = "POST"
+path = "/signup"
+body = '{}'
+
+[[request]]
+method = "POST"
+path = "/signup"
+body = '{"username": "Ada", "email": "ada@example", "age": "36", "password": "short"}'
+
+[[request]]
+method = "POST"
+path = "/signup"
+body = '{"username": "ab", "email": "a b@c.io", "age": 12, "password": "longenough"}'
+
+[[request]]
+method = "POST"
+path = "/signup"
+body = '{"username": "root", "email": "r@x.y.com", "age": 13.0, "password": "12345678"}'
+
+[[request]]
+method = "POST"
+path = "/signup"
+body = '{"username": 12345, "email": null, "age": true, "password": ["x"]}'
+
+[[request]]
+method = "POST"
+path = "/signup"
+body = '[1, 2]'
+
+[[request]]
+method = "POST"
+path = "/signup"
+body = '{"username": "a_very_long_username", "email": "x@@y.com", "age": 121, "password": "lettersonly"}'
+
+[[request]]
+method = "POST"
+path = "/signup"
+body = '{"username": "bo_2", "email": "bo@mail.co", "age": 120, "password": "bicycle9"}'
+
+[[request]]
+method = "GET"
+path = "/signup"
+status_only = true

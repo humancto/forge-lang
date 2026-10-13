@@ -573,7 +573,7 @@ impl Free {
     }
 }
 
-fn destructure_names(pattern: &DestructurePattern) -> Vec<&str> {
+pub(crate) fn destructure_names(pattern: &DestructurePattern) -> Vec<&str> {
     match pattern {
         DestructurePattern::Object(pairs) => pairs.iter().map(|(_, b)| b.as_str()).collect(),
         DestructurePattern::Array { items, rest } => items
@@ -601,6 +601,18 @@ fn binders(stmt: &Stmt) -> Binders {
     let mut b = Binders::default();
     collect_binders(stmt, false, &mut b);
     b
+}
+
+/// The names a module's top level may bind (over-approximated like
+/// [`plan`]'s analysis), and whether it may bind names not known here (a
+/// wildcard `import "file"`). The type checker uses it to keep an imported
+/// module's own names from resolving to the importer's or to builtins.
+pub fn module_binders(statements: &[SpannedStmt]) -> (HashSet<String>, bool) {
+    let mut b = Binders::default();
+    for s in statements {
+        collect_binders(&s.stmt, false, &mut b);
+    }
+    (b.names, b.everything)
 }
 
 fn collect_binders(stmt: &Stmt, in_function: bool, b: &mut Binders) {
@@ -659,7 +671,7 @@ fn collect_binders(stmt: &Stmt, in_function: bool, b: &mut Binders) {
         Stmt::Import { names, .. } => match names {
             Some(names) => {
                 for name in names {
-                    add(name, b);
+                    add(name.binding(), b);
                 }
             }
             None => b.everything = true,

@@ -1,0 +1,33 @@
+// Retry 5xx responses up to 4 attempts; never retry other failures.
+
+let lines = filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" })
+let base = lines[0].trim()
+let mut ok = 0
+let mut failed = 0
+let mut requests = 0
+
+for line in slice(lines, 1, len(lines)) {
+    let path = line.trim()
+    let mut attempts = 0
+    loop {
+        attempts += 1
+        requests += 1
+        let resp = http.get(base + path)
+        if resp.status >= 200 && resp.status < 300 {
+            ok += 1
+            println("{path}: ok after {attempts} attempt(s), server saw attempt {resp.json.attempt}")
+            break
+        }
+        if resp.status < 500 {
+            failed += 1
+            println("{path}: failed with {resp.status} after {attempts} attempt(s)")
+            break
+        }
+        if attempts == 4 {
+            failed += 1
+            println("{path}: gave up after 4 attempts (last status {resp.status})")
+            break
+        }
+    }
+}
+println("ok={ok} failed={failed} requests={requests}")

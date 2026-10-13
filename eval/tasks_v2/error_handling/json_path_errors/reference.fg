@@ -1,0 +1,127 @@
+// Path evaluation with precise errors: parse the path into steps (or fail
+// with "bad path"), then walk the document one step at a time.
+
+fn is_name_char(c: String) -> Bool {
+    return regex.test(c, "^[A-Za-z0-9_]$")
+}
+
+// Steps as {kind: "key"|"idx", value, raw}, or null for a malformed path.
+fn parse_path(path: String) {
+    let cs = split(path, "")
+    let n = len(cs)
+    let mut steps = []
+    let mut i = 0
+    while i < n {
+        let first = len(steps) == 0
+        if cs[i] == "[" {
+            let mut j = i + 1
+            let mut digits = ""
+            if j < n && cs[j] == "-" {
+                digits = "-"
+                j += 1
+            }
+            while j < n && regex.test(cs[j], "^[0-9]$") {
+                digits += cs[j]
+                j += 1
+            }
+            if j >= n || cs[j] != "]" || digits == "" || digits == "-" {
+                return null
+            }
+            steps.push({ kind: "idx", value: digits, raw: "[{digits}]" })
+            i = j + 1
+        } else if first || cs[i] == "." {
+            let mut j = i
+            if !first {
+                j += 1
+            }
+            let mut name = ""
+            while j < n && is_name_char(cs[j]) {
+                name += cs[j]
+                j += 1
+            }
+            if name == "" {
+                return null
+            }
+            let mut raw = ".{name}"
+            if first {
+                raw = name
+            }
+            steps.push({ kind: "key", value: name, raw: raw })
+            i = j
+        } else {
+            return null
+        }
+    }
+    if len(steps) == 0 {
+        return null
+    }
+    return steps
+}
+
+fn type_name(v) -> String {
+    let t = typeof(v)
+    if t == "Object" {
+        return "object"
+    }
+    if t == "Array" {
+        return "array"
+    }
+    if t == "String" {
+        return "string"
+    }
+    if t == "Bool" {
+        return "boolean"
+    }
+    if t == "Null" {
+        return "null"
+    }
+    return "number"
+}
+
+fn evaluate(doc, path: String) -> String {
+    let steps = parse_path(path)
+    if steps == null {
+        return "error: bad path"
+    }
+    let mut cur = doc
+    let mut loc = ""
+    for step in steps {
+        let mut at = loc
+        if at == "" {
+            at = "$"
+        }
+        if step.kind == "key" {
+            if typeof(cur) != "Object" {
+                return "error: cannot index {type_name(cur)} at {at}"
+            }
+            if !has_key(cur, step.value) {
+                return "error: no key '{step.value}' at {at}"
+            }
+            cur = cur[step.value]
+        } else {
+            if typeof(cur) != "Array" {
+                return "error: cannot index {type_name(cur)} at {at}"
+            }
+            let i = int(step.value)
+            let mut j = i
+            if i < 0 {
+                j = i + len(cur)
+            }
+            if j < 0 || j >= len(cur) {
+                return "error: index {step.value} out of range at {at}"
+            }
+            cur = cur[j]
+        }
+        loc += step.raw
+    }
+    return json.compact(cur)
+}
+
+let parts = split(fs.read("/dev/stdin"), "\n---\n")
+let doc = json.parse(parts[0])
+for q in split(parts[1], "\n") {
+    let path = q.trim()
+    if path != "" {
+        println("{path} => {evaluate(doc, path)}")
+    }
+}

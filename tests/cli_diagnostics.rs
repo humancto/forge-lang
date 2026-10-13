@@ -116,3 +116,69 @@ fn block_comments_run_on_both_engines() {
     assert!(stderr.contains("u.fg:2:1"), "{}", stderr);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// V2 finding 8: a runtime error inside a function is reported at the line
+/// inside the callee on both engines (the VM used to name the top-level
+/// call), in `--error-format json` too, and the human output ends with the
+/// same call stack on both engines.
+#[test]
+fn runtime_errors_inside_functions_point_at_the_callee() {
+    let dir = scratch("callee-line");
+    let src = "fn pick(xs, i) {\n    let v = xs[i]\n    return v\n}\n\nfn outer(xs) {\n    return pick(xs, 5)\n}\n\nprintln(outer([1, 2]))\n";
+    std::fs::write(dir.join("p.fg"), src).unwrap();
+    let file = dir.join("p.fg").to_string_lossy().into_owned();
+    for engine in [&["--interp"][..], &[][..]] {
+        let mut args = engine.to_vec();
+        args.extend(["--error-format", "json", "run", file.as_str()]);
+        let out = forge_in(&dir, &args, &[]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success());
+        let line = stderr
+            .lines()
+            .find(|l| l.contains("\"code\":\"E0009\""))
+            .unwrap_or_else(|| panic!("no E0009 diagnostic in {:?} ({:?})", stderr, engine));
+        assert!(
+            line.contains("\"line\":2") && line.contains("\"col\":5"),
+            "{} ({:?})",
+            line,
+            engine
+        );
+
+        let mut args = engine.to_vec();
+        args.extend(["run", file.as_str()]);
+        let out = forge_in(&dir, &args, &[]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("p.fg:2:5"), "{} ({:?})", stderr, engine);
+        assert!(
+            stderr.contains("  at pick (line 2)\n  at outer (line 7)\n  at <main> (line 10)\n"),
+            "{} ({:?})",
+            stderr,
+            engine
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// V2 finding 25: `eprintln` / `eprint` write to the process's stderr and
+/// nothing else, on both engines and in both editions.
+#[test]
+fn eprintln_writes_to_stderr_on_both_engines() {
+    let dir = scratch("eprintln");
+    std::fs::write(
+        dir.join("e.fg"),
+        "println(\"result\")\neprintln(\"warning:\", 3)\neprint(\"x\")\neprint(\"y\\n\")\n",
+    )
+    .unwrap();
+    for edition in ["2026", "2027"] {
+        for engine in [&["--interp"][..], &[][..]] {
+            let mut args = vec!["--edition", edition];
+            args.extend_from_slice(engine);
+            args.extend(["run", "e.fg"]);
+            let out = forge_in(&dir, &args, &[]);
+            assert!(out.status.success(), "{:?}", out);
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "result\n");
+            assert_eq!(String::from_utf8_lossy(&out.stderr), "warning: 3\nxy\n");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

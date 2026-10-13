@@ -289,13 +289,50 @@ impl Gc {
         }
     }
 
-    /// `v` is being copied out of a local register: if it is a uniquely
-    /// owned object it now has a second reference, so clear the bit.
+    /// Mark the freshly allocated array or object `r` as uniquely owned by
+    /// the local register it is about to be stored in. Its elements were
+    /// copied from another container, which still refers to them, so their
+    /// slot-owner bits are cleared first: an owned container only trusts
+    /// the slot bits it set itself.
+    pub fn set_unique_container(&mut self, r: GcRef) {
+        let children: Vec<GcRef> = match self.get(r).map(|o| &o.kind) {
+            Some(ObjKind::Array(items)) => items.iter().filter_map(|v| v.as_obj()).collect(),
+            Some(ObjKind::Object(map)) => map.values().filter_map(|v| v.as_obj()).collect(),
+            _ => Vec::new(),
+        };
+        for child in children {
+            if let Some(obj) = self.get_mut(child) {
+                obj.slot_owned = false;
+            }
+        }
+        self.set_unique(r);
+    }
+
+    /// Mark `r` as the only reference held by one element of a uniquely
+    /// owned container (see `GcObject::slot_owned`).
+    #[inline]
+    pub fn set_slot_owned(&mut self, r: GcRef) {
+        if let Some(obj) = self.get_mut(r) {
+            obj.slot_owned = true;
+        }
+    }
+
+    /// Whether `r` is owned by the container element holding it. Only
+    /// meaningful when that container is itself uniquely owned.
+    #[inline]
+    pub fn is_slot_owned(&self, r: GcRef) -> bool {
+        self.get(r).is_some_and(|o| o.slot_owned)
+    }
+
+    /// `v` is being copied out of a local register or out of an element of
+    /// an owned container: if it is an owned object it now has a second
+    /// reference, so clear both owner bits.
     #[inline]
     pub fn share(&mut self, v: Value) {
         if let Some(r) = v.as_obj() {
             if let Some(obj) = self.get_mut(r) {
                 obj.unique = false;
+                obj.slot_owned = false;
             }
         }
     }

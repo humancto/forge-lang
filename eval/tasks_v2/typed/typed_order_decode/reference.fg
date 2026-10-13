@@ -1,0 +1,112 @@
+struct Line {
+    sku: String,
+    qty: Int,
+    unit_price: Float
+}
+
+struct Order {
+    id: String,
+    lines: [Line],
+    coupon: Option<String>
+}
+
+fn type_ok(v, kind: String) -> Bool {
+    let t = typeof(v)
+    if kind == "string" {
+        return t == "String"
+    }
+    if kind == "integer" {
+        return t == "Int"
+    }
+    if kind == "number" {
+        return t == "Int" || t == "Float"
+    }
+    if kind == "array" {
+        return t == "Array"
+    }
+    return t == "Object"
+}
+
+fn field(obj, key: String, path: String, kind: String) -> Result<Any, String> {
+    if !has_key(obj, key) {
+        return Err("{path}: missing")
+    }
+    let v = obj[key]
+    if !type_ok(v, kind) {
+        return Err("{path}: expected {kind}")
+    }
+    return Ok(v)
+}
+
+fn decode_line(v, path: String) -> Result<Line, String> {
+    if typeof(v) != "Object" {
+        return Err("{path}: expected object")
+    }
+    let sku = field(v, "sku", "{path}.sku", "string")?
+    let qty = field(v, "qty", "{path}.qty", "integer")?
+    if qty <= 0 {
+        return Err("{path}.qty: must be positive")
+    }
+    let price = field(v, "unit_price", "{path}.unit_price", "number")?
+    // float(): a JSON integer would otherwise stay an Int inside the Float field
+    return Ok(Line { sku: sku, qty: qty, unit_price: float(price) })
+}
+
+fn decode_order(v) -> Result<Order, String> {
+    if typeof(v) != "Object" {
+        return Err("$: expected object")
+    }
+    let id = field(v, "id", "id", "string")?
+    let raw_lines = field(v, "lines", "lines", "array")?
+    if len(raw_lines) == 0 {
+        return Err("lines: must not be empty")
+    }
+    let mut lines: [Line] = []
+    for e in enumerate(raw_lines) {
+        lines.push(decode_line(e.value, "lines[{e.index}]")?)
+    }
+    let c = get(v, "coupon", null)
+    if c != null && typeof(c) != "String" {
+        return Err("coupon: expected string")
+    }
+    let mut coupon: Option<String> = None
+    if c != null {
+        coupon = Some(c)
+    }
+    return Ok(Order { id: id, lines: lines, coupon: coupon })
+}
+
+fn order_total(o: Order) -> Float {
+    let mut total = 0.0
+    for l in o.lines {
+        total += float(l.qty) * l.unit_price
+    }
+    return match o.coupon {
+        Some("HALF") => total / 2.0,
+        Some("TENOFF") => max(0.0, total - 10.0),
+        _ => total,
+    }
+}
+
+let mut valid = 0
+let mut invalid = 0
+let mut revenue = 0.0
+for e in enumerate(json.parse(fs.read("/dev/stdin"))) {
+    match decode_order(e.value) {
+        Err(msg) => {
+            invalid += 1
+            println("#{e.index}: invalid {msg}")
+        },
+        Ok(o) => {
+            valid += 1
+            let total = order_total(o)
+            revenue += total
+            let extra = match o.coupon {
+                Some(c) => " coupon={c}",
+                None => "",
+            }
+            println("#{e.index}: {o.id} {len(o.lines)} line(s) total={to_fixed(total, 2)}{extra}")
+        },
+    }
+}
+println("valid={valid} invalid={invalid} revenue={to_fixed(revenue, 2)}")

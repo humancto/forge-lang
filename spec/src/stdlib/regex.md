@@ -49,7 +49,36 @@ regex.replace("2024-01-15", "(\\d{4})-(\\d{2})-(\\d{2})", "$2/$3/$1")
 // "01/15/2024"
 ```
 
-The `replacement` string supports capture group references (`$1`, `$2`, etc.).
+The `replacement` string can refer to capture groups: `$0` is the whole match, `$1`, `$2`, ... the numbered groups, `$name` or `${name}` a named group (`(?<name>...)` or `(?P<name>...)`), and `$$` is a literal `$`. A reference to a group that did not take part in the match is empty. A name runs as far as letters, digits and `_` go, so `$1a` refers to a group named `1a` (empty): write `${1}a`. In a `"..."` string `{name}` interpolates, so write `${name}` references in a triple-quoted string:
+
+```forge
+regex.replace("2024-01-15", """(?<y>\d{4})-(\d{2})""", """${y}/${2}""")
+// "2024/01-15"
+```
+
+### regex.captures(text, pattern) -> array | null
+
+Returns the capture groups of the first match of `pattern` in `text`, or `null` if there is no match. Element 0 is the whole match, then every group in the pattern from left to right (named groups are numbered too); a group that did not take part in the match is `null`.
+
+```forge
+regex.captures("user=ada id=7", "user=(\\w+) id=(\\d+)")
+// ["user=ada id=7", "ada", "7"]
+
+regex.captures("port", "(\\w+)(:(\\d+))?")
+// ["port", "port", null, null]
+
+regex.captures("nothing", "user=(\\w+)")
+// null
+```
+
+### regex.captures_all(text, pattern) -> array
+
+Returns one array of groups (as `regex.captures` returns it) per non-overlapping match, in order; `[]` when nothing matches.
+
+```forge
+regex.captures_all("a=1, b=22", "(\\w)=(\\d+)")
+// [["a=1", "a", "1"], ["b=22", "b", "22"]]
+```
 
 ### regex.split(text, pattern) -> array
 

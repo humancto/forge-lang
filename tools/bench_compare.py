@@ -170,6 +170,10 @@ def main(argv=None):
                          "(default 5; 0 disables)")
     ap.add_argument("--suite", default="vm,interp,startup")
     ap.add_argument("--filter", default="")
+    ap.add_argument("--base-root",
+                    help="the BASE checkout: only benchmarks that exist there too are "
+                         "compared (a PR's new benchmark has no baseline, and the "
+                         "code it was added for may be pathological on BASE)")
     ap.add_argument("--summary", help="append the Markdown report to this file "
                                       "(e.g. $GITHUB_STEP_SUMMARY)")
     ap.add_argument("--json-out", help="write the raw comparison as JSON")
@@ -185,6 +189,25 @@ def main(argv=None):
 
     base_rounds, head_rounds = [], []
 
+    common = None
+    new = []
+    if args.base_root:
+        def ids_in(root):
+            found = set()
+            for suite in args.suite.split(","):
+                d = os.path.join(root, "benchmarks", suite)
+                if suite in ("vm", "interp", "startup") and os.path.isdir(d):
+                    found |= {f"{suite}/{f[:-3]}" for f in os.listdir(d) if f.endswith(".fg")}
+            return found
+        head_ids, base_ids = ids_in(ROOT), ids_in(args.base_root)
+        common = sorted(head_ids & base_ids)
+        new = sorted(head_ids - base_ids)
+        if new:
+            print(f"new benchmarks (no baseline, not compared): {', '.join(new)}",
+                  file=sys.stderr, flush=True)
+        if not common:
+            ap.error("no benchmark exists in both BASE and HEAD")
+
     def interleave(rounds, ids=None, tag="round"):
         for i in range(rounds):
             order = [("base", args.base), ("head", args.head)]
@@ -195,7 +218,7 @@ def main(argv=None):
                 result = run_suite(forge, args, label, ids)
                 (base_rounds if label == "base" else head_rounds).append(result)
 
-    interleave(args.rounds)
+    interleave(args.rounds, common)
     rows = compare(collect(base_rounds), collect(head_rounds), args.threshold, args.min_delta)
 
     # Confirmation: re-measure only the flagged benchmarks and decide on all
@@ -215,6 +238,9 @@ def main(argv=None):
                     r["verdict"] += " (noise: not confirmed)"
     failed = any(r.get("fail") for r in rows)
     report = markdown(rows, args, base_rounds[0], head_rounds[0], failed, args.allow_regression)
+    if new:
+        report += ("\n\nNew in HEAD (no baseline, not compared): "
+                   + ", ".join(f"`{n}`" for n in new) + ".")
     print(report)
     if args.summary:
         with open(args.summary, "a", encoding="utf-8") as f:

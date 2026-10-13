@@ -206,6 +206,27 @@ fn kind_fits(kind: JitType, ty: &crate::semantics::types::RuntimeType) -> bool {
     }
 }
 
+/// Does `__types.check(v, ty, _)` widen a value of `kind` that fits `ty`
+/// (Int → Float, `semantics::types::widen`)? Then the result is
+/// `float(v)` instead of `v`.
+fn kind_widens(kind: JitType, ty: &crate::semantics::types::RuntimeType) -> bool {
+    use crate::semantics::types::RuntimeType as T;
+    match ty {
+        T::Float => kind == JitType::Int,
+        T::Option(inner) => kind_widens(kind, inner),
+        T::Union(members) => {
+            !members
+                .iter()
+                .any(|m| kind_fits(kind, m) && !kind_widens(kind, m))
+                && members
+                    .iter()
+                    .find(|m| kind_fits(kind, m))
+                    .is_some_and(|m| kind_widens(kind, m))
+        }
+        _ => false,
+    }
+}
+
 /// A call the JIT performs without leaving native code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PureOp {
@@ -1133,6 +1154,7 @@ fn verify_with_ret(
                         };
                         let member: &'static str = match const_str(m as usize)?.as_str() {
                             "check" if b == 5 => "check",
+                            "widen" if b == 4 => "widen",
                             "bind" if b >= 6 => "bind",
                             other => return Err(unsupported(other.to_string())),
                         };
@@ -1148,27 +1170,48 @@ fn verify_with_ret(
                                 expect: MemberExpect::Native,
                             },
                         );
-                        if member == "check" {
+                        if member == "check" || member == "widen" {
+                            // `(fits, widens)` of the value's kind; `widen`
+                            // never raises, but only scalar types are
+                            // decided here.
                             let kind = value(&s, a + 3)?;
-                            let fits = match (read(&s, a + 4)?, read(&s, a + 5)?) {
-                                (RegState::Str(t), RegState::Str(_)) => {
-                                    crate::semantics::types::parse_cached(const_str(t as usize)?)
-                                        .is_ok_and(|parsed| kind_fits(kind, &parsed))
+                            let context_ok =
+                                member == "widen" || matches!(read(&s, a + 5)?, RegState::Str(_));
+                            let (fits, widens) = match read(&s, a + 4)? {
+                                RegState::Str(t) if context_ok => {
+                                    match crate::semantics::types::parse_cached(const_str(
+                                        t as usize,
+                                    )?) {
+                                        Ok(parsed) => {
+                                            (kind_fits(kind, &parsed), kind_widens(kind, &parsed))
+                                        }
+                                        Err(_) => (false, false),
+                                    }
                                 }
-                                (RegState::TypeOf(bound), RegState::Str(_)) => {
+                                RegState::TypeOf(bound) if context_ok => (
                                     kind == bound
-                                        || (bound == JitType::Float && kind == JitType::Int)
-                                }
-                                _ => false,
+                                        || (bound == JitType::Float && kind == JitType::Int),
+                                    bound == JitType::Float && kind == JitType::Int,
+                                ),
+                                _ => (false, false),
                             };
                             if !fits {
-                                return Err(unsupported(format!("check({})", kind)));
+                                return Err(unsupported(format!("{}({})", member, kind)));
                             }
-                            CallInfo::Pure {
-                                op: PureOp::Identity,
-                                first_arg: 3,
-                                args: vec![kind],
-                                ret: kind,
+                            if widens {
+                                CallInfo::Pure {
+                                    op: PureOp::ToFloat,
+                                    first_arg: 3,
+                                    args: vec![kind],
+                                    ret: JitType::Float,
+                                }
+                            } else {
+                                CallInfo::Pure {
+                                    op: PureOp::Identity,
+                                    first_arg: 3,
+                                    args: vec![kind],
+                                    ret: kind,
+                                }
                             }
                         } else {
                             for i in 3..6 {

@@ -1,0 +1,64 @@
+id = "generic_lru_cache"
+category = "typed"
+title = "A generic LRU cache used with two value types"
+editions = ["2027"]
+prompt = """
+Write a typed program with one generic LRU cache type, `LruCache<T>` (a struct with a
+capacity, the keys in recency order and the stored values), whose methods declare their
+parameter and return types (for example a lookup that returns `Option<T>`). Use it for two
+caches: `nums`, capacity 3, holding integers, and `names`, capacity 2, holding strings.
+
+Each non-blank line of standard input is a command:
+- `put <cache> <key> <value>` (the value is the rest of the line after the key): store the
+  value under key, making the key the most recently used. For `nums` the value must be an
+  integer (optional `-`, digits); otherwise print `error: nums needs an integer` and
+  change nothing. If a new key does not fit, first
+  evict the least recently used key and print `evicted <cache>/<key>`.
+- `get <cache> <key>`: print `<cache>/<key> = <value>` and make the key the most recently
+  used, or print `<cache>/<key> miss`.
+- `sum`: print `sum = <sum of the values in nums>`.
+- `dump <cache>`: print `<cache>: ` followed by `<key>=<value>` entries from least to most
+  recently used, separated by spaces (just `<cache>:` when empty).
+- anything else (including an unknown cache name): print `error: bad command`.
+"""
+stdin = """
+put nums a 1
+put nums b 2
+put nums c 3
+get nums a
+put nums d 4
+dump nums
+put nums b 20
+put nums e x
+sum
+put names ada Ada Lovelace
+put names bo Bo
+get names ada
+put names cy Cy
+dump names
+get names bo
+put nums a -7
+dump nums
+sum
+put pets x 1
+dump names
+dump empty
+"""
+needs = []
+expected_stdout = """
+nums/a = 1
+evicted nums/b
+nums: c=3 a=1 d=4
+evicted nums/c
+error: nums needs an integer
+sum = 25
+names/ada = Ada Lovelace
+evicted names/bo
+names: ada=Ada Lovelace cy=Cy
+names/bo miss
+nums: d=4 b=20 a=-7
+sum = 17
+error: bad command
+names: ada=Ada Lovelace cy=Cy
+error: bad command
+"""

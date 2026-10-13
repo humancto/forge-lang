@@ -1,0 +1,26 @@
+// Follow `next` links until it is null, then aggregate the items.
+
+let base = input().trim()
+let mut items = []
+let mut pages = 0
+let mut next = "start.json"
+while next != null {
+    let doc = http.get("{base}/{next}").json
+    pages += 1
+    items = items + doc.items
+    next = doc.next
+}
+
+println("pages: {pages}")
+println("items: {len(items)}")
+let by_currency = group_by(items, fn(it) { return it.currency })
+for c in sort(keys(by_currency)) {
+    let list = by_currency[c]
+    let cents = sum(map(list, fn(it) { return round(it.amount * 100) }))
+    println("{c} {cents / 100}.{pad_start(str(cents % 100), 2, "0")} ({len(list)} items)")
+}
+let owners = frequencies(map(items, fn(it) { return it.owner }))
+let ranked = sort(sort(keys(owners)), fn(a, b) { return owners[b] - owners[a] })
+for o in ranked {
+    println("{o}: {owners[o]}")
+}

@@ -124,6 +124,17 @@ impl Interpreter {
                 self.write_output(&output, true);
                 Ok(Value::Null)
             }
+            // stderr: never the interpreter's own output sink (the DAP
+            // console), always the thread's stdio capture or the process.
+            "eprint" | "eprintln" => {
+                let text: Vec<String> = args.iter().map(|v| format!("{}", v)).collect();
+                if name == "eprintln" {
+                    crate::runtime::stdio::err_line(&text.join(" "));
+                } else {
+                    crate::runtime::stdio::err(&text.join(" "));
+                }
+                Ok(Value::Null)
+            }
             "len" => super::places::len_of(args.first()),
             "type" | "typeof" => match args.first() {
                 Some(v) => Ok(Value::String(v.type_name().to_string())),
@@ -187,57 +198,8 @@ impl Interpreter {
                 _ => Err(RuntimeError::new("values() requires object or map")),
             },
             "contains" => super::places::contains_of(args.first(), args.get(1)),
-            "has_key" => match (args.first(), args.get(1)) {
-                (Some(Value::Object(map)), Some(Value::String(key))) => {
-                    Ok(Value::Bool(map.contains_key(key)))
-                }
-                _ => Err(RuntimeError::new("has_key() requires (object, key_string)")),
-            },
-            "get" => match (args.first(), args.get(1)) {
-                (Some(obj @ Value::Object(_)), Some(Value::String(key))) => {
-                    let default = args.get(2).cloned().unwrap_or(Value::Null);
-                    // An exact key wins over the dot-path reading
-                    // (`get(counts, ".txt", 0)`).
-                    let exact = matches!(obj, Value::Object(m) if m.contains_key(key.as_str()));
-                    if key.contains('.') && !exact {
-                        let parts: Vec<&str> = key.split('.').collect();
-                        let mut current = obj.clone();
-                        for part in &parts {
-                            match current {
-                                Value::Object(ref m) => {
-                                    current = match m.get(*part) {
-                                        Some(v) => v.clone(),
-                                        None => return Ok(default),
-                                    };
-                                }
-                                Value::Array(ref arr) => {
-                                    if let Ok(idx) = part.parse::<usize>() {
-                                        current = match arr.get(idx) {
-                                            Some(v) => v.clone(),
-                                            None => return Ok(default),
-                                        };
-                                    } else {
-                                        return Ok(default);
-                                    }
-                                }
-                                _ => return Ok(default),
-                            }
-                        }
-                        Ok(current)
-                    } else if let Value::Object(map) = obj {
-                        Ok(map.get(key).cloned().unwrap_or(default))
-                    } else {
-                        Ok(default)
-                    }
-                }
-                (Some(Value::Array(arr)), Some(Value::Int(idx))) => {
-                    let default = args.get(2).cloned().unwrap_or(Value::Null);
-                    Ok(arr.get(*idx as usize).cloned().unwrap_or(default))
-                }
-                _ => Err(RuntimeError::new(
-                    "get() requires (object, key) or (array, index)",
-                )),
-            },
+            "has_key" => super::places::has_key_of(args.first(), args.get(1)),
+            "get" => super::places::get_of(args.first(), args.get(1), args.get(2)),
             "pick" => match (args.first(), args.get(1)) {
                 (Some(Value::Object(map)), Some(Value::Array(field_list))) => {
                     let mut result = IndexMap::new();
@@ -359,20 +321,14 @@ impl Interpreter {
             },
             "set" => {
                 if args.is_empty() {
-                    return Ok(Value::Set(Vec::new()));
+                    return Ok(Value::Set(SetItems::new()));
                 }
                 if args.len() != 1 {
                     return Err(RuntimeError::new("set() takes 0 or 1 argument"));
                 }
                 match &args[0] {
                     Value::Array(items) | Value::Tuple(items) => {
-                        let mut deduped: Vec<Value> = Vec::new();
-                        for item in items {
-                            if !deduped.iter().any(|v| Value::container_eq(v, item)) {
-                                deduped.push(item.clone());
-                            }
-                        }
-                        Ok(Value::Set(deduped))
+                        Ok(Value::Set(SetItems::from_values(items.iter().cloned())))
                     }
                     Value::Set(items) => Ok(Value::Set(items.clone())),
                     _ => Err(RuntimeError::new("set() requires an array or tuple")),

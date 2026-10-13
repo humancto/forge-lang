@@ -1,0 +1,73 @@
+id = "sales_report_api"
+category = "servers"
+title = "Sales reporting API over a CSV loaded at start-up"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18510. At start-up it reads `sales.csv` from the
+working directory, with the header `date,region,sku,product,units,unit_price_cents` (no
+quoted fields; `date` is `YYYY-MM-DD`; `sku` is a code such as `0042` that must be kept
+exactly as written, leading zeros included). The revenue of a row is
+`units * unit_price_cents`. All responses have status 200 and a JSON body.
+
+- `GET /report/<region>` returns `{"region", "orders": <rows>, "units": <sum>,
+  "revenue_cents": <sum>, "best_sku": <sku with the highest revenue in the region, ties by
+  sku ascending>}`, or `{"error": "unknown region"}` if no row has that region.
+- `GET /top?n=<count>&by=<units|revenue>` returns an array of the top n products as
+  `{"sku", "product", "units", "revenue_cents"}` sorted by the chosen measure (descending),
+  ties by sku ascending. Defaults: n = 3, by = revenue. If n is not a positive integer,
+  respond `{"error": "invalid n"}`; if by is something else, `{"error": "invalid by"}`.
+- `GET /monthly` returns an array of `{"month": "YYYY-MM", "revenue_cents", "units"}` for
+  every month with sales, in month order.
+
+The server runs until it is stopped.
+"""
+needs = ["net", "read"]
+timeout = 20
+mode = "server"
+port = 18510
+expected_stdout = """
+STATUS 200
+{"best_sku": "1300", "orders": 26, "region": "north", "revenue_cents": 836895, "units": 135}
+STATUS 200
+{"best_sku": "1300", "orders": 18, "region": "west", "revenue_cents": 382673, "units": 72}
+STATUS 200
+{"error": "unknown region"}
+STATUS 200
+[{"product": "desk", "revenue_cents": 1682100, "sku": "0107", "units": 89}, {"product": "chair", "revenue_cents": 1177100, "sku": "1300", "units": 158}, {"product": "lamp", "revenue_cents": 353464, "sku": "0042", "units": 136}]
+STATUS 200
+[{"product": "chair", "revenue_cents": 1177100, "sku": "1300", "units": 158}, {"product": "mat", "revenue_cents": 281859, "sku": "0005", "units": 141}]
+STATUS 200
+[{"product": "desk", "revenue_cents": 1682100, "sku": "0107", "units": 89}, {"product": "chair", "revenue_cents": 1177100, "sku": "1300", "units": 158}, {"product": "lamp", "revenue_cents": 353464, "sku": "0042", "units": 136}, {"product": "shelf", "revenue_cents": 324800, "sku": "0890", "units": 58}, {"product": "mat", "revenue_cents": 281859, "sku": "0005", "units": 141}]
+STATUS 200
+{"error": "invalid n"}
+STATUS 200
+{"error": "invalid by"}
+STATUS 200
+[{"month": "2026-01", "revenue_cents": 445575, "units": 61}, {"month": "2026-02", "revenue_cents": 605493, "units": 101}, {"month": "2026-03", "revenue_cents": 762292, "units": 115}, {"month": "2026-04", "revenue_cents": 400348, "units": 93}, {"month": "2026-05", "revenue_cents": 1002739, "units": 140}, {"month": "2026-06", "revenue_cents": 602876, "units": 72}]
+"""
+
+[[request]]
+path = "/report/north"
+
+[[request]]
+path = "/report/west"
+
+[[request]]
+path = "/report/atlantis"
+
+[[request]]
+path = "/top"
+
+[[request]]
+path = "/top?by=units&n=2"
+
+[[request]]
+path = "/top?n=10"
+
+[[request]]
+path = "/top?n=0"
+
+[[request]]
+path = "/top?by=profit"
+
+[[request]]
+path = "/monthly"

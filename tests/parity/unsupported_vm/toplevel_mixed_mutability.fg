@@ -1,0 +1,9 @@
+// expect-error: declared both with and without `mut`
+// A function writes a top-level name declared both immutable and mutable:
+// which declaration it meets depends on when it runs (interpreter only).
+fn set_x() { x = 9 }
+let x = 1
+try { set_x() } catch e { println("first: {e.message}") }
+let mut x = 2
+set_x()
+println(x)

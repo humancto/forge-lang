@@ -7844,3 +7844,60 @@ fn fork_for_serving_gives_every_request_a_fresh_fuel_budget() {
     );
     assert!(call("work").is_ok());
 }
+
+/// Values covering every kind of set member, with pairs that compare equal
+/// across representations (the VM's `set_tests` has the same corpus).
+const SET_HASH_CORPUS: &str = r#"[1, 1.0, 0, -0.0, 0.0, math.sqrt(-1.0), "a", "b", [1, 2], [1.0, 2], [2, 1], (1, 2), {a: 1, b: 2}, {b: 2.0, a: 1}, {a: 1}, set([1, 2]), set([2.0, 1]), set([3]), Some(1), Some(1.0), None, Ok(1), Ok(1.0), Err(1), freeze([1]), [1], null, true, false, 9007199254740992, 9007199254740993, 9007199254740992.0, [[1, [2, 3.0]]], [[1, [2, 3]]], map([[1, 2]]), map([[1.0, 2]])]"#;
+
+/// Values that `container_eq` considers equal must hash equally, or a set
+/// lookup would miss them (`Value::set_hash`, `semantics::ordered_set`).
+#[test]
+fn equal_values_have_equal_set_hashes() {
+    let Value::Array(values) = run_forge(&format!("let corpus = {}\ncorpus", SET_HASH_CORPUS))
+    else {
+        panic!("corpus is an array");
+    };
+    let mut equal_pairs = 0;
+    for a in &values {
+        for b in &values {
+            if Value::container_eq(a, b) {
+                equal_pairs += 1;
+                assert_eq!(a.set_hash(), b.set_hash(), "{} and {}", a, b);
+            }
+        }
+    }
+    // Each value equals itself, and the corpus has many cross-type pairs.
+    assert!(
+        equal_pairs > values.len() + 10,
+        "{} equal pairs",
+        equal_pairs
+    );
+    // Sets built from these values agree with the linear definition.
+    let set = SetItems::from_values(values.iter().cloned());
+    for v in &values {
+        assert!(set.has_value(v), "{}", v);
+    }
+    let mut linear: Vec<Value> = Vec::new();
+    for v in &values {
+        if !linear.iter().any(|x| Value::container_eq(x, v)) {
+            linear.push(v.clone());
+        }
+    }
+    assert_eq!(set.len(), linear.len());
+    for (x, y) in set.iter().zip(&linear) {
+        assert!(Value::container_eq(x, y), "{} vs {}", x, y);
+    }
+}
+
+/// The set representation must not make every `Value` bigger: it has to
+/// fit in the space the largest other variant (`Object`) already takes.
+#[test]
+fn set_items_do_not_grow_value() {
+    use std::mem::size_of;
+    assert!(
+        size_of::<SetItems>() <= size_of::<IndexMap<String, Value>>(),
+        "SetItems is {} bytes, Object payload {}",
+        size_of::<SetItems>(),
+        size_of::<IndexMap<String, Value>>()
+    );
+}

@@ -1,0 +1,125 @@
+@server(port: 18506)
+
+fn is_number(x) -> Bool {
+    return typeof(x) == "Int" || typeof(x) == "Float"
+}
+
+fn is_matrix(m) -> Bool {
+    if typeof(m) != "Array" || len(m) == 0 {
+        return false
+    }
+    for row in m {
+        if typeof(row) != "Array" || len(row) == 0 || len(row) != len(m[0]) {
+            return false
+        }
+        if !all(row, fn(x) { return is_number(x) }) {
+            return false
+        }
+    }
+    return true
+}
+
+fn shape(m) {
+    return [len(m), len(m[0])]
+}
+
+fn multiply(a, b) {
+    return map(range(0, len(a)), fn(i) {
+        return map(range(0, len(b[0])), fn(j) {
+            let mut total = 0
+            for k in range(0, len(b)) {
+                total += a[i][k] * b[k][j]
+            }
+            return total
+        })
+    })
+}
+
+fn transpose(m) {
+    return map(range(0, len(m[0])), fn(j) {
+        return map(m, fn(row) { return row[j] })
+    })
+}
+
+fn det(m) {
+    if len(m) == 1 {
+        return m[0][0]
+    }
+    let mut total = 0
+    for j in range(0, len(m)) {
+        let minor = map(slice(m, 1, len(m)), fn(row) {
+            return slice(row, 0, j) + slice(row, j + 1, len(row))
+        })
+        let term = m[0][j] * det(minor)
+        if j % 2 == 0 {
+            total = total + term
+        } else {
+            total = total - term
+        }
+    }
+    return total
+}
+
+fn field(body, name: String) {
+    let v = get(body, name, null)
+    if is_matrix(v) {
+        return v
+    }
+    return null
+}
+
+@post("/matrix/multiply")
+fn multiply_route(body) -> Json {
+    let a = field(body, "a")
+    if a == null {
+        return { error: "a is not a matrix" }
+    }
+    let b = field(body, "b")
+    if b == null {
+        return { error: "b is not a matrix" }
+    }
+    if len(a[0]) != len(b) {
+        return { error: "shape mismatch: {len(a)}x{len(a[0])} times {len(b)}x{len(b[0])}" }
+    }
+    let r = multiply(a, b)
+    return { result: r, shape: shape(r) }
+}
+
+@post("/matrix/transpose")
+fn transpose_route(body) -> Json {
+    let m = field(body, "m")
+    if m == null {
+        return { error: "m is not a matrix" }
+    }
+    let r = transpose(m)
+    return { result: r, shape: shape(r) }
+}
+
+@post("/matrix/determinant")
+fn determinant_route(body) -> Json {
+    let m = field(body, "m")
+    if m == null {
+        return { error: "m is not a matrix" }
+    }
+    if len(m) != len(m[0]) {
+        return { error: "matrix is not square" }
+    }
+    return { determinant: det(m) }
+}
+
+@get("/matrix/identity/:n")
+fn identity(n: String) -> Json {
+    if !regex.test(n, "^[0-9]+$") || int(n) < 1 || int(n) > 10 {
+        return { error: "n must be between 1 and 10" }
+    }
+    let size = int(n)
+    let rows = map(range(0, size), fn(i) {
+        return map(range(0, size), fn(j) {
+            if i == j {
+                return 1
+            }
+            return 0
+        })
+    })
+    return { result: rows, shape: [size, size] }
+}

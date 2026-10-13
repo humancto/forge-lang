@@ -1701,8 +1701,10 @@ All functions take the **text first, then the pattern**. This order reads natura
 | `regex.test(text, pattern)`      | Test if pattern matches anywhere in text | `regex.test("hello", "ell")` → `true`               | Bool           |
 | `regex.find(text, pattern)`      | Find first match                         | `regex.find("abc123", "\\d+")` → `"123"`            | String or Null |
 | `regex.find_all(text, pattern)`  | Find all matches                         | `regex.find_all("a1b2c3", "\\d")` → `["1","2","3"]` | Array[String]  |
-| `regex.replace(text, pat, repl)` | Replace all matches                      | `regex.replace("aabaa", "a+", "x")` → `"xbx"`       | String         |
+| `regex.replace(text, pat, repl)` | Replace all matches; `repl` may use `$0`, `$1`, `${name}`, `$$` | `regex.replace("aabaa", "a+", "x")` → `"xbx"`       | String         |
 | `regex.split(text, pattern)`     | Split text by pattern                    | `regex.split("a:b::c", ":+")` → `["a","b","c"]`     | Array[String]  |
+| `regex.captures(text, pattern)` | Groups of the first match (`[whole, g1, ...]`, unmatched group `null`) | `regex.captures("k=7", "(\\w)=(\\d)")` → `["k=7","k","7"]` | Array or Null |
+| `regex.captures_all(text, pattern)` | Groups of every match | `regex.captures_all("a=1 b=2", "(\\w)=(\\d)")` → `[["a=1","a","1"], ["b=2","b","2"]]` | Array[Array] |
 
 > **Backslash Escaping.** In Forge strings, backslashes need to be doubled for regex special sequences: write `"\\d+"` to match one or more digits. The first backslash escapes the second, so the regex engine receives `\d+`.
 
@@ -2180,7 +2182,7 @@ CSV (Comma-Separated Values) remains one of the most widely used data exchange f
 | `csv.read(path)`        | Read a CSV file and parse it                | `csv.read("data.csv")` → `[{...}]`                        | Array[Object] |
 | `csv.write(path, rows)` | Write an array of objects to a CSV file     | `csv.write("out.csv", rows)`                              | Null          |
 
-> **Automatic Type Detection.** `csv.parse()` inspects each cell and converts it to the most specific Forge type: integers for whole numbers, floats for decimals, booleans for "true"/"false", and strings for everything else. This means `"42"` becomes `Int(42)` and `"3.14"` becomes `Float(3.14)`.
+> **Automatic Type Detection.** `csv.parse()` converts an unquoted cell that is exactly a whole number, a plain decimal or `true`/`false` to `Int`, `Float` or `Bool`; everything else stays a string, so nothing is lost: `42` becomes `Int(42)` and `3.14` becomes `Float(3.14)`, but `02134`, `+1`, `1e5` and any quoted cell (`"42"`) stay strings. Quoted cells may contain commas, doubled quotes and line breaks (RFC 4180). Pass `{ types: false }` to keep every cell a string, or `{ header: false }` to get each row as an array.
 
 ### Core Examples
 

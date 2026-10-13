@@ -2,6 +2,8 @@ use crate::interpreter::Value;
 use indexmap::IndexMap;
 use std::sync::Arc;
 
+use super::db_share::Handle;
+
 pub fn create_module() -> Value {
     let mut m = IndexMap::new();
     m.insert(
@@ -32,18 +34,64 @@ pub fn create_module() -> Value {
 fn run_tx_control(stmt: &'static str, label: &'static str) -> Result<Value, String> {
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| format!("{} requires async runtime", label))?;
-    let client = PG_CLIENT
-        .with(|cell| cell.borrow().as_ref().map(Arc::clone))
-        .ok_or_else(|| "no pg connection open".to_string())?;
-    tokio::task::block_in_place(|| {
-        handle.block_on(async {
-            client
-                .batch_execute(stmt)
-                .await
-                .map_err(|e| format!("{} error: {}", label, e))?;
-            Ok(Value::Null)
-        })
-    })
+    let begins = stmt == "BEGIN";
+    with_client(
+        |client| {
+            tokio::task::block_in_place(|| {
+                handle.block_on(async {
+                    client
+                        .batch_execute(stmt)
+                        .await
+                        .map_err(|e| format!("{} error: {}", label, e))?;
+                    Ok(Value::Null)
+                })
+            })
+        },
+        // BEGIN makes the transaction this owner's; COMMIT / ROLLBACK end it.
+        move |ok, was_open| if begins { ok || was_open } else { false },
+    )
+}
+
+/// The connection current on this thread (shared with the program's other
+/// threads, see `db_share`).
+pub(crate) fn current_handle() -> Option<Handle<Arc<tokio_postgres::Client>>> {
+    PG_CLIENT.with(|c| c.borrow().clone())
+}
+
+/// Make `handle` current on this thread; returns the previous one.
+pub(crate) fn replace_handle(
+    handle: Option<Handle<Arc<tokio_postgres::Client>>>,
+) -> Option<Handle<Arc<tokio_postgres::Client>>> {
+    PG_CLIENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), handle))
+}
+
+/// `handle`'s owner is done: roll back the transaction it left open.
+pub(crate) fn release(handle: &Handle<Arc<tokio_postgres::Client>>) {
+    handle.release(|client, tx_open| {
+        if !tx_open {
+            return;
+        }
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let client = Arc::clone(client);
+            let _ = tokio::task::block_in_place(|| {
+                rt.block_on(async move { client.batch_execute("ROLLBACK").await })
+            });
+        }
+    });
+}
+
+/// Run `op` with the current client, as this thread's transaction owner
+/// (`db_share`). Only `pg.begin` / `pg.commit` / `pg.rollback` change who
+/// owns the transaction: `tx_open(op succeeded, was open)`.
+fn with_client(
+    op: impl FnOnce(Arc<tokio_postgres::Client>) -> Result<Value, String>,
+    tx_open: impl FnOnce(bool, bool) -> bool,
+) -> Result<Value, String> {
+    let handle = current_handle().ok_or_else(|| "no pg connection open".to_string())?;
+    handle.run(
+        |client| op(Arc::clone(client)),
+        |_, result, was_open| tx_open(result.is_ok(), was_open),
+    )?
 }
 
 /// TLS mode for pg.connect(). Defaults to [`PgTlsMode::Tls`] when no mode is
@@ -232,6 +280,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                     crate::runtime::limits::acquire(crate::runtime::limits::Resource::Sockets)?;
 
                 let conn_str = conn_str.clone();
+                let mut connected_client = None;
                 let connected = tokio::task::block_in_place(|| {
                     handle.block_on(async {
                         match tls_mode {
@@ -245,7 +294,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                                         eprintln!("pg connection error: {}", e);
                                     }
                                 });
-                                PG_CLIENT.with(|cell| *cell.borrow_mut() = Some(Arc::new(client)));
+                                connected_client = Some(client);
                             }
                             PgTlsMode::Tls => {
                                 let tls = make_tls_connector(true)?;
@@ -257,7 +306,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                                         eprintln!("pg TLS connection error: {}", e);
                                     }
                                 });
-                                PG_CLIENT.with(|cell| *cell.borrow_mut() = Some(Arc::new(client)));
+                                connected_client = Some(client);
                             }
                             PgTlsMode::TlsNoVerify => {
                                 let tls = make_tls_connector(false)?;
@@ -270,13 +319,20 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                                         eprintln!("pg TLS-no-verify connection error: {}", e);
                                     }
                                 });
-                                PG_CLIENT.with(|cell| *cell.borrow_mut() = Some(Arc::new(client)));
+                                connected_client = Some(client);
                             }
                         }
                         Ok::<Value, String>(Value::Bool(true))
                     })
                 })?;
-                PG_SLOT.with(|cell| *cell.borrow_mut() = Some(socket));
+                if let Some(client) = connected_client {
+                    // Replaces this thread's connection; other threads keep
+                    // theirs.
+                    if let Some(old) = replace_handle(Some(Handle::open(Arc::new(client), socket)))
+                    {
+                        release(&old);
+                    }
+                }
                 Ok(connected)
             }
             _ => Err("pg.connect() requires a connection string".to_string()),
@@ -294,50 +350,49 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         _ => vec![],
                     };
 
-                // Clone the Arc out of the thread-local before doing any async work.
-                // This drops the RefCell borrow immediately and gives the async task
-                // independent ownership — no raw pointers, no `unsafe`, and the client
-                // stays alive even if the slot is later cleared.
-                let client = PG_CLIENT
-                    .with(|cell| cell.borrow().as_ref().map(Arc::clone))
-                    .ok_or_else(|| "no pg connection open".to_string())?;
+                with_client(
+                    |client| {
+                        tokio::task::block_in_place(|| {
+                            handle.block_on(async {
+                                let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                                    param_vals
+                                        .iter()
+                                        .map(|p| {
+                                            p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)
+                                        })
+                                        .collect();
 
-                tokio::task::block_in_place(|| {
-                    handle.block_on(async {
-                        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                            param_vals
-                                .iter()
-                                .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-                                .collect();
+                                // Await directly — no nested block_on
+                                let rows = client
+                                    .query(sql.as_str(), param_refs.as_slice())
+                                    .await
+                                    .map_err(|e| format!("pg.query error: {}", e))?;
 
-                        // Await directly — no nested block_on
-                        let rows = client
-                            .query(sql.as_str(), param_refs.as_slice())
-                            .await
-                            .map_err(|e| format!("pg.query error: {}", e))?;
-
-                        let mut results = Vec::new();
-                        for row in &rows {
-                            let mut map = IndexMap::new();
-                            for (i, col) in row.columns().iter().enumerate() {
-                                let val = if let Ok(v) = row.try_get::<_, i64>(i) {
-                                    Value::Int(v)
-                                } else if let Ok(v) = row.try_get::<_, f64>(i) {
-                                    Value::Float(v)
-                                } else if let Ok(v) = row.try_get::<_, String>(i) {
-                                    Value::String(v)
-                                } else if let Ok(v) = row.try_get::<_, bool>(i) {
-                                    Value::Bool(v)
-                                } else {
-                                    Value::Null
-                                };
-                                map.insert(col.name().to_string(), val);
-                            }
-                            results.push(Value::Object(map));
-                        }
-                        Ok(Value::Array(results))
-                    })
-                })
+                                let mut results = Vec::new();
+                                for row in &rows {
+                                    let mut map = IndexMap::new();
+                                    for (i, col) in row.columns().iter().enumerate() {
+                                        let val = if let Ok(v) = row.try_get::<_, i64>(i) {
+                                            Value::Int(v)
+                                        } else if let Ok(v) = row.try_get::<_, f64>(i) {
+                                            Value::Float(v)
+                                        } else if let Ok(v) = row.try_get::<_, String>(i) {
+                                            Value::String(v)
+                                        } else if let Ok(v) = row.try_get::<_, bool>(i) {
+                                            Value::Bool(v)
+                                        } else {
+                                            Value::Null
+                                        };
+                                        map.insert(col.name().to_string(), val);
+                                    }
+                                    results.push(Value::Object(map));
+                                }
+                                Ok(Value::Array(results))
+                            })
+                        })
+                    },
+                    |_, was_open| was_open,
+                )
             }
             _ => Err("pg.query() requires a SQL string".to_string()),
         },
@@ -354,37 +409,39 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
                         _ => vec![],
                     };
 
-                // Clone the Arc out of the thread-local before any async work — same
-                // pattern as pg.query.
-                let client = PG_CLIENT
-                    .with(|cell| cell.borrow().as_ref().map(Arc::clone))
-                    .ok_or_else(|| "no pg connection open".to_string())?;
+                with_client(
+                    |client| {
+                        tokio::task::block_in_place(|| {
+                            handle.block_on(async {
+                                let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                                    param_vals
+                                        .iter()
+                                        .map(|p| {
+                                            p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)
+                                        })
+                                        .collect();
 
-                tokio::task::block_in_place(|| {
-                    handle.block_on(async {
-                        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                            param_vals
-                                .iter()
-                                .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-                                .collect();
-
-                        // Await directly — no nested block_on
-                        let count = client
-                            .execute(sql.as_str(), param_refs.as_slice())
-                            .await
-                            .map_err(|e| format!("pg.execute error: {}", e))?;
-                        Ok(Value::Int(count as i64))
-                    })
-                })
+                                // Await directly — no nested block_on
+                                let count = client
+                                    .execute(sql.as_str(), param_refs.as_slice())
+                                    .await
+                                    .map_err(|e| format!("pg.execute error: {}", e))?;
+                                Ok(Value::Int(count as i64))
+                            })
+                        })
+                    },
+                    |_, was_open| was_open,
+                )
             }
             _ => Err("pg.execute() requires a SQL string".to_string()),
         },
 
         "pg.close" => {
-            PG_CLIENT.with(|cell| {
-                *cell.borrow_mut() = None;
-            });
-            PG_SLOT.with(|cell| *cell.borrow_mut() = None);
+            // Closes this thread's connection (rolling back a transaction it
+            // left open); other threads keep a shared one.
+            if let Some(old) = replace_handle(None) {
+                release(&old);
+            }
             Ok(Value::Null)
         }
 
@@ -397,10 +454,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value, String> {
 }
 
 thread_local! {
-    static PG_CLIENT: std::cell::RefCell<Option<Arc<tokio_postgres::Client>>> =
-        const { std::cell::RefCell::new(None) };
-    /// Socket slot (`runtime::limits`) of the open connection.
-    static PG_SLOT: std::cell::RefCell<Option<crate::runtime::limits::Slot>> =
+    /// The connection current on this thread; its socket slot
+    /// (`runtime::limits`) lives in the shared handle.
+    static PG_CLIENT: std::cell::RefCell<Option<Handle<Arc<tokio_postgres::Client>>>> =
         const { std::cell::RefCell::new(None) };
 }
 

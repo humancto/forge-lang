@@ -1,0 +1,45 @@
+id = "sync_changes"
+category = "http_client"
+title = "Diff two record sets and push the changes with POST, PUT and DELETE"
+prompt = """
+The first line of standard input is a base URL. `GET <base>/local.json` and
+`GET <base>/remote.json` each return a JSON array of records
+`{"id", "version", "title", "tags"}`.
+
+Compare them by `id`:
+- in local only → create;
+- in both with a higher local version → update;
+- in remote only → delete;
+- in both with a higher remote version → conflict (nothing is sent);
+- in both with the same version → unchanged.
+
+Send the changes, all creates first, then all updates, then all deletes, each group in
+ascending id order:
+- create: `POST <base>/echo` with the local record as the JSON body (keys `id`, `version`,
+  `title`, `tags` in that order);
+- update: `PUT <base>/echo?id=<id>` with the JSON body
+  `{"version": <local version>, "title": <local title>, "tags": <local tags>}`;
+- delete: `DELETE <base>/echo?id=<id>` without a body.
+
+`<base>/echo` answers with JSON `{"method", "path", "query", "body", "content_type"}`
+describing the request it received (`query` is an object, `body` the parsed JSON body or
+null). For each response print `<method> query=<query> body=<body>`, with query and body
+written as compact JSON (no spaces, keys in the order received).
+
+Then print `conflict <id>: local v<local version> < remote v<remote version>` for each
+conflict in ascending id order, and finally
+`created=<n> updated=<n> deleted=<n> conflicts=<n> unchanged=<n>`.
+"""
+stdin = """
+{base_url}
+"""
+needs = ["net"]
+expected_stdout = """
+POST query={} body={"id":"c3","version":2,"title":"Gamma","tags":["x"]}
+POST query={} body={"id":"e5","version":1,"title":"Epsilon & co","tags":["new","y"]}
+PUT query={"id":"a1"} body={"version":5,"title":"Alpha v5","tags":[]}
+DELETE query={"id":"d4"} body=null
+DELETE query={"id":"g7"} body=null
+conflict f6: local v3 < remote v4
+created=2 updated=1 deleted=2 conflicts=1 unchanged=1
+"""

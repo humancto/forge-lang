@@ -1,0 +1,71 @@
+// Every task returns a Result instead of raising: an error raised inside a
+// squad task would fail the whole squad.
+
+fn isqrt(n: Int) -> Int {
+    let mut r = int(math.sqrt(float(n)))
+    while r * r > n {
+        r -= 1
+    }
+    while (r + 1) * (r + 1) <= n {
+        r += 1
+    }
+    return r
+}
+
+fn run_op(line: String) {
+    wait(0.2)
+    let p = split(line, " ")
+    if p[0] == "div" {
+        let a = int(p[1])
+        let b = int(p[2])
+        if b == 0 {
+            return Err("division by zero")
+        }
+        return Ok(a / b)
+    }
+    if p[0] == "nth" {
+        let i = int(p[1])
+        let items = split(p[2], ",")
+        if i < 0 || i >= len(items) {
+            return Err("index out of range")
+        }
+        return Ok(items[i])
+    }
+    if p[0] == "num" {
+        if !regex.test(p[1], "^-?[0-9]+$") {
+            return Err("not a number")
+        }
+        return Ok(int(p[1]))
+    }
+    if p[0] == "isqrt" {
+        let n = int(p[1])
+        if n < 0 {
+            return Err("negative input")
+        }
+        return Ok(isqrt(n))
+    }
+    return Err("unknown operation")
+}
+
+let ops = map(filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" }), fn(l) { return l.trim() })
+let results = await_all(map(ops, fn(op) { return spawn { run_op(op) } }))
+
+let mut good = 0
+let mut reasons = []
+for e in enumerate(results) {
+    match e.value {
+        Ok(v) => {
+            good += 1
+            println("{e.index + 1}: ok {v}")
+        },
+        Err(reason) => {
+            reasons.push(reason)
+            println("{e.index + 1}: error {reason}")
+        },
+    }
+}
+println("ok={good} errors={len(reasons)}")
+let counts = frequencies(reasons)
+for r in sort(keys(counts)) {
+    println("{r}: {counts[r]}")
+}

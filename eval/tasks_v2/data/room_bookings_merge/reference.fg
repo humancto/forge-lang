@@ -1,0 +1,67 @@
+// Merge bookings per room (sort + sweep) and find the longest free gap.
+
+let DAY_START = 8 * 60
+let DAY_END = 20 * 60
+
+fn minutes(hhmm: String) -> Int {
+    let p = split(hhmm, ":")
+    return int(p[0]) * 60 + int(p[1])
+}
+
+fn clock(m: Int) -> String {
+    return "{pad_start(str(m / 60), 2, "0")}:{pad_start(str(m % 60), 2, "0")}"
+}
+
+let lines = filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" })
+let bookings = map(lines, fn(l) {
+    let p = split(l.trim(), " ")
+    let span = split(p[1], "-")
+    return { room: p[0], start: minutes(span[0]), end: minutes(span[1]) }
+})
+let by_room = group_by(bookings, fn(b) { return b.room })
+
+for room in sort(keys(by_room)) {
+    let sorted = sort(by_room[room], fn(a, b) {
+        if a.start != b.start {
+            return a.start - b.start
+        }
+        return a.end - b.end
+    })
+    // sweep: starts and ends of the merged blocks
+    let mut starts = []
+    let mut ends = []
+    for b in sorted {
+        let last = len(ends) - 1
+        if last >= 0 && b.start <= ends[last] {
+            ends[last] = max(ends[last], b.end)
+        } else {
+            starts.push(b.start)
+            ends.push(b.end)
+        }
+    }
+    let mut busy = 0
+    for i in range(0, len(starts)) {
+        busy += ends[i] - starts[i]
+    }
+    let mut best_from = -1
+    let mut best_to = -1
+    let mut prev = DAY_START
+    for i in range(0, len(starts) + 1) {
+        let mut s = DAY_END
+        let mut e = DAY_END
+        if i < len(starts) {
+            s = starts[i]
+            e = ends[i]
+        }
+        if s - prev > 0 && (best_from < 0 || s - prev > best_to - best_from) {
+            best_from = prev
+            best_to = s
+        }
+        prev = max(prev, e)
+    }
+    let mut free = "none"
+    if best_from >= 0 {
+        free = "{clock(best_from)}-{clock(best_to)}"
+    }
+    println("{room} blocks={len(starts)} busy={busy / 60}h{pad_start(str(busy % 60), 2, "0")}m free={free}")
+}

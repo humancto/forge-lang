@@ -1,0 +1,32 @@
+// One task per call; await them in input order. Each task returns its
+// result (null when the call fails) instead of writing shared state.
+
+let calls = map(filter(fs.lines("/dev/stdin"), fn(l) { return l.trim() != "" }), fn(l) {
+    return split(l.trim(), " ")
+})
+
+let handles = map(calls, fn(c) {
+    return spawn {
+        wait(int(c[1]) / 1000.0)
+        if regex.test(c[2], "^-?[0-9]+$") {
+            let v = int(c[2])
+            return v * v
+        }
+        return null
+    }
+})
+let results = await_all(handles)
+
+let mut ok = 0
+let mut total = 0
+for e in enumerate(calls) {
+    let r = results[e.index]
+    if r == null {
+        println("{e.value[0]}: failed")
+    } else {
+        ok += 1
+        total += r
+        println("{e.value[0]}: {r}")
+    }
+}
+println("ok={ok} sum={total}")

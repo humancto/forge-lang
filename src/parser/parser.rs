@@ -745,13 +745,22 @@ impl Parser {
         }
 
         if self.check(&Token::LBrace) {
-            // import { name1, name2 } from "path"
+            // import { name1, name2 as alias } from "path"
             self.advance();
-            let mut names = Vec::new();
-            let mut spans = Vec::new();
+            let mut names: Vec<ImportName> = Vec::new();
+            // (span of the name, span of its alias)
+            let mut spans: Vec<(Span, Option<Span>)> = Vec::new();
             while !self.check(&Token::RBrace) {
-                names.push(self.expect_ident()?);
-                spans.push(self.prev_span());
+                let mut name = ImportName::new(self.expect_ident()?);
+                let name_span = self.prev_span();
+                let mut alias_span = None;
+                if matches!(self.current_token(), Token::Ident(ref s) if s == "as") {
+                    self.advance();
+                    name.alias = Some(self.expect_ident()?);
+                    alias_span = Some(self.prev_span());
+                }
+                names.push(name);
+                spans.push((name_span, alias_span));
                 if self.check(&Token::Comma) {
                     self.advance();
                 }
@@ -759,10 +768,17 @@ impl Parser {
             self.expect(Token::RBrace)?;
             self.expect(Token::From)?;
             if self.at_native_path() {
+                if let Some(renamed) = names.iter().find(|n| n.alias.is_some()) {
+                    return Err(self.error(&format!(
+                        "`as` is not supported in a native import ('{}'); import the library as a namespace instead: import native \"...\" as name",
+                        renamed.name
+                    )));
+                }
+                let names: Vec<String> = names.into_iter().map(|n| n.name).collect();
                 let path = self.parse_native_path()?;
                 let end = self.prev_end();
                 if let Some(ix) = self.index.as_mut() {
-                    for (name, span) in names.iter().zip(&spans) {
+                    for (name, (span, _)) in names.iter().zip(&spans) {
                         let def = ix.def(name, *span, DefKind::NativeImport { path: path.clone() });
                         ix.set_visible_from(def, end);
                     }
@@ -781,8 +797,21 @@ impl Parser {
             };
             let end = self.prev_end();
             if let Some(ix) = self.index.as_mut() {
-                for (name, span) in names.iter().zip(spans) {
-                    let def = ix.def(name, span, DefKind::Import { path: path.clone() });
+                for (name, (span, alias_span)) in names.iter().zip(spans) {
+                    let kind = DefKind::Import {
+                        path: path.clone(),
+                        name: name.name.clone(),
+                    };
+                    // A renamed import binds the alias; the module's own
+                    // name is a member reference (like `module.name`), so
+                    // renaming the definition in the module renames it.
+                    let def = match alias_span {
+                        Some(alias_span) => {
+                            ix.reference(&name.name, span, Role::Field);
+                            ix.def(name.binding(), alias_span, kind)
+                        }
+                        None => ix.def(&name.name, span, kind),
+                    };
                     ix.set_visible_from(def, end);
                 }
             }
@@ -2389,7 +2418,18 @@ impl Parser {
                 self.skip_newlines();
                 let else_body = if self.check_else_keyword() {
                     self.advance();
-                    Some(self.parse_block()?)
+                    if self.check(&Token::If) {
+                        // `else if ...`: the nested if-expression is the
+                        // else branch's value.
+                        let (line, col) = self
+                            .tokens
+                            .get(self.pos)
+                            .map_or((0, 0), |t| (t.line, t.col));
+                        let nested = self.parse_primary()?;
+                        Some(vec![SpannedStmt::new(Stmt::Expression(nested), line, col)])
+                    } else {
+                        Some(self.parse_block()?)
+                    }
                 } else {
                     None
                 };
@@ -2459,9 +2499,14 @@ impl Parser {
                 // text: there is no expression to interpolate.
                 chars.next();
                 current.push_str("{}");
-            } else if ch == '{' && Self::is_quantifier_braces(chars.clone().map(|(_, c)| c)) {
+            } else if ch == '{'
+                && (Self::is_quantifier_braces(chars.clone().map(|(_, c)| c))
+                    || current.ends_with("\\p")
+                    || current.ends_with("\\P"))
+            {
                 // `{4}`, `{2,}`, `{1,3}`: a regex quantifier, not an
                 // expression (interpolating a bare number is pointless).
+                // `\p{L}`, `\P{Lu}`: a regex Unicode class.
                 current.push('{');
                 for (_, inner) in chars.by_ref() {
                     current.push(inner);
@@ -3056,6 +3101,27 @@ mod tests {
         let tokens = lexer.tokenize().expect("lexing should succeed");
         let mut parser = Parser::new(tokens);
         parser.parse_program().expect("parsing should succeed")
+    }
+
+    #[test]
+    fn import_names_can_be_renamed_with_as() {
+        let program = parse_program("import { a, b as c, as as d } from \"m.fg\"");
+        let Stmt::Import { path, names } = &program.statements[0].stmt else {
+            panic!("expected an import");
+        };
+        assert_eq!(path, "m.fg");
+        let names: Vec<(&str, &str)> = names
+            .iter()
+            .flatten()
+            .map(|n| (n.name.as_str(), n.binding()))
+            .collect();
+        assert_eq!(names, [("a", "a"), ("b", "c"), ("as", "d")]);
+        let err = parse_err("import { f as g } from native \"lib\"");
+        assert!(
+            err.message.contains("not supported in a native import"),
+            "{}",
+            err.message
+        );
     }
 
     fn parse_err(input: &str) -> ParseError {

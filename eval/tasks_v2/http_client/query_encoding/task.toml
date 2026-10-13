@@ -1,0 +1,40 @@
+id = "query_encoding"
+category = "http_client"
+title = "Send awkward query parameters and verify the round trip"
+prompt = """
+The first line of standard input is a base URL. Each following non-blank line is a query
+parameter `<name>=<value>`: the name is everything before the first `=`, the value is
+everything after it (values may contain spaces, `&`, `=`, `+`, `%`, `/`, `#`, `?` and
+non-ASCII letters; leading and trailing spaces of the line are not part of it).
+
+Send one request, `GET <base>/echo`, carrying all the parameters correctly URL-encoded in
+the query string. The endpoint answers with JSON whose `query` field is an object of the
+decoded parameters it received.
+
+Print every received parameter as `<name> -> [<value>]`, sorted by name, then `round trip:
+ok` if the received parameters are exactly the ones that were sent, or
+`round trip: mismatch` otherwise.
+"""
+stdin = """
+{base_url}
+q=fish & chips
+redirect=/a/b?c=d#frag
+plus=1+1=2
+pct=100% sure
+city=Zürich
+emoji=naïve café
+empty_looking= x
+tag=a,b;c
+"""
+needs = ["net"]
+expected_stdout = """
+city -> [Zürich]
+emoji -> [naïve café]
+empty_looking -> [ x]
+pct -> [100% sure]
+plus -> [1+1=2]
+q -> [fish & chips]
+redirect -> [/a/b?c=d#frag]
+tag -> [a,b;c]
+round trip: ok
+"""

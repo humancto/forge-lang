@@ -1,0 +1,120 @@
+// Commands return Ok(new accounts) or Err(message). Objects are values, so
+// a batch runs on its own copy and only replaces the ledger if every
+// command succeeded.
+
+fn amount(s: String, allow_zero: Bool) -> Result<Int, String> {
+    if !regex.test(s, "^[0-9]+$") || (int(s) == 0 && !allow_zero) {
+        return Err("invalid amount")
+    }
+    return Ok(int(s))
+}
+
+fn need(acc, name: String) -> Result<Bool, String> {
+    if !has_key(acc, name) {
+        return Err("unknown account {name}")
+    }
+    return Ok(true)
+}
+
+fn apply(accounts, line: String) {
+    let mut acc = accounts
+    let p = split(line, " ")
+    let cmd = p[0]
+    if cmd == "open" && len(p) == 3 {
+        if has_key(acc, p[1]) {
+            return Err("account exists")
+        }
+        acc[p[1]] = amount(p[2], true)?
+    } else if (cmd == "deposit" || cmd == "withdraw") && len(p) == 3 {
+        need(acc, p[1])?
+        let a = amount(p[2], false)?
+        if cmd == "withdraw" {
+            if acc[p[1]] < a {
+                return Err("insufficient funds")
+            }
+            acc[p[1]] = acc[p[1]] - a
+        } else {
+            acc[p[1]] = acc[p[1]] + a
+        }
+    } else if cmd == "transfer" && len(p) == 4 {
+        need(acc, p[1])?
+        need(acc, p[2])?
+        if p[1] == p[2] {
+            return Err("same account")
+        }
+        let a = amount(p[3], false)?
+        if acc[p[1]] < a {
+            return Err("insufficient funds")
+        }
+        acc[p[1]] = acc[p[1]] - a
+        acc[p[2]] = acc[p[2]] + a
+    } else {
+        return Err("unknown command")
+    }
+    return Ok(acc)
+}
+
+let mut accounts = {}
+let mut failed = false
+let mut in_batch = false
+let mut batch = []
+let mut nbatch = 0
+for raw in fs.lines("/dev/stdin") {
+    let line = regex.replace(raw.trim(), " +", " ")
+    if line == "" {
+        continue
+    }
+    if line == "batch" {
+        in_batch = true
+        batch = []
+        continue
+    }
+    if line == "end" {
+        nbatch += 1
+        in_batch = false
+        let mut trial = accounts
+        let mut error = null
+        for e in enumerate(batch) {
+            match apply(trial, e.value) {
+                Ok(next) => {
+                    trial = next
+                },
+                Err(msg) => {
+                    error = "failed at command {e.index + 1}: {msg}"
+                },
+            }
+            if error != null {
+                break
+            }
+        }
+        if error == null {
+            accounts = trial
+            println("batch {nbatch}: ok ({len(batch)} commands)")
+        } else {
+            failed = true
+            println("batch {nbatch}: {error}")
+        }
+        continue
+    }
+    if in_batch {
+        batch.push(line)
+        continue
+    }
+    match apply(accounts, line) {
+        Ok(next) => {
+            accounts = next
+            println("{line}: ok")
+        },
+        Err(msg) => {
+            failed = true
+            println("{line}: error {msg}")
+        },
+    }
+}
+for name in sort(keys(accounts)) {
+    println("{name} {accounts[name]}")
+}
+println("total {sum(values(accounts))}")
+if failed {
+    exit(1)
+}

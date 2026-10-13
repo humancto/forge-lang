@@ -14,7 +14,7 @@ pub mod client {
         _method: &str,
         _body: Option<String>,
         _headers: Option<&HashMap<String, String>>,
-        _timeout_secs: Option<u64>,
+        _timeout: Option<std::time::Duration>,
         _max_redirects: Option<usize>,
         _max_bytes: Option<u64>,
     ) -> Result<Value, String> {

@@ -637,6 +637,8 @@ fn get_completions() -> Vec<serde_json::Value> {
     let builtins = [
         "println",
         "print",
+        "eprintln",
+        "eprint",
         "say",
         "yell",
         "whisper",
@@ -686,11 +688,21 @@ fn get_completions() -> Vec<serde_json::Value> {
         "csv", "term", "time", "jwt", "npc", "exec",
     ];
 
+    // Never offer what the edition in effect removed (`say`, `define`,
+    // `otherwise` ... in 2027).
+    let edition = crate::semantics::edition::current();
     let mut items = Vec::new();
-    for kw in &keywords {
+    let removed = |word: &str| {
+        edition >= crate::semantics::edition::Edition::E2027
+            && crate::lexer::token::REMOVED_IN_2027.contains(&word)
+    };
+    for kw in keywords.iter().filter(|kw| !removed(kw)) {
         items.push(serde_json::json!({"label": kw, "kind": 14})); // Keyword
     }
-    for bi in &builtins {
+    for bi in builtins
+        .iter()
+        .filter(|bi| crate::builtins_registry::available(bi, edition))
+    {
         items.push(serde_json::json!({"label": bi, "kind": 3})); // Function
     }
     for m in &modules {
@@ -784,13 +796,22 @@ fn get_module_completions(params: &serde_json::Value) -> Vec<serde_json::Value> 
         ("json", vec!["parse", "stringify", "compact", "pretty"]),
         (
             "regex",
-            vec!["test", "find", "find_all", "replace", "split"],
+            vec![
+                "test",
+                "find",
+                "find_all",
+                "replace",
+                "split",
+                "captures",
+                "captures_all",
+            ],
         ),
         ("log", vec!["info", "warn", "error", "debug"]),
         (
             "http",
             vec![
-                "get", "post", "put", "delete", "patch", "head", "download", "crawl",
+                "get", "post", "put", "delete", "patch", "head", "download", "crawl", "pretty",
+                "response",
             ],
         ),
         ("csv", vec!["parse", "stringify", "read", "write"]),
@@ -1033,16 +1054,19 @@ fn get_definition(uri: &str, line: usize, character: usize) -> serde_json::Value
     // Cross-file: check imported files for the symbol
     let imports = collect_imports(&text);
     for (import_path, names) in &imports {
-        // If named import, only follow if the word is in the name list
-        if let Some(name_list) = names {
-            if !name_list.iter().any(|n| n == &word) {
-                continue;
-            }
-        }
+        // If named import, only follow if the word is in the name list (the
+        // module defines it under its own name when renamed with `as`)
+        let target_name = match names {
+            Some(name_list) => match name_list.iter().find(|n| n.binding() == word) {
+                Some(n) => n.name.clone(),
+                None => continue,
+            },
+            None => word.clone(),
+        };
         if let Some(resolved) = resolve_import_for_lsp(import_path, uri) {
             if let Ok(imported_text) = std::fs::read_to_string(&resolved) {
                 let exported = collect_exported_symbols(&imported_text);
-                if let Some(symbol) = exported.iter().find(|s| s.name == word) {
+                if let Some(symbol) = exported.iter().find(|s| s.name == target_name) {
                     let target_uri = path_to_uri(&resolved);
                     return serde_json::json!({
                         "uri": target_uri,
@@ -1302,7 +1326,7 @@ fn collect_symbols_from_stmt(stmt: &Stmt, line: usize, symbols: &mut Vec<Documen
             if let Some(name_list) = names {
                 for n in name_list {
                     symbols.push(DocumentSymbolInfo {
-                        name: n.clone(),
+                        name: n.binding().to_string(),
                         kind: 2, // Module
                         line,
                     });
@@ -1349,6 +1373,14 @@ const BUILTIN_DOCS: &[(&str, &str)] = &[
     (
         "print",
         "fn print(...args) — Print values without a newline",
+    ),
+    (
+        "eprintln",
+        "fn eprintln(...args) — Print values to stderr followed by a newline",
+    ),
+    (
+        "eprint",
+        "fn eprint(...args) — Print values to stderr without a newline",
     ),
     ("say", "fn say(...args) — Print with natural language style"),
     ("yell", "fn yell(...args) — Print in UPPERCASE"),
@@ -1970,7 +2002,7 @@ fn path_to_uri(path: &std::path::Path) -> String {
 }
 
 /// Extract import statements from source code.
-fn collect_imports(source: &str) -> Vec<(String, Option<Vec<String>>)> {
+fn collect_imports(source: &str) -> Vec<(String, Option<Vec<crate::parser::ast::ImportName>>)> {
     let mut lexer = crate::lexer::Lexer::new(source);
     let tokens = match lexer.tokenize() {
         Ok(t) => t,
@@ -2317,15 +2349,18 @@ mod tests {
 
     #[test]
     fn collect_imports_extracts_import_statements() {
-        let imports = collect_imports("import \"helper\"\nimport { foo, bar } from \"utils\"");
+        let imports =
+            collect_imports("import \"helper\"\nimport { foo, bar as baz } from \"utils\"");
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0].0, "helper");
         assert!(imports[0].1.is_none());
         assert_eq!(imports[1].0, "utils");
-        assert_eq!(
-            imports[1].1.as_ref().unwrap(),
-            &vec!["foo".to_string(), "bar".to_string()]
-        );
+        let names = imports[1].1.as_ref().unwrap();
+        let pairs: Vec<(&str, &str)> = names
+            .iter()
+            .map(|n| (n.name.as_str(), n.binding()))
+            .collect();
+        assert_eq!(pairs, [("foo", "foo"), ("bar", "baz")]);
     }
 
     #[test]

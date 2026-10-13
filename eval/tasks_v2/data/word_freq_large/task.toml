@@ -1,0 +1,36 @@
+id = "word_freq_large"
+category = "data"
+title = "Word frequencies over 100,000 words"
+prompt = """
+Standard input is an English-like text of about 100,000 words. A word is a maximal run of
+ASCII letters `a`-`z` / `A`-`Z`; everything else (spaces, digits, punctuation, apostrophes,
+hyphens) separates words, so `don't` is the two words `don` and `t`. Words are compared
+case-insensitively and printed in lower case.
+
+Print:
+1. `words: <total number of words>`
+2. `distinct: <number of distinct words>`
+3. `once: <number of words that occur exactly once>`
+4. the 10 most frequent words, one per line as `<word> <count>`, most frequent first, ties
+   broken by the word in ascending order.
+
+The program must finish within a few seconds.
+"""
+stdin_file = "input.txt"
+needs = []
+timeout = 20
+expected_stdout = """
+words: 100010
+distinct: 5534
+once: 995
+rui 13139
+lkyozks 6342
+yhxrxr 4155
+mdkbvia 3084
+nemrrmqd 2357
+tu 2012
+llaiely 1677
+ecxtb 1456
+kfkynun 1368
+zl 1210
+"""

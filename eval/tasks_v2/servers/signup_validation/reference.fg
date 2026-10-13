@@ -1,0 +1,73 @@
+@server(port: 18502)
+
+// Each check returns the first failing rule's message, or null.
+
+fn check_username(v) {
+    if v == null {
+        return "is required"
+    }
+    if typeof(v) != "String" || len(v) < 3 || len(v) > 16 {
+        return "must be 3-16 characters"
+    }
+    if !regex.test(v, "^[a-z0-9_]+$") {
+        return "may only contain a-z, 0-9 and _"
+    }
+    if v == "admin" || v == "root" {
+        return "is taken"
+    }
+    return null
+}
+
+fn check_email(v) {
+    if v == null {
+        return "is required"
+    }
+    if typeof(v) != "String" || !regex.test(v, "(?i)^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$") {
+        return "is invalid"
+    }
+    return null
+}
+
+fn check_age(v) {
+    if v == null {
+        return "is required"
+    }
+    if typeof(v) != "Int" {
+        return "must be an integer"
+    }
+    if v < 13 || v > 120 {
+        return "must be between 13 and 120"
+    }
+    return null
+}
+
+fn check_password(v) {
+    if v == null {
+        return "is required"
+    }
+    if typeof(v) != "String" || len(v) < 8 {
+        return "must be at least 8 characters"
+    }
+    if !regex.test(v, "[A-Za-z]") || !regex.test(v, "[0-9]") {
+        return "must contain a letter and a digit"
+    }
+    return null
+}
+
+@post("/signup")
+fn signup(body) -> Json {
+    if typeof(body) != "Object" {
+        return { ok: false, errors: [{ field: "body", message: "must be an object" }] }
+    }
+    let checks = [
+        { field: "username", message: check_username(get(body, "username", null)) },
+        { field: "email", message: check_email(get(body, "email", null)) },
+        { field: "age", message: check_age(get(body, "age", null)) },
+        { field: "password", message: check_password(get(body, "password", null)) },
+    ]
+    let errors = filter(checks, fn(c) { return c.message != null })
+    if len(errors) > 0 {
+        return { ok: false, errors: errors }
+    }
+    return { ok: true, user: { username: body.username, email: body.email.lower(), age: body.age } }
+}
