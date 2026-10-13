@@ -328,11 +328,42 @@ impl Lexer {
             }
         }
 
+        // Exponent: `1e9`, `2.5e-3`, `6E+23`. Only when digits follow the
+        // `e` (after an optional sign), so `2ex` is still `2` then `ex`.
+        if matches!(self.source.get(self.pos), Some('e' | 'E')) {
+            let sign = matches!(self.peek(), Some('+' | '-'));
+            let first_digit = if sign { self.peek_at(2) } else { self.peek() };
+            if first_digit.is_some_and(|c| c.is_ascii_digit()) {
+                is_float = true;
+                num_str.push('e');
+                self.advance();
+                if sign {
+                    num_str.push(self.current());
+                    self.advance();
+                }
+                while self.pos < self.source.len() {
+                    let ch = self.current();
+                    if ch.is_ascii_digit() {
+                        num_str.push(ch);
+                        self.advance();
+                    } else if ch == '_' {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
         if is_float {
-            num_str
-                .parse::<f64>()
-                .map(Token::Float)
-                .map_err(|_| self.error("invalid float literal"))
+            match num_str.parse::<f64>() {
+                Ok(f) if f.is_finite() => Ok(Token::Float(f)),
+                Ok(_) => Err(self.error(&format!(
+                    "float literal out of range: {} (the largest Float is about 1.8e308)",
+                    num_str
+                ))),
+                Err(_) => Err(self.error("invalid float literal")),
+            }
         } else {
             num_str
                 .parse::<i64>()
@@ -687,6 +718,30 @@ mod tests {
         assert_eq!(lex("42"), vec![Token::Int(42)]);
         assert_eq!(lex("3.14"), vec![Token::Float(3.14)]);
         assert_eq!(lex("1_000_000"), vec![Token::Int(1000000)]);
+    }
+
+    #[test]
+    fn test_exponent_floats() {
+        assert_eq!(lex("1e2"), vec![Token::Float(100.0)]);
+        assert_eq!(lex("1.5e-3"), vec![Token::Float(0.0015)]);
+        assert_eq!(lex("2E+10"), vec![Token::Float(2e10)]);
+        assert_eq!(lex("1_000e1_0"), vec![Token::Float(1e13)]);
+        // No digits after the `e`: the number ends, a name follows.
+        assert_eq!(
+            lex("2ex"),
+            vec![Token::Int(2), Token::Ident("ex".to_string())]
+        );
+        assert_eq!(
+            lex("3e-x"),
+            vec![
+                Token::Int(3),
+                Token::Ident("e".to_string()),
+                Token::Minus,
+                Token::Ident("x".to_string())
+            ]
+        );
+        let err = Lexer::new("1e999").tokenize().unwrap_err();
+        assert!(err.message.contains("out of range"), "{}", err.message);
     }
 
     #[test]

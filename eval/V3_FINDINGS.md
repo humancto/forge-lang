@@ -451,6 +451,14 @@ lexer reads `1` and the name `e2`. Models write `1e9`, `2.5e-3` freely.
 Suggested fix: lex `digits[.digits](e|E)[+-]digits` as a Float literal; if exponents are
 deliberately unsupported, make `1e2` a syntax error that says so.
 
+**Fixed:** the lexer reads `digits[.digits](e|E)[+|-]digits` as one Float literal (`1e2` is
+`100.0`, `1.5e-3`, `2E+10`, `1_000e1_0`); digits must follow the `e` (after an optional sign),
+so `2ex` is still `2` then the name `ex`, and a literal too large for a Float (`1e999`) is a
+syntax error. `forge fmt` keeps the spelling (it is one token, so `1e-3` is not spaced as a
+subtraction); constants are ordinary Floats for the VM, the serializer and the JIT. Tests:
+`lexer::tests::test_exponent_floats`, `tests/literals_test.fg` and
+`tests/edition2027/literals_test.fg` (both engines); `llms.txt` and the spec list the forms.
+
 ### 15. JSON numbers lose their kind and precision
 
 | input | `json.parse` | `json.compact` | Python |

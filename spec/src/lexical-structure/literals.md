@@ -4,11 +4,11 @@ A literal is a notation for representing a fixed value in source code. Forge sup
 
 ## Integer Literals
 
-> _IntLiteral_ → _Digit_+
+> _IntLiteral_ → _Digit_ ( _Digit_ | `_` )\*
 >
 > _Digit_ → `0`-`9`
 
-An integer literal is a sequence of one or more decimal digits. Integer literals produce values of type `Int` (64-bit signed integer).
+An integer literal is a sequence of decimal digits; underscores between digits are ignored (`1_000_000`). Integer literals produce values of type `Int` (64-bit signed integer). A literal that does not fit in 64 bits is a lexical error.
 
 ```forge
 0
@@ -22,19 +22,26 @@ Negative integer values are expressed using the unary negation operator:
 let x = -42
 ```
 
-Integer literals do not support underscores as digit separators, hexadecimal, octal, or binary notation in the current version.
+Integer literals do not support hexadecimal, octal, or binary notation in the current version.
 
 ## Float Literals
 
-> _FloatLiteral_ → _Digit_+ `.` _Digit_+
+> _FloatLiteral_ → _Digits_ `.` _Digits_ _Exponent_? | _Digits_ _Exponent_
+>
+> _Exponent_ → ( `e` | `E` ) ( `+` | `-` )? _Digits_
 
-A float literal contains a decimal point with digits on both sides. Float literals produce values of type `Float` (64-bit IEEE 754 double-precision).
+A float literal contains a decimal point with digits on both sides, an exponent, or both. Float literals produce values of type `Float` (64-bit IEEE 754 double-precision). A literal with an exponent is always a `Float`, even when its value is whole (`1e2` is `100.0`).
 
 ```forge
 3.14
 0.5
 100.0
+1e9
+1.5e-3
+6.02E+23
 ```
+
+The exponent needs at least one digit (after the optional sign): `2ex` is the integer `2` followed by the name `ex`. A literal whose value is too large for a Float (`1e999`) is a lexical error.
 
 A leading dot (`.5`) or trailing dot (`5.`) is not valid. Both sides of the decimal point must have at least one digit.
 
@@ -43,8 +50,6 @@ Negative float values use unary negation:
 ```forge
 let temp = -0.5
 ```
-
-Scientific notation (e.g., `1.5e10`) is not supported in the current version.
 
 ## String Literals
 

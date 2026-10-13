@@ -955,6 +955,8 @@ otherwise { z() }
     fn string_contents_and_number_spellings_are_untouched() {
         let src = "let s = \"a  =b ,{x+1}  \"\nlet n = 1_000_000\nlet r = \"\"\"\n  raw  =  text   \n\"\"\"\n";
         assert_eq!(fmt(src), src);
+        // An exponent's sign is part of the literal, not a subtraction.
+        assert_eq!(fmt("let e = 1.5e-3*2E+10\n"), "let e = 1.5e-3 * 2E+10\n");
     }
 
     #[test]
