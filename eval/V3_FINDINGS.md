@@ -397,6 +397,20 @@ Suggested fix: raise these through shared helpers in `src/semantics/` (as `CLAUD
 asks), make `join` reject a non-string separator on the VM, and add one fixture per
 builtin family.
 
+**Fixed:** an audit of ~300 bad calls (every builtin in `CLAUDE.md`'s string, collection,
+functional and object lists, with Int/Null/Bool/Object/Array/String/Float arguments) found
+86 differences; there are none left. The argument errors of those builtins come from one
+table, `semantics::builtin_args::bad_args(name)`, on both engines (the VM maps its
+`get_string_arg` failures to it), and the VM now rejects what the interpreter rejected:
+`join` with a non-String separator, `starts_with`/`ends_with`/`replace` with non-Strings,
+`has_key`/`get`/`pick`/`omit`/`merge` on non-objects, `entries`/`from_entries` of the
+wrong kind. `get(array, i)` and dotted paths through arrays now work on the VM. The
+interpreter's missing `(got ...)` annotations came from fast paths in `places.rs`
+(`len`/`contains`/`push`/`pop` on a variable, and `null` parses as a variable) that raised
+their own error; they now fall back to the ordinary call. The audit table is the parity
+fixture `tests/parity/supported/builtin_arg_errors.fg` (engine_diff), and
+`tests/builtin_arg_errors_test.fg` pins the repro's texts.
+
 ### 18. T0014 false positive on a guarded comparison
 
 ```forge

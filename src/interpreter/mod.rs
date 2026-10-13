@@ -4339,7 +4339,9 @@ impl Interpreter {
                                 self.env.set(var_name, new_arr.clone())?;
                                 return Ok(new_arr);
                             }
-                            return Err(RuntimeError::new("push() first argument must be array"));
+                            return Err(RuntimeError::new(
+                                &crate::semantics::builtin_args::bad_args("push"),
+                            ));
                         }
                         if method == "pop" && args.is_empty() {
                             let arr = self.eval_expr(object)?;
@@ -4348,7 +4350,9 @@ impl Interpreter {
                                 self.env.set(var_name, Value::Array(items))?;
                                 return Ok(popped);
                             }
-                            return Err(RuntimeError::new("pop() requires array"));
+                            return Err(RuntimeError::new(
+                                &crate::semantics::builtin_args::bad_args("pop"),
+                            ));
                         }
                     }
                 }
@@ -5712,31 +5716,6 @@ fn check_interface_satisfaction(value: &Value, methods: &[Value], env: &Environm
         }
     }
     true
-}
-
-fn json_to_value(v: serde_json::Value) -> Value {
-    match v {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
-            } else {
-                Value::Null
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s),
-        serde_json::Value::Array(items) => {
-            Value::Array(items.into_iter().map(json_to_value).collect())
-        }
-        serde_json::Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, json_to_value(v)))
-                .collect(),
-        ),
-    }
 }
 
 /// Runtime error
