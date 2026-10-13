@@ -117,11 +117,14 @@ let kind = match geo.Square(1.0) {
 }
 ```
 
-The namespace is a read-only object. Its members are the module's top-level
-functions, `let` variables, variants and structs, in definition order, plus
-`__module__` (the path as written). Type names and interfaces are not
-members; their methods and tables come with the import as for every other
-form. The module is the same single run as every other import of the file,
+The namespace is a read-only object. Its members are every name the
+module's top level binds, in definition order, plus `__module__` (the path as
+written): functions, `let` variables (destructured names too), `type` names
+(the type's description, e.g. `geo.Shape.variants` is
+`["Circle", "Square", "Dot"]`; not when a variant has the type's name),
+variants, interfaces, structs, and the names the module's own imports bind
+(re-exports). Methods and type tables come with the import as for every
+other form. The module is the same single run as every other import of the file,
 so `geo.f()` and an `f` imported with `import { f } from "geo.fg"` share the
 module's state. A variable member is the variable's value when the import
 ran, like `import { TAU }`; read state that changes through a function.

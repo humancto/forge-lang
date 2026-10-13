@@ -155,9 +155,10 @@ pub enum Stmt {
         names: Option<Vec<ImportName>>,
     },
     /// `import "path" as name`: bind `name` to the module's namespace, an
-    /// object whose members are the module's top-level functions,
-    /// variables, variants and structs (`semantics::namespace_members`),
-    /// plus `__module__` (the path as written). The module itself runs
+    /// object whose members are every name the module's top level binds
+    /// (functions, variables, type names, variants, interfaces, structs and
+    /// re-exports: `semantics::namespace_members`), plus `__module__` (the
+    /// path as written). The module itself runs
     /// once per program, like any other import of it.
     ImportNamespace {
         path: String,
