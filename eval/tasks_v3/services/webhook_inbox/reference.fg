@@ -1,0 +1,72 @@
+@server(port: 18524)
+
+// Signed JSON webhooks (checked against the raw body), form posts and
+// plain-text posts, all stored in SQLite.
+let secret = "whsec-42"
+
+db.open("inbox.db")
+db.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, delivery TEXT, event TEXT, summary TEXT)")
+
+fn store(source: String, delivery, event: String, summary: String) -> Int {
+    db.execute("INSERT INTO events (source, delivery, event, summary) VALUES (?, ?, ?, ?)", [source, delivery, event, summary])
+    return db.last_insert_rowid()
+}
+
+// The media type of a Content-Type header, lower-case, without parameters.
+fn media_type(headers) -> String {
+    return split(get(headers, "content-type", ""), ";")[0].trim().lower()
+}
+
+@post("/hooks/github")
+fn github(headers, raw_body: String, body) {
+    let delivery = get(headers, "x-delivery", "")
+    if delivery == "" {
+        return http.response(400, { error: "missing delivery id" })
+    }
+    let want = "sha256=" + crypto.sha256(secret + raw_body)
+    if get(headers, "x-signature", "") != want {
+        return http.response(401, { error: "bad signature" })
+    }
+    if len(db.query("SELECT 1 AS one FROM events WHERE delivery = ?", [delivery])) > 0 {
+        return { duplicate: true, delivery: delivery }
+    }
+    if typeof(body) != "Object" || typeof(get(body, "event", null)) != "String" {
+        return http.response(422, { error: "event is required" })
+    }
+    let sender = get(body, "sender", null)
+    let login = if typeof(sender) == "Object" { get(sender, "login", null) } else { null }
+    let who = if typeof(login) == "String" { login } else { "unknown" }
+    store("github", delivery, body.event, "{body.event} by {who}")
+    return http.response(202, { accepted: delivery })
+}
+
+@post("/hooks/form")
+fn form(headers, body) {
+    if media_type(headers) != "application/x-www-form-urlencoded" {
+        return http.response(415, { error: "expected a form" })
+    }
+    let name = get(body, "name", "").trim()
+    let email = get(body, "email", "").trim()
+    if name == "" || !contains(email, "@") {
+        return http.response(422, { error: "name and email are required" })
+    }
+    let id = store("form", null, "form", "{name} <{email}>")
+    return http.response(202, { accepted: "form-{id}" })
+}
+
+@post("/hooks/text")
+fn text(raw_body: String) {
+    let lines = filter(map(split(raw_body, "\n"), fn(l) { return l.trim() }), fn(l) { return l != "" })
+    for l in lines {
+        store("text", null, "line", l)
+    }
+    return http.response(202, "accepted {len(lines)} lines")
+}
+
+@get("/events")
+fn events(query) {
+    let source = get(query, "source", null)
+    let rows = db.query("SELECT source, event, summary FROM events ORDER BY id")
+    let picked = filter(rows, fn(r) { return source == null || r.source == source })
+    return { events: picked, count: len(picked) }
+}

@@ -1,0 +1,153 @@
+@server(port: 18522)
+
+// Bearer-token users, per-user notes in SQLite, 401/403/404/422 statuses,
+// paging with an X-Total-Count header.
+let users = {
+    "tok-ada": { name: "ada", admin: false },
+    "tok-bob": { name: "bob", admin: false },
+    "tok-cy": { name: "cy", admin: true },
+}
+
+db.open("notes.db")
+db.execute("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT, title TEXT, body TEXT, tags TEXT)")
+
+fn fail(status: Int, message: String) {
+    return http.response(status, { error: message })
+}
+
+fn unauthorized() {
+    return http.response(401, { error: "unauthorized" }, { "WWW-Authenticate": "Bearer realm=\"notes\"" })
+}
+
+// The user for the request's Authorization header, or null.
+fn user_of(headers) {
+    let auth = get(headers, "authorization", "")
+    if !starts_with(auth, "Bearer ") {
+        return null
+    }
+    let token = substring(auth, 7, len(auth))
+    return get(users, token, null)
+}
+
+fn as_note(row) {
+    return { id: row.id, owner: row.owner, title: row.title, body: row.body, tags: json.parse(row.tags) }
+}
+
+fn all_notes() {
+    return map(db.query("SELECT id, owner, title, body, tags FROM notes ORDER BY id"), fn(r) { return as_note(r) })
+}
+
+fn find_note(text: String) {
+    if !regex.test(text, "^[0-9]+$") {
+        return null
+    }
+    let rows = db.query("SELECT id, owner, title, body, tags FROM notes WHERE id = ?", [int(text)])
+    if len(rows) == 0 {
+        return null
+    }
+    return as_note(rows[0])
+}
+
+fn is_count(text: String) -> Bool {
+    return regex.test(text, "^[0-9]+$")
+}
+
+@get("/me")
+fn me(headers) {
+    let u = user_of(headers)
+    if u == null {
+        return unauthorized()
+    }
+    let mine = filter(all_notes(), fn(n) { return n.owner == u.name })
+    return { user: u.name, admin: u.admin, notes: len(mine) }
+}
+
+@post("/notes")
+fn create(headers, body) {
+    let u = user_of(headers)
+    if u == null {
+        return unauthorized()
+    }
+    let b = if typeof(body) == "Object" { body } else { {} }
+    let title = get(b, "title", null)
+    if typeof(title) != "String" || len(title.trim()) < 1 || len(title.trim()) > 80 {
+        return fail(422, "title must be 1-80 characters")
+    }
+    let text = get(b, "body", "")
+    if typeof(text) != "String" {
+        return fail(422, "body must be a string")
+    }
+    let tags = get(b, "tags", [])
+    if typeof(tags) != "Array" || len(tags) > 5 {
+        return fail(422, "tags must be a list of up to 5 tags")
+    }
+    let mut clean = []
+    for t in tags {
+        if typeof(t) != "String" || !regex.test(t, "^[a-z0-9-]{1,20}$") {
+            return fail(422, "invalid tag: {t}")
+        }
+        if !contains(clean, t) {
+            clean.push(t)
+        }
+    }
+    db.execute("INSERT INTO notes (owner, title, body, tags) VALUES (?, ?, ?, ?)", [u.name, title.trim(), text, json.compact(clean)])
+    let note = find_note(str(db.last_insert_rowid()))
+    return http.response(201, note, { Location: "/notes/{note.id}" })
+}
+
+@get("/notes")
+fn list_notes(headers, query) {
+    let u = user_of(headers)
+    if u == null {
+        return unauthorized()
+    }
+    let limit = get(query, "limit", "10")
+    let offset = get(query, "offset", "0")
+    if !is_count(limit) || int(limit) < 1 || int(limit) > 50 {
+        return fail(400, "invalid limit")
+    }
+    if !is_count(offset) {
+        return fail(400, "invalid offset")
+    }
+    let mut notes = filter(all_notes(), fn(n) { return u.admin || n.owner == u.name })
+    let tag = get(query, "tag", null)
+    if tag != null {
+        notes = filter(notes, fn(n) { return contains(n.tags, tag) })
+    }
+    let start = min(int(offset), len(notes))
+    let end = min(start + int(limit), len(notes))
+    return http.response(200, { notes: slice(notes, start, end) }, { "X-Total-Count": len(notes) })
+}
+
+@get("/notes/:id")
+fn show(id: String, headers) {
+    let u = user_of(headers)
+    if u == null {
+        return unauthorized()
+    }
+    let n = find_note(id)
+    if n == null {
+        return fail(404, "not found")
+    }
+    if !u.admin && n.owner != u.name {
+        return fail(403, "forbidden")
+    }
+    return n
+}
+
+@delete("/notes/:id")
+fn remove(id: String, headers) {
+    let u = user_of(headers)
+    if u == null {
+        return unauthorized()
+    }
+    let n = find_note(id)
+    if n == null {
+        return fail(404, "not found")
+    }
+    if !u.admin && n.owner != u.name {
+        return fail(403, "forbidden")
+    }
+    db.execute("DELETE FROM notes WHERE id = ?", [n.id])
+    return http.response(204)
+}

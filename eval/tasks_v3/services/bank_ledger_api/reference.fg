@@ -1,0 +1,124 @@
+@server(port: 18521)
+
+// One database for the whole program, opened at the top level; every
+// handler shares it. Transfers check and move money in one transaction.
+db.open("bank.db")
+db.execute("CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, currency TEXT NOT NULL, balance INTEGER NOT NULL)")
+db.execute("CREATE TABLE IF NOT EXISTS transfers (id INTEGER PRIMARY KEY AUTOINCREMENT, src INTEGER NOT NULL, dst INTEGER NOT NULL, amount INTEGER NOT NULL)")
+
+fn fail(status: Int, message: String) {
+    return http.response(status, { error: message })
+}
+
+fn pos_int(v) -> Bool {
+    return typeof(v) == "Int" && v > 0
+}
+
+// The account with this id (an Int), or null.
+fn account(id) {
+    if typeof(id) != "Int" {
+        return null
+    }
+    let rows = db.query("SELECT id, owner, currency, balance FROM accounts WHERE id = ?", [id])
+    if len(rows) == 0 {
+        return null
+    }
+    return rows[0]
+}
+
+fn path_id(text: String) -> Int {
+    if regex.test(text, "^[0-9]+$") {
+        return int(text)
+    }
+    return -1
+}
+
+@post("/accounts")
+fn create_account(body) {
+    let owner = get(body, "owner", null)
+    if typeof(owner) != "String" || owner.trim() == "" {
+        return fail(422, "owner is required")
+    }
+    let currency = get(body, "currency", null)
+    if currency != "EUR" && currency != "USD" {
+        return fail(422, "currency must be EUR or USD")
+    }
+    db.execute("INSERT INTO accounts (owner, currency, balance) VALUES (?, ?, 0)", [owner.trim(), currency])
+    let id = db.last_insert_rowid()
+    return http.response(201, account(id), { Location: "/accounts/{id}" })
+}
+
+@get("/accounts/:id")
+fn show_account(id: String) {
+    let a = account(path_id(id))
+    if a == null {
+        return fail(404, "account not found")
+    }
+    return a
+}
+
+@post("/accounts/:id/deposits")
+fn deposit(id: String, body) {
+    let a = account(path_id(id))
+    if a == null {
+        return fail(404, "account not found")
+    }
+    let amount = get(body, "amount", null)
+    if !pos_int(amount) {
+        return fail(422, "amount must be a positive integer")
+    }
+    db.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", [amount, a.id])
+    return { id: a.id, balance: account(a.id).balance }
+}
+
+@post("/transfers")
+fn transfer(body) {
+    let amount = get(body, "amount", null)
+    if !pos_int(amount) {
+        return fail(422, "amount must be a positive integer")
+    }
+    let src = get(body, "from", null)
+    let dst = get(body, "to", null)
+    db.begin()
+    let a = account(src)
+    let b = account(dst)
+    if a == null || b == null {
+        db.rollback()
+        return fail(404, "account not found")
+    }
+    if a.id == b.id {
+        db.rollback()
+        return fail(422, "cannot transfer to the same account")
+    }
+    if a.currency != b.currency {
+        db.rollback()
+        return fail(409, "currency mismatch")
+    }
+    if a.balance < amount {
+        db.rollback()
+        return fail(409, "insufficient funds")
+    }
+    db.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", [amount, a.id])
+    db.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", [amount, b.id])
+    db.execute("INSERT INTO transfers (src, dst, amount) VALUES (?, ?, ?)", [a.id, b.id, amount])
+    let tid = db.last_insert_rowid()
+    db.commit()
+    return http.response(201, { id: tid, from: a.id, to: b.id, amount: amount }, { Location: "/transfers/{tid}" })
+}
+
+@get("/accounts/:id/transfers")
+fn list_transfers(id: String) {
+    let a = account(path_id(id))
+    if a == null {
+        return fail(404, "account not found")
+    }
+    let rows = db.query("SELECT id, src, dst, amount FROM transfers WHERE src = ? OR dst = ? ORDER BY id", [a.id, a.id])
+    return { transfers: map(rows, fn(r) { return { id: r.id, from: r.src, to: r.dst, amount: r.amount } }) }
+}
+
+@get("/stats")
+fn stats() {
+    let a = db.query("SELECT COUNT(*) AS n, COALESCE(SUM(balance), 0) AS total FROM accounts")[0]
+    let t = db.query("SELECT COUNT(*) AS n FROM transfers")[0]
+    return { accounts: a.n, total: a.total, transfers: t.n }
+}
