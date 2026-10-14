@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -198,24 +198,26 @@ io.print(".\n")
 // Loading...
 </code></pre>
 <h3 id="ioargs---array"><a class="header" href="#ioargs---array">io.args() -&gt; array</a></h3>
-<p>Returns all command-line arguments as an array of strings, including the program name.</p>
-<pre><code class="language-forge">let args = io.args()
-say args  // ["forge", "run", "script.fg", "--verbose"]
+<p>Returns the program’s command line: the script path as given to <code>forge run</code>, then every argument after it. Everything after the file goes to the program, flags included, so forge’s own flags (<code>--interp</code>, <code>--allow-read</code>, …) must come before the file and never appear here. A standalone binary built with <code>forge build</code> sees its own path and arguments. A sandboxed run (<code>forge mcp</code>’s <code>run_forge</code>, <code>Sandbox</code>) sees only what its host passes (<code>run_forge</code>’s <code>args</code>), never the host process’s command line. In the REPL, under <code>forge -e</code> and in <code>forge test</code> it is empty.</p>
+<pre><code class="language-forge">// forge --interp run script.fg --verbose data.txt
+let args = io.args()
+say args                         // ["script.fg", "--verbose", "data.txt"]
+say slice(args, 1, len(args))    // ["--verbose", "data.txt"]
 </code></pre>
 <h3 id="ioargs_parse---object"><a class="header" href="#ioargs_parse---object">io.args_parse() -&gt; object</a></h3>
-<p>Parses command-line arguments into an object. Flags starting with <code>--</code> become keys. If a flag is followed by a non-flag value, that value is used; otherwise the flag is set to <code>true</code>.</p>
+<p>Parses the program’s arguments (after the script path, up to a <code>--</code>) into an object. Flags starting with <code>--</code> become keys. If a flag is followed by a non-flag value, that value is used; otherwise the flag is set to <code>true</code>.</p>
 <pre><code class="language-forge">// forge run script.fg --port 3000 --verbose
 let opts = io.args_parse()
 say opts["--port"]     // "3000"
 say opts["--verbose"]  // true
 </code></pre>
 <h3 id="ioargs_getflag---string--bool--null"><a class="header" href="#ioargs_getflag---string--bool--null">io.args_get(flag) -&gt; string | bool | null</a></h3>
-<p>Returns the value of a specific command-line flag. Returns <code>true</code> if the flag exists but has no value, or <code>null</code> if the flag is not present.</p>
+<p>Returns the value of a specific command-line flag (a string). Returns <code>true</code> if the flag exists but has no value, or <code>null</code> if the flag is not present. Arguments after a <code>--</code> are not flags.</p>
 <pre><code class="language-forge">let port = io.args_get("--port")  // "3000" or null
 let verbose = io.args_get("--verbose")  // true or null
 </code></pre>
 <h3 id="ioargs_hasflag---bool"><a class="header" href="#ioargs_hasflag---bool">io.args_has(flag) -&gt; bool</a></h3>
-<p>Returns <code>true</code> if the flag is present in the command-line arguments.</p>
+<p>Returns <code>true</code> if the flag is present in the program’s arguments (before any <code>--</code>).</p>
 <pre><code class="language-forge">if io.args_has("--debug") {
     log.debug("Debug mode enabled")
 }

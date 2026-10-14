@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -231,6 +231,27 @@ say json.pretty(obj, 4)
 </tbody>
 </table>
 </div>
+<h2 id="numbers"><a class="header" href="#numbers">Numbers</a></h2>
+<p>A number keeps its kind in both directions, on both engines and in HTTP
+responses:</p>
+<ul>
+<li><strong>Parsing.</strong> A number written without a fraction or exponent is an Int when
+it fits in 64 bits. <code>-0</code> is the Int <code>0</code>, as <code>-0</code> is in Forge source. An
+integer outside the Int range becomes a Float (and may lose precision), the
+way Int arithmetic that overflows becomes a Float (Forge source rejects such
+a literal). A number with a fraction or an exponent is a Float: <code>1.0</code>,
+<code>1e2</code> (<code>100.0</code>), <code>-0.0</code>.</li>
+<li><strong>Writing.</strong> An Int is written as digits; a Float always has a fraction or
+an exponent (<code>1.0</code>, <code>2.5</code>, <code>1e+21</code>), with the shortest digits that read back
+as the same Float, so <code>json.parse(json.compact(x)) == x</code> keeps every Float a
+Float. NaN and the infinities, which JSON cannot represent, are written as
+<code>null</code> (as in JavaScript). <code>str(1.0)</code> and <code>println(1.0)</code> still show <code>1</code>.</li>
+</ul>
+<h2 id="strings"><a class="header" href="#strings">Strings</a></h2>
+<p><code>json.stringify</code>, <code>json.compact</code> and <code>json.pretty</code> escape <code>"</code> and <code>\</code>, write
+the short escapes <code>\b</code>, <code>\f</code>, <code>\n</code>, <code>\r</code>, <code>\t</code>, and any other control
+character as <code>\u00XX</code>; every other character is written as is (UTF-8).
+<code>json.pretty</code>’s indent is an Int from 0 to 16 (default 2).</p>
 
                     </main>
 

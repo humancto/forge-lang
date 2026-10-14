@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -283,9 +283,12 @@ yield_stmt     = ( "yield" | "emit" ) expr NEWLINE ;
 <h3 id="innovation-statements"><a class="header" href="#innovation-statements">Innovation Statements</a></h3>
 <pre><code class="language-ebnf">check_stmt     = "check" expr ( "is" "not"? "empty" | "contains" expr | "between" expr "and" expr ) ;
 safe_block     = "safe" block ;
-timeout_block  = "timeout" expr "seconds" block ;
+timeout_block  = "timeout" expr duration_unit? block ;
 retry_block    = "retry" expr "times" block ;
-schedule_block = "schedule" "every" expr ( "seconds" | "minutes" ) block ;
+schedule_block = "schedule" "every" expr duration_unit? block ;
+wait_stmt      = "wait" expr duration_unit? ;
+duration_unit  = "milliseconds" | "millisecond" | "ms" | "seconds" | "second"
+               | "minutes" | "minute" | "hours" | "hour" ;
 watch_block    = "watch" expr block ;
 </code></pre>
 <h3 id="decorators"><a class="header" href="#decorators">Decorators</a></h3>

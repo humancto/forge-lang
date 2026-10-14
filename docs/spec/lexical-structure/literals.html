@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -185,10 +185,10 @@
 <p>A literal is a notation for representing a fixed value in source code. Forge supports integer, float, string, raw string, boolean, null, array, and object literals.</p>
 <h2 id="integer-literals"><a class="header" href="#integer-literals">Integer Literals</a></h2>
 <blockquote>
-<p><em>IntLiteral</em> → <em>Digit</em>+</p>
+<p><em>IntLiteral</em> → <em>Digit</em> ( <em>Digit</em> | <code>_</code> )*</p>
 <p><em>Digit</em> → <code>0</code>-<code>9</code></p>
 </blockquote>
-<p>An integer literal is a sequence of one or more decimal digits. Integer literals produce values of type <code>Int</code> (64-bit signed integer).</p>
+<p>An integer literal is a sequence of decimal digits; underscores between digits are ignored (<code>1_000_000</code>). Integer literals produce values of type <code>Int</code> (64-bit signed integer). A literal that does not fit in 64 bits is a lexical error.</p>
 <pre><code class="language-forge">0
 42
 1000000
@@ -196,26 +196,31 @@
 <p>Negative integer values are expressed using the unary negation operator:</p>
 <pre><code class="language-forge">let x = -42
 </code></pre>
-<p>Integer literals do not support underscores as digit separators, hexadecimal, octal, or binary notation in the current version.</p>
+<p>Integer literals do not support hexadecimal, octal, or binary notation in the current version.</p>
 <h2 id="float-literals"><a class="header" href="#float-literals">Float Literals</a></h2>
 <blockquote>
-<p><em>FloatLiteral</em> → <em>Digit</em>+ <code>.</code> <em>Digit</em>+</p>
+<p><em>FloatLiteral</em> → <em>Digits</em> <code>.</code> <em>Digits</em> <em>Exponent</em>? | <em>Digits</em> <em>Exponent</em></p>
+<p><em>Exponent</em> → ( <code>e</code> | <code>E</code> ) ( <code>+</code> | <code>-</code> )? <em>Digits</em></p>
 </blockquote>
-<p>A float literal contains a decimal point with digits on both sides. Float literals produce values of type <code>Float</code> (64-bit IEEE 754 double-precision).</p>
+<p>A float literal contains a decimal point with digits on both sides, an exponent, or both. Float literals produce values of type <code>Float</code> (64-bit IEEE 754 double-precision). A literal with an exponent is always a <code>Float</code>, even when its value is whole (<code>1e2</code> is <code>100.0</code>).</p>
 <pre><code class="language-forge">3.14
 0.5
 100.0
+1e9
+1.5e-3
+6.02E+23
 </code></pre>
+<p>The exponent needs at least one digit (after the optional sign): <code>2ex</code> is the integer <code>2</code> followed by the name <code>ex</code>. A literal whose value is too large for a Float (<code>1e999</code>) is a lexical error.</p>
 <p>A leading dot (<code>.5</code>) or trailing dot (<code>5.</code>) is not valid. Both sides of the decimal point must have at least one digit.</p>
 <p>Negative float values use unary negation:</p>
 <pre><code class="language-forge">let temp = -0.5
 </code></pre>
-<p>Scientific notation (e.g., <code>1.5e10</code>) is not supported in the current version.</p>
 <h2 id="string-literals"><a class="header" href="#string-literals">String Literals</a></h2>
 <blockquote>
 <p><em>StringLiteral</em> → <code>"</code> <em>StringContent</em>* <code>"</code></p>
 <p><em>StringContent</em> → <em>Character</em> | <em>EscapeSequence</em> | <em>Interpolation</em></p>
-<p><em>EscapeSequence</em> → <code>\n</code> | <code>\t</code> | <code>\\</code> | <code>\"</code></p>
+<p><em>EscapeSequence</em> → <code>\n</code> | <code>\t</code> | <code>\r</code> | <code>\\</code> | <code>\"</code> | <code>\{</code> | <code>\}</code> | <em>UnicodeEscape</em></p>
+<p><em>UnicodeEscape</em> → <code>\u{</code> <em>HexDigit</em>{1,6} <code>}</code> | <code>\u</code> <em>HexDigit</em>{4}</p>
 <p><em>Interpolation</em> → <code>{</code> <em>Expression</em> <code>}</code></p>
 </blockquote>
 <p>A string literal is a sequence of characters enclosed in double quotes. String literals produce values of type <code>String</code> (UTF-8 encoded, immutable).</p>
@@ -233,11 +238,17 @@
 <tbody>
 <tr><td><code>\n</code></td><td>Newline (U+000A)</td></tr>
 <tr><td><code>\t</code></td><td>Horizontal tab (U+0009)</td></tr>
+<tr><td><code>\r</code></td><td>Carriage return (U+000D)</td></tr>
 <tr><td><code>\\</code></td><td>Backslash (U+005C)</td></tr>
 <tr><td><code>\"</code></td><td>Double quote (U+0022)</td></tr>
+<tr><td><code>\{</code></td><td>Left brace (U+007B), never an interpolation</td></tr>
+<tr><td><code>\}</code></td><td>Right brace (U+007D)</td></tr>
+<tr><td><code>\u{XXXX}</code></td><td>The code point XXXX (1 to 6 hex digits)</td></tr>
+<tr><td><code>\uXXXX</code></td><td>The code point XXXX (exactly 4 hex digits)</td></tr>
 </tbody>
 </table>
 </div>
+<p><code>\u{e9}</code> and <code>\u00e9</code> are both <code>é</code>; <code>\u{1F600}</code> is <code>😀</code>. A UTF-16 surrogate pair written as two 4-digit escapes (<code>\uD83D\uDE00</code>) is one character; a lone surrogate, a value above <code>10FFFF</code> or a malformed escape is a syntax error, and so is any other character after a backslash (<code>\0</code>, <code>\x41</code>). A brace written as <code>\u{7B}</code>/<code>\u{7D}</code> is literal like <code>\{</code>/<code>\}</code>. The noncharacters U+FDD0 and U+FDD1 cannot appear in a <code>"..."</code> literal (Forge uses them internally); <code>chr(64976)</code> builds one at run time. The builtins <code>chr(n)</code> and <code>ord(s)</code> convert between characters and code points.</p>
 <h3 id="string-interpolation"><a class="header" href="#string-interpolation">String Interpolation</a></h3>
 <p>Curly braces within a string literal delimit an <em>interpolation expression</em>. The expression is evaluated at runtime, converted to a string, and inserted at that position:</p>
 <pre><code class="language-forge">let name = "Forge"
@@ -251,7 +262,7 @@ say "Seven squared is {x * x}"
 say "Length: {len("hello")}"
 say "Upper: {name}"
 </code></pre>
-<p>To include a literal <code>{</code> in a string without triggering interpolation, there is no dedicated escape sequence in the current version. Use string concatenation or a variable if needed.</p>
+<p>To include a literal <code>{</code> or <code>}</code> in a string without triggering interpolation, escape it: <code>"\{name\}"</code> is the seven characters <code>{name}</code>. A <code>{</code> that cannot start an interpolation (followed by a quote, or not closed on the line) and <code>{}</code> are also literal.</p>
 <h2 id="raw-string-literals"><a class="header" href="#raw-string-literals">Raw String Literals</a></h2>
 <blockquote>
 <p><em>RawStringLiteral</em> → <code>"""</code> <em>RawContent</em>* <code>"""</code></p>

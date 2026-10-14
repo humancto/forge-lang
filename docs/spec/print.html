@@ -37,7 +37,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-fdd2f5ad.js"></script>
@@ -608,10 +608,10 @@ say x        // 10 (outer x is unchanged)
 <p>A literal is a notation for representing a fixed value in source code. Forge supports integer, float, string, raw string, boolean, null, array, and object literals.</p>
 <h2 id="integer-literals"><a class="header" href="#integer-literals">Integer Literals</a></h2>
 <blockquote>
-<p><em>IntLiteral</em> → <em>Digit</em>+</p>
+<p><em>IntLiteral</em> → <em>Digit</em> ( <em>Digit</em> | <code>_</code> )*</p>
 <p><em>Digit</em> → <code>0</code>-<code>9</code></p>
 </blockquote>
-<p>An integer literal is a sequence of one or more decimal digits. Integer literals produce values of type <code>Int</code> (64-bit signed integer).</p>
+<p>An integer literal is a sequence of decimal digits; underscores between digits are ignored (<code>1_000_000</code>). Integer literals produce values of type <code>Int</code> (64-bit signed integer). A literal that does not fit in 64 bits is a lexical error.</p>
 <pre><code class="language-forge">0
 42
 1000000
@@ -619,26 +619,31 @@ say x        // 10 (outer x is unchanged)
 <p>Negative integer values are expressed using the unary negation operator:</p>
 <pre><code class="language-forge">let x = -42
 </code></pre>
-<p>Integer literals do not support underscores as digit separators, hexadecimal, octal, or binary notation in the current version.</p>
+<p>Integer literals do not support hexadecimal, octal, or binary notation in the current version.</p>
 <h2 id="float-literals"><a class="header" href="#float-literals">Float Literals</a></h2>
 <blockquote>
-<p><em>FloatLiteral</em> → <em>Digit</em>+ <code>.</code> <em>Digit</em>+</p>
+<p><em>FloatLiteral</em> → <em>Digits</em> <code>.</code> <em>Digits</em> <em>Exponent</em>? | <em>Digits</em> <em>Exponent</em></p>
+<p><em>Exponent</em> → ( <code>e</code> | <code>E</code> ) ( <code>+</code> | <code>-</code> )? <em>Digits</em></p>
 </blockquote>
-<p>A float literal contains a decimal point with digits on both sides. Float literals produce values of type <code>Float</code> (64-bit IEEE 754 double-precision).</p>
+<p>A float literal contains a decimal point with digits on both sides, an exponent, or both. Float literals produce values of type <code>Float</code> (64-bit IEEE 754 double-precision). A literal with an exponent is always a <code>Float</code>, even when its value is whole (<code>1e2</code> is <code>100.0</code>).</p>
 <pre><code class="language-forge">3.14
 0.5
 100.0
+1e9
+1.5e-3
+6.02E+23
 </code></pre>
+<p>The exponent needs at least one digit (after the optional sign): <code>2ex</code> is the integer <code>2</code> followed by the name <code>ex</code>. A literal whose value is too large for a Float (<code>1e999</code>) is a lexical error.</p>
 <p>A leading dot (<code>.5</code>) or trailing dot (<code>5.</code>) is not valid. Both sides of the decimal point must have at least one digit.</p>
 <p>Negative float values use unary negation:</p>
 <pre><code class="language-forge">let temp = -0.5
 </code></pre>
-<p>Scientific notation (e.g., <code>1.5e10</code>) is not supported in the current version.</p>
 <h2 id="string-literals"><a class="header" href="#string-literals">String Literals</a></h2>
 <blockquote>
 <p><em>StringLiteral</em> → <code>"</code> <em>StringContent</em>* <code>"</code></p>
 <p><em>StringContent</em> → <em>Character</em> | <em>EscapeSequence</em> | <em>Interpolation</em></p>
-<p><em>EscapeSequence</em> → <code>\n</code> | <code>\t</code> | <code>\\</code> | <code>\"</code></p>
+<p><em>EscapeSequence</em> → <code>\n</code> | <code>\t</code> | <code>\r</code> | <code>\\</code> | <code>\"</code> | <code>\{</code> | <code>\}</code> | <em>UnicodeEscape</em></p>
+<p><em>UnicodeEscape</em> → <code>\u{</code> <em>HexDigit</em>{1,6} <code>}</code> | <code>\u</code> <em>HexDigit</em>{4}</p>
 <p><em>Interpolation</em> → <code>{</code> <em>Expression</em> <code>}</code></p>
 </blockquote>
 <p>A string literal is a sequence of characters enclosed in double quotes. String literals produce values of type <code>String</code> (UTF-8 encoded, immutable).</p>
@@ -656,11 +661,17 @@ say x        // 10 (outer x is unchanged)
 <tbody>
 <tr><td><code>\n</code></td><td>Newline (U+000A)</td></tr>
 <tr><td><code>\t</code></td><td>Horizontal tab (U+0009)</td></tr>
+<tr><td><code>\r</code></td><td>Carriage return (U+000D)</td></tr>
 <tr><td><code>\\</code></td><td>Backslash (U+005C)</td></tr>
 <tr><td><code>\"</code></td><td>Double quote (U+0022)</td></tr>
+<tr><td><code>\{</code></td><td>Left brace (U+007B), never an interpolation</td></tr>
+<tr><td><code>\}</code></td><td>Right brace (U+007D)</td></tr>
+<tr><td><code>\u{XXXX}</code></td><td>The code point XXXX (1 to 6 hex digits)</td></tr>
+<tr><td><code>\uXXXX</code></td><td>The code point XXXX (exactly 4 hex digits)</td></tr>
 </tbody>
 </table>
 </div>
+<p><code>\u{e9}</code> and <code>\u00e9</code> are both <code>é</code>; <code>\u{1F600}</code> is <code>😀</code>. A UTF-16 surrogate pair written as two 4-digit escapes (<code>\uD83D\uDE00</code>) is one character; a lone surrogate, a value above <code>10FFFF</code> or a malformed escape is a syntax error, and so is any other character after a backslash (<code>\0</code>, <code>\x41</code>). A brace written as <code>\u{7B}</code>/<code>\u{7D}</code> is literal like <code>\{</code>/<code>\}</code>. The noncharacters U+FDD0 and U+FDD1 cannot appear in a <code>"..."</code> literal (Forge uses them internally); <code>chr(64976)</code> builds one at run time. The builtins <code>chr(n)</code> and <code>ord(s)</code> convert between characters and code points.</p>
 <h3 id="string-interpolation"><a class="header" href="#string-interpolation">String Interpolation</a></h3>
 <p>Curly braces within a string literal delimit an <em>interpolation expression</em>. The expression is evaluated at runtime, converted to a string, and inserted at that position:</p>
 <pre><code class="language-forge">let name = "Forge"
@@ -674,7 +685,7 @@ say "Seven squared is {x * x}"
 say "Length: {len("hello")}"
 say "Upper: {name}"
 </code></pre>
-<p>To include a literal <code>{</code> in a string without triggering interpolation, there is no dedicated escape sequence in the current version. Use string concatenation or a variable if needed.</p>
+<p>To include a literal <code>{</code> or <code>}</code> in a string without triggering interpolation, escape it: <code>"\{name\}"</code> is the seven characters <code>{name}</code>. A <code>{</code> that cannot start an interpolation (followed by a quote, or not closed on the line) and <code>{}</code> are also literal.</p>
 <h2 id="raw-string-literals"><a class="header" href="#raw-string-literals">Raw String Literals</a></h2>
 <blockquote>
 <p><em>RawStringLiteral</em> → <code>"""</code> <em>RawContent</em>* <code>"""</code></p>
@@ -2622,6 +2633,8 @@ say obj[key]        // "Alice"
 <pre><code>expression.method(arguments)
 </code></pre>
 <p>The left operand (the <strong>receiver</strong>) is evaluated first, then the method is resolved, then arguments are evaluated left to right.</p>
+<p>Exception: <code>push</code>, <code>pop</code>, <code>add</code> and <code>remove</code> called on a mutable variable (<code>xs.push(f())</code>, <code>m = m.remove(g())</code>) evaluate their arguments first and read the variable afterwards, whatever it holds, so an argument that updates the variable is not overwritten. On a field/index place (<code>g[k].push(x)</code>) the index expressions come first, then the arguments, then the place is read.</p>
+<p>When the receiver is a place (a variable, or fields and indexes of one) and the method is a user method declared <code>mut it</code>, the method’s final <code>it</code> is assigned back to that place when it returns; see <a href="#receivers-are-read-only-mut-it-updates-them">Method Blocks</a>.</p>
 <h2 id="method-dispatch"><a class="header" href="#method-dispatch">Method Dispatch</a></h2>
 <p>When evaluating <code>obj.method(args)</code>, the interpreter follows this resolution order:</p>
 <h3 id="1-object-field-lookup"><a class="header" href="#1-object-field-lookup">1. Object Field Lookup</a></h3>
@@ -3942,6 +3955,59 @@ say user_name()
 say root(16)        // 4.0
 </code></pre>
 <p>Only functions and variables can be renamed. Structs, <code>type</code> definitions, their variants and interfaces keep their name — their values, methods and <code>match</code> patterns refer to it — so <code>import { Point as P } from "geometry.fg"</code> is error <code>E0019</code>. <code>as</code> is not available in native imports (<code>import native "lib" as name</code> names the whole library instead).</p>
+<h2 id="namespace-imports"><a class="header" href="#namespace-imports">Namespace Imports</a></h2>
+<p><code>import "path" as name</code> binds one name to the module’s namespace instead of
+bringing its definitions into scope:</p>
+<pre><code class="language-forge">// geo.fg
+let TAU = 6.28
+fn area(s) { ... }
+struct Point { x: Int, y: Int = 0 }
+impl Point { fn origin() { return Point { x: 0 } } }
+type Shape = Circle(Float) | Square(Float) | Dot
+</code></pre>
+<pre><code class="language-forge">// main.fg
+import "geo.fg" as geo
+println(geo.TAU)                         // 6.28
+println(geo.area(geo.Circle(2.0)))       // functions and variant constructors
+let p = geo.Point { x: 1 }               // a struct of the module
+let o = geo.Point.origin()               // its static methods
+let kind = match geo.Square(1.0) {
+    geo.Circle(r) =&gt; "circle",           // variants in patterns
+    geo.Square(w) =&gt; "square",
+    geo.Dot =&gt; "dot",
+}
+</code></pre>
+<p>The namespace is a read-only object. Its members are every name the
+module’s top level binds, in definition order, plus <code>__module__</code> (the path as
+written): functions, <code>let</code> variables (destructured names too), <code>type</code> names
+(the type’s description, e.g. <code>geo.Shape.variants</code> is
+<code>["Circle", "Square", "Dot"]</code>; not when a variant has the type’s name),
+variants, interfaces, structs, and the names the module’s own imports bind
+(re-exports). Methods and type tables come with the import as for every
+other form. The module is the same single run as every other import of the file,
+so <code>geo.f()</code> and an <code>f</code> imported with <code>import { f } from "geo.fg"</code> share the
+module’s state. A variable member is the variable’s value when the import
+ran, like <code>import { TAU }</code>; read state that changes through a function.</p>
+<ul>
+<li><code>geo.nope</code> (or <code>geo.nope()</code>) is error <code>E0013</code>,
+<code>module 'geo.fg' has no member 'nope'</code>, with a suggestion when a member
+has a close name. The type checker reports it statically (<code>T0008</code>) and
+checks <code>geo.f(x)</code> against <code>f</code>’s signature, as for a direct import.</li>
+<li><code>geo.x = 1</code> is error <code>E0006</code> (the namespace binding is immutable); a
+namespace has no builtin methods (<code>geo.len()</code> is <code>E0013</code> too).</li>
+<li><code>geo.Name { ... }</code> requires <code>Name</code> to be a struct of the module
+(<code>'geo.Name' is not a struct</code>, <code>E0013</code>, otherwise).</li>
+<li><code>geo.Name(...)</code> (or <code>geo.Name</code>) in a pattern matches only values built by
+the member <code>geo.Name</code>: that variant <em>of that type</em>. If another module’s
+type also has a <code>Name</code> variant, its values do not match. An unknown
+member is <code>E0013</code> (<code>T0008</code> statically) when the arm is tried; a member
+that is not a variant is <code>'geo.Name' is not a variant</code> (<code>E0013</code>). A bare
+<code>Name(...)</code> pattern still matches any value whose variant is <code>Name</code>.</li>
+<li>The namespace is a value: it can be passed to functions and stored;
+<code>typeof(geo)</code> is <code>Object</code>.</li>
+<li><code>import "math" as m</code> is error <code>E0019</code>: built-in modules keep their own
+name.</li>
+</ul>
 <h2 id="built-in-modules"><a class="header" href="#built-in-modules">Built-in Modules</a></h2>
 <p>Forge’s standard library modules (<code>math</code>, <code>fs</code>, <code>io</code>, <code>crypto</code>, <code>db</code>, <code>pg</code>, <code>env</code>, <code>json</code>, <code>regex</code>, <code>log</code>, <code>term</code>, <code>http</code>, <code>csv</code>, <code>exec</code>, <code>time</code>) are automatically available without import. Attempting to <code>import</code> a built-in module name produces an error with guidance:</p>
 <pre><code class="language-forge">import "math"
@@ -3970,10 +4036,11 @@ say c.debug                 // true
 <pre><code>circular import: a.fg -&gt; b.fg -&gt; a.fg
 </code></pre>
 <p>Move the shared code into a third module to break the cycle.</p>
-<h2 id="no-namespacing"><a class="header" href="#no-namespacing">No Namespacing</a></h2>
-<p>Imported definitions are placed directly into the importing file’s scope. There is no namespace or module prefix for file imports. If two imported files define the same name, the later import overwrites the earlier one; import one of them under another name with <code>as</code> to keep both.</p>
+<h2 id="name-clashes"><a class="header" href="#name-clashes">Name Clashes</a></h2>
+<p><code>import "file.fg"</code> and <code>import { ... } from "file.fg"</code> place definitions directly into the importing file’s scope. If two imported files define the same name, the later import overwrites the earlier one; import one of them under another name with <code>as</code>, or import a module as a namespace, to keep both.</p>
 <pre><code class="language-forge">import "a.fg"                              // defines fn helper()
 import { helper as b_helper } from "b.fg"  // b.fg's helper, renamed
+import "c.fg" as c                         // c.helper()
 </code></pre>
 <h2 id="no-export-keyword"><a class="header" href="#no-export-keyword">No Export Keyword</a></h2>
 <p>Forge does not have an explicit <code>export</code> keyword. All top-level <code>fn</code> and <code>let</code> bindings in a file are automatically available for import by other files.</p>
@@ -4125,7 +4192,9 @@ GiveBlock        = "give" TypeName AbilityClause? "{" MethodDef* "}"
 ImplBlock        = "impl" (TypeName | AbilityForType) "{" MethodDef* "}"
 AbilityClause    = "the" "power" InterfaceName
 AbilityForType   = InterfaceName "for" TypeName
-MethodDef        = ("fn" | "define") Identifier "(" ParamList ")" Block
+MethodDef        = ("fn" | "define") Identifier "(" MethodParams ")" Block
+MethodParams     = ["mut"] Receiver ("," Param)* | ParamList
+Receiver         = "it" | "self"
 TypeName         = Identifier
 InterfaceName    = Identifier
 </code></pre>
@@ -4168,6 +4237,60 @@ p.birthday()    // returns 31
 <li>Prepends <code>p</code> to the argument list as the <code>it</code> parameter.</li>
 <li>Calls the resolved function with the full argument list.</li>
 </ol>
+<h2 id="receivers-are-read-only-mut-it-updates-them"><a class="header" href="#receivers-are-read-only-mut-it-updates-them">Receivers Are Read-Only; <code>mut it</code> Updates Them</a></h2>
+<p>Forge values are copied, so <code>it</code> is the method’s own copy of the receiver.
+A plain receiver is <strong>immutable</strong>: assigning to <code>it</code>, to one of its fields or
+elements (<code>it.n += 1</code>), or calling a mutating method on a part of it
+(<code>it.items.push(x)</code>) is the immutable-assignment error (E0006 at run time,
+T0017 from the type checker). This way an update can never be silently lost.</p>
+<p>A method that updates its receiver declares it <code>mut it</code>. When such a method
+returns normally (an explicit <code>return</code>, its last expression, or a <code>?</code> early
+return), the final value of <code>it</code> is written back to the place the method was
+called on, as if by an assignment:</p>
+<pre><code class="language-forge">struct Counter {
+    n: Int
+}
+
+impl Counter {
+    fn inc(mut it) {
+        it.n += 1
+        return it.n
+    }
+}
+
+let mut c = Counter { n: 0 }
+c.inc()                        // c.n == 1
+let mut cs = [Counter { n: 0 }]
+cs[0].inc()                    // elements and fields are places too
+let mut o = { c: Counter { n: 5 } }
+o.c.inc()                      // o.c.n == 6
+</code></pre>
+<p>Rules (both engines):</p>
+<ul>
+<li><code>mut</code> is allowed only on a method’s receiver: the first parameter of a
+method in a <code>give</code>/<code>impl</code> block, named <code>it</code> (or <code>self</code>). <code>mut</code> on any other
+parameter is a syntax error.</li>
+<li>The receiver place is a variable or a chain of fields and indexes rooted at
+one. Its index expressions are evaluated once, before the arguments; the
+receiver is read before the arguments too (for <code>push</code>/<code>pop</code>/<code>add</code>/<code>remove</code>
+on a plain variable, after them, like the collection methods).</li>
+<li>Writing back is an assignment to the place: on an immutable (<code>let</code>) root it
+is E0006 (<code>cannot reassign immutable variable</code>), reported statically as
+T0017. It happens after the method returns, so the method’s own effects
+(output) have happened.</li>
+<li>A <code>mut it</code> method called on a value that is not a place (<code>make().inc()</code>,
+<code>a.b().inc()</code>, a literal) raises E0006 <code>cannot update a temporary value</code>
+(T0017 statically): the update would have nowhere to go.</li>
+<li>If the method raises an error, nothing is written back.</li>
+<li>Aliases do not observe the update (<code>let w = c; c.inc()</code> leaves <code>w</code>
+unchanged): only the place the method was called on changes.</li>
+<li>The same holds for methods of algebraic <code>type</code>s (<code>it = Green</code> replaces the
+receiver), for methods called through an interface-typed value, and for a
+method found on an embedded field (<code>outer.hit()</code> updates <code>outer.inner</code>).</li>
+<li>A struct’s own method named like a collection method (<code>push</code>, <code>pop</code>,
+<code>add</code>, <code>remove</code>) is called like any other method: with <code>mut it</code> it updates
+the receiver, without it the variable is unchanged.</li>
+</ul>
 <h2 id="static-methods-1"><a class="header" href="#static-methods-1">Static Methods</a></h2>
 <p>A method without <code>it</code> as its first parameter is a static method. Static methods are called on the type name itself, not on instances. See <a href="#static-methods-2">Static Methods</a> for full details.</p>
 <pre><code class="language-forge">give Person {
@@ -4831,9 +4954,10 @@ Math.sub(5, 3)    // 2
 <tr><td><code>Int</code>, <code>Float</code>, <code>String</code>, <code>Bool</code>, <code>Null</code></td><td>as shown (<code>int</code>, <code>str</code>, <code>boolean</code>, … are accepted aliases)</td><td>primitives</td></tr>
 <tr><td><code>Any</code></td><td><code>Any</code> (also <code>Json</code>)</td><td>anything</td></tr>
 <tr><td><code>Object</code></td><td><code>Object</code></td><td>object literals and struct instances</td></tr>
+<tr><td><code>Object&lt;T&gt;</code></td><td><code>Object&lt;Int&gt;</code>, <code>Object&lt;[String]&gt;</code></td><td>objects whose values are all <code>T</code> (string keys): a typed dictionary</td></tr>
 <tr><td><code>[T]</code></td><td><code>[Int]</code>, <code>Array&lt;T&gt;</code></td><td>arrays whose elements are <code>T</code></td></tr>
 <tr><td><code>(A, B)</code></td><td><code>(Int, String)</code></td><td>tuples</td></tr>
-<tr><td><code>Set&lt;T&gt;</code>, <code>Map&lt;K, V&gt;</code></td><td>as shown</td><td>sets and maps</td></tr>
+<tr><td><code>Set&lt;T&gt;</code>, <code>Map&lt;K, V&gt;</code></td><td>as shown</td><td>sets and <code>Map</code> values (<code>map()</code>); an object is never a <code>Map</code></td></tr>
 <tr><td><code>?T</code></td><td><code>?Int</code>, <code>Option&lt;Int&gt;</code></td><td><code>T</code>, <code>null</code>, <code>None</code> or <code>Some(t)</code></td></tr>
 <tr><td><code>Result&lt;T, E&gt;</code></td><td>as shown</td><td><code>Ok(t)</code> / <code>Err(e)</code></td></tr>
 <tr><td><code>fn(A, B) -&gt; R</code></td><td><code>fn(Int) -&gt; Bool</code>, <code>fn()</code></td><td>functions and lambdas</td></tr>
@@ -4843,6 +4967,31 @@ Math.sub(5, 3)    // 2
 </div>
 <p><code>type Id = Int | String</code> declares a union alias; <code>type Shape = Circle(Float) | Rect(Float, Float)</code> declares an algebraic data type whose variants are constructors.</p>
 <p>Assignability: <code>Any</code> fits everything in both directions; <code>Int</code> fits <code>Float</code> (but not the reverse); <code>?T</code> accepts <code>null</code>, <code>T</code> and <code>?U</code> when <code>U</code> fits <code>T</code>; a union accepts any of its members; function types are contravariant in parameters and covariant in results; collections compare element-wise; an <code>Object</code> and a struct instance are interchangeable. A struct satisfies an interface structurally: it must provide every interface member as a field or method, with matching parameter counts and return types.</p>
+<h3 id="typed-objects"><a class="header" href="#typed-objects">Typed objects</a></h3>
+<p><code>Object&lt;T&gt;</code> is the annotation for an object used as a dictionary: string keys (as
+in every object) and values of type <code>T</code>. An object literal or a parsed JSON
+object fits it when every value fits <code>T</code>; internal fields (<code>__type__</code>, …)
+are not values.</p>
+<pre><code class="language-forge">let ages: Object&lt;Int&gt; = { ada: 36, alan: 41 }
+fn total(counts: Object&lt;Int&gt;) -&gt; Int {
+    let mut sum = 0
+    for k, v in counts {        // v: Int
+        sum = sum + v
+    }
+    return sum
+}
+let ok = total(json.parse("""{"a": 1, "b": 2}"""))
+let bad: Object&lt;Int&gt; = { a: 1, b: "x" }   // T0001: assigned Object&lt;String&gt;
+</code></pre>
+<p>The checker checks the values of an object literal against <code>T</code> (like the
+elements of an array literal against <code>[T]</code>), types <code>o.key</code>, <code>o[key]</code> and
+<code>for k, v in o</code> with <code>T</code>, and checks <code>o.key = v</code> / <code>o[key] = v</code>. An object
+whose values it cannot see (<code>Object</code>, <code>json.parse(...)</code>) is accepted
+statically; under <code>--strict</code> and from edition 2027, annotated function
+arguments and results are checked at run time (<code>type error: argument 'counts' of 'total' must be Object&lt;Int&gt;, got Object</code>), and a declared
+<code>Object&lt;Float&gt;</code> turns Int values into Floats. <code>Map&lt;String, Int&gt;</code> is the
+<code>Map</code> value type and does not accept an object
+(<code>T0001</code>, with a hint to write <code>Object&lt;Int&gt;</code>).</p>
 <h2 id="inference"><a class="header" href="#inference">Inference</a></h2>
 <p>The checker infers, without annotations:</p>
 <ul>
@@ -4937,25 +5086,27 @@ double(v)
 <p>The catch variable receives an object with four fields, in this order:</p>
 <ul>
 <li><code>message</code> — the error message without its hint line (usually one line; an assertion’s <code>left:</code>/<code>right:</code> lines are kept).</li>
-<li><code>type</code> — a legacy classification (table below). Prefer <code>code</code>.</li>
+<li><code>type</code> — a category of the code (table below). Prefer <code>code</code>.</li>
 <li><code>code</code> — the stable error code (<code>E0008</code>), as <code>forge explain</code> lists it.</li>
 <li><code>hint</code> — the suggestion the error carries (<code>"available fields: a, b"</code>, <code>"did you mean 'count'?"</code>), or <code>null</code> when it has none.</li>
 </ul>
-<p>The <code>type</code> is derived from the message’s first line:</p>
+<p>The <code>type</code> is a category of the code, so every error with one code has the
+same type:</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Error Type</th><th>Triggered By</th></tr>
+<tr><th>Error Type</th><th>Codes</th></tr>
 </thead>
 <tbody>
-<tr><td><code>TimeoutError</code></td><td>An HTTP request timed out (<code>E0036</code>)</td></tr>
-<tr><td><code>ConnectionError</code></td><td>An HTTP connection failed (<code>E0037</code>)</td></tr>
-<tr><td><code>TypeError</code></td><td>Message contains “type” or “Type”</td></tr>
-<tr><td><code>ArithmeticError</code></td><td>Message contains “division by zero”</td></tr>
-<tr><td><code>AssertionError</code></td><td>Message contains “assertion”</td></tr>
-<tr><td><code>IndexError</code></td><td>Message contains “index” or “out of bounds”</td></tr>
-<tr><td><code>ReferenceError</code></td><td>Message contains “not found” or “undefined”</td></tr>
-<tr><td><code>RuntimeError</code></td><td>All other errors</td></tr>
+<tr><td><code>TypeError</code></td><td>E0004 E0005 E0006 E0007 E0011 E0012 E0014 E0015 E0017 E0028 E0029 E0034</td></tr>
+<tr><td><code>ReferenceError</code></td><td>E0003 E0010 E0013 E0019</td></tr>
+<tr><td><code>IndexError</code></td><td>E0009</td></tr>
+<tr><td><code>ArithmeticError</code></td><td>E0008</td></tr>
+<tr><td><code>ValueError</code></td><td>E0038 (not a number), E0039 (invalid JSON), E0040 (invalid regex)</td></tr>
+<tr><td><code>AssertionError</code></td><td>E0021 E0022</td></tr>
+<tr><td><code>TimeoutError</code></td><td>E0031 E0036</td></tr>
+<tr><td><code>ConnectionError</code></td><td>E0037</td></tr>
+<tr><td><code>RuntimeError</code></td><td>every other code (E0000, E0016, E0023, E0041, …)</td></tr>
 </tbody>
 </table>
 </div>
@@ -5514,8 +5665,7 @@ let result = try_receive(ch)    // Some(42)
 <p><strong>Returns:</strong> <code>Some(value)</code> if a value was received, <code>None</code> if the channel is empty or closed.</p>
 <p><strong>Errors:</strong></p>
 <ul>
-<li><code>"try_receive() requires a channel"</code> — No argument provided.</li>
-<li><code>"try_receive() argument must be a channel"</code> — Argument is not a channel.</li>
+<li><code>"try_receive() requires a channel"</code> — The argument is not a channel.</li>
 </ul>
 <h2 id="producer-consumer-pattern"><a class="header" href="#producer-consumer-pattern">Producer-Consumer Pattern</a></h2>
 <p>Channels enable classic producer-consumer patterns:</p>
@@ -5555,6 +5705,43 @@ repeat 3 times {
     }
 }
 </code></pre>
+<h2 id="closing-and-selecting"><a class="header" href="#closing-and-selecting">Closing and Selecting</a></h2>
+<h3 id="closechannel"><a class="header" href="#closechannel">close(channel)</a></h3>
+<p><code>close</code> ends the channel for senders: later <code>send</code> calls fail with <code>channel closed</code> (E0030) and <code>try_send</code> returns <code>false</code>. Values sent before <code>close</code> stay
+in the buffer and are still received in order; once they are gone <code>receive</code>
+returns <code>null</code>.</p>
+<h3 id="is_closedchannel"><a class="header" href="#is_closedchannel">is_closed(channel)</a></h3>
+<p>Returns <code>true</code> once the channel is <em>finished</em>: closed <strong>and</strong> drained, so no
+value can be received from it any more. A closed channel that still holds
+values is not finished (this is Kotlin’s <code>isClosedForReceive</code>). Asking does
+not consume a value. <code>is_closed(5)</code> is E0015 <code>is_closed() requires a channel</code>.</p>
+<pre><code class="language-forge">let ch = channel()
+send(ch, 1)
+close(ch)
+println(is_closed(ch))   // false: 1 is still waiting
+println(receive(ch))     // 1
+println(is_closed(ch))   // true
+</code></pre>
+<h3 id="selectchannels-timeout_ms"><a class="header" href="#selectchannels-timeout_ms">select(channels, timeout_ms?)</a></h3>
+<p>Waits until one of <code>channels</code> has a value and returns <code>[index, value]</code>
+(channels are polled fairly). Finished channels are skipped. <code>select</code>
+returns <code>null</code> when the timeout (milliseconds) passes, and immediately when
+every channel is finished (or the array is empty); without a timeout it waits
+until one of the two happens. After a <code>null</code>, <code>all(chs, fn(c) { return is_closed(c) })</code> is <code>true</code> only in the second case, so a consumer merging
+several producers can tell “all finished” from “slow”:</p>
+<pre><code class="language-forge">while true {
+    let r = select(chs, 1000)
+    if r == null {
+        if all(chs, fn(c) { return is_closed(c) }) {
+            break
+        }
+        continue
+    }
+    handle(r[0], r[1])
+}
+</code></pre>
+<p><strong>Errors:</strong> <code>"select() requires an array of channels"</code> (E0015) when the first
+argument is not an array of channels.</p>
 <h2 id="channel-lifetime"><a class="header" href="#channel-lifetime">Channel Lifetime</a></h2>
 <p>Channels remain open as long as at least one reference exists. When all references to a channel are dropped (through garbage collection or scope exit), the underlying <code>SyncSender</code> and <code>Receiver</code> are dropped, which closes the channel. Subsequent <code>send</code> calls on a closed channel return an error; <code>receive</code> calls return <code>null</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
@@ -6478,6 +6665,27 @@ say json.pretty(obj, 4)
 </tbody>
 </table>
 </div>
+<h2 id="numbers"><a class="header" href="#numbers">Numbers</a></h2>
+<p>A number keeps its kind in both directions, on both engines and in HTTP
+responses:</p>
+<ul>
+<li><strong>Parsing.</strong> A number written without a fraction or exponent is an Int when
+it fits in 64 bits. <code>-0</code> is the Int <code>0</code>, as <code>-0</code> is in Forge source. An
+integer outside the Int range becomes a Float (and may lose precision), the
+way Int arithmetic that overflows becomes a Float (Forge source rejects such
+a literal). A number with a fraction or an exponent is a Float: <code>1.0</code>,
+<code>1e2</code> (<code>100.0</code>), <code>-0.0</code>.</li>
+<li><strong>Writing.</strong> An Int is written as digits; a Float always has a fraction or
+an exponent (<code>1.0</code>, <code>2.5</code>, <code>1e+21</code>), with the shortest digits that read back
+as the same Float, so <code>json.parse(json.compact(x)) == x</code> keeps every Float a
+Float. NaN and the infinities, which JSON cannot represent, are written as
+<code>null</code> (as in JavaScript). <code>str(1.0)</code> and <code>println(1.0)</code> still show <code>1</code>.</li>
+</ul>
+<h2 id="strings-1"><a class="header" href="#strings-1">Strings</a></h2>
+<p><code>json.stringify</code>, <code>json.compact</code> and <code>json.pretty</code> escape <code>"</code> and <code>\</code>, write
+the short escapes <code>\b</code>, <code>\f</code>, <code>\n</code>, <code>\r</code>, <code>\t</code>, and any other control
+character as <code>\u00XX</code>; every other character is written as is (UTF-8).
+<code>json.pretty</code>’s indent is an Int from 0 to 16 (default 2).</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="csv"><a class="header" href="#csv">csv</a></h1>
 <p>CSV parsing and serialization. Uses comma-separated values with automatic type inference for fields.</p>
@@ -7003,24 +7211,26 @@ io.print(".\n")
 // Loading...
 </code></pre>
 <h3 id="ioargs---array"><a class="header" href="#ioargs---array">io.args() -&gt; array</a></h3>
-<p>Returns all command-line arguments as an array of strings, including the program name.</p>
-<pre><code class="language-forge">let args = io.args()
-say args  // ["forge", "run", "script.fg", "--verbose"]
+<p>Returns the program’s command line: the script path as given to <code>forge run</code>, then every argument after it. Everything after the file goes to the program, flags included, so forge’s own flags (<code>--interp</code>, <code>--allow-read</code>, …) must come before the file and never appear here. A standalone binary built with <code>forge build</code> sees its own path and arguments. A sandboxed run (<code>forge mcp</code>’s <code>run_forge</code>, <code>Sandbox</code>) sees only what its host passes (<code>run_forge</code>’s <code>args</code>), never the host process’s command line. In the REPL, under <code>forge -e</code> and in <code>forge test</code> it is empty.</p>
+<pre><code class="language-forge">// forge --interp run script.fg --verbose data.txt
+let args = io.args()
+say args                         // ["script.fg", "--verbose", "data.txt"]
+say slice(args, 1, len(args))    // ["--verbose", "data.txt"]
 </code></pre>
 <h3 id="ioargs_parse---object"><a class="header" href="#ioargs_parse---object">io.args_parse() -&gt; object</a></h3>
-<p>Parses command-line arguments into an object. Flags starting with <code>--</code> become keys. If a flag is followed by a non-flag value, that value is used; otherwise the flag is set to <code>true</code>.</p>
+<p>Parses the program’s arguments (after the script path, up to a <code>--</code>) into an object. Flags starting with <code>--</code> become keys. If a flag is followed by a non-flag value, that value is used; otherwise the flag is set to <code>true</code>.</p>
 <pre><code class="language-forge">// forge run script.fg --port 3000 --verbose
 let opts = io.args_parse()
 say opts["--port"]     // "3000"
 say opts["--verbose"]  // true
 </code></pre>
 <h3 id="ioargs_getflag---string--bool--null"><a class="header" href="#ioargs_getflag---string--bool--null">io.args_get(flag) -&gt; string | bool | null</a></h3>
-<p>Returns the value of a specific command-line flag. Returns <code>true</code> if the flag exists but has no value, or <code>null</code> if the flag is not present.</p>
+<p>Returns the value of a specific command-line flag (a string). Returns <code>true</code> if the flag exists but has no value, or <code>null</code> if the flag is not present. Arguments after a <code>--</code> are not flags.</p>
 <pre><code class="language-forge">let port = io.args_get("--port")  // "3000" or null
 let verbose = io.args_get("--verbose")  // true or null
 </code></pre>
 <h3 id="ioargs_hasflag---bool"><a class="header" href="#ioargs_hasflag---bool">io.args_has(flag) -&gt; bool</a></h3>
-<p>Returns <code>true</code> if the flag is present in the command-line arguments.</p>
+<p>Returns <code>true</code> if the flag is present in the program’s arguments (before any <code>--</code>).</p>
 <pre><code class="language-forge">if io.args_has("--debug") {
     log.debug("Debug mode enabled")
 }
@@ -7686,6 +7896,97 @@ snake_case("some string")    // "some_string"
 <pre><code class="language-forge">camel_case("hello_world")    // "helloWorld"
 camel_case("some string")    // "someString"
 </code></pre>
+<h2 id="chrcode_point---string"><a class="header" href="#chrcode_point---string">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, U+10FFFF). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int"><a class="header" href="#ordstring---int">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-1"><a class="header" href="#chrcode_point---string-1">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-1"><a class="header" href="#ordstring---int-1">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-2"><a class="header" href="#chrcode_point---string-2">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-2"><a class="header" href="#ordstring---int-2">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-3"><a class="header" href="#chrcode_point---string-3">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-3"><a class="header" href="#ordstring---int-3">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-4"><a class="header" href="#chrcode_point---string-4">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-4"><a class="header" href="#ordstring---int-4">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-5"><a class="header" href="#chrcode_point---string-5">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-5"><a class="header" href="#ordstring---int-5">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-6"><a class="header" href="#chrcode_point---string-6">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-6"><a class="header" href="#ordstring---int-6">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="object-functions"><a class="header" href="#object-functions">Object Functions</a></h1>
 <p>Functions for working with Forge objects (key-value maps).</p>
@@ -8233,19 +8534,24 @@ check email contains "@"
     say resp.json
 }
 </code></pre>
-<p>If all retries fail, the error from the last attempt is raised.</p>
+<p><code>retry</code> is a statement (not an expression): pass a value out through a variable declared before it, or <code>return</code> from inside it in a function. <code>return</code>, <code>break</code> and <code>continue</code> leave the block without retrying. Between attempts it waits 100 ms, 200 ms, …; a count of 0 or less makes no attempt. If every attempt fails, it raises E0041 <code>retry failed after N attempts: &lt;the last error&gt;</code> (<code>e.type</code> is <code>RuntimeError</code>).</p>
 <h2 id="timeout-n-seconds"><a class="header" href="#timeout-n-seconds">timeout N seconds</a></h2>
-<p>Limits execution time for a block. If the block does not complete within the time limit, it is interrupted.</p>
+<p>Limits execution time for a block. If the block does not complete within the time limit, it is interrupted (waits, <code>receive</code>, loops and calls inside it included) and E0031 <code>timeout: operation exceeded N second limit</code> is raised (N in seconds, as a Forge number: <code>0.5</code>, <code>2</code>; <code>e.type</code> is <code>TimeoutError</code>), which <code>try</code>/<code>catch</code> can handle.</p>
 <pre><code class="language-forge">timeout 5 seconds {
     let result = http.get("https://slow-api.example.com")
     say result.json
 }
+
+timeout 250 ms {
+    wait 0.1 seconds
+}
 </code></pre>
+<p>Duration units (for <code>wait</code>, <code>timeout</code> and <code>schedule every</code>): <code>milliseconds</code> / <code>millisecond</code> / <code>ms</code>, <code>seconds</code> / <code>second</code>, <code>minutes</code> / <code>minute</code>, <code>hours</code> / <code>hour</code>. The number may be any expression and a fraction is exact (<code>timeout 0.5 seconds</code>, <code>wait 1.5 ms</code>); without a unit it counts seconds. The unit words are not reserved: they are only units right after the number, on the same line.</p>
 <blockquote>
 <p><strong>Note:</strong> This feature is experimental and may not interrupt all operations cleanly.</p>
 </blockquote>
 <h2 id="schedule-every-n-units"><a class="header" href="#schedule-every-n-units">schedule every N units</a></h2>
-<p>Runs a block repeatedly on a schedule (cron-like).</p>
+<p>Runs a block repeatedly in the background, first after one interval, while the program continues (in an <code>@server</code> program: after the top level, next to the server). It stops when the program ends. The block works on its own copy of the variables (kept between runs, invisible to the rest of the program), so it reports through channels, files or databases; an error in one run is ignored and the next run still happens.</p>
 <pre><code class="language-forge">schedule every 5 minutes {
     let status = http.get("https://api.example.com/health")
     if status.status != 200 {
@@ -8253,7 +8559,7 @@ check email contains "@"
     }
 }
 </code></pre>
-<p>Supported units: <code>seconds</code>, <code>minutes</code>, <code>hours</code>.</p>
+<p>Supported units: those of <code>timeout</code> (<code>ms</code>, <code>seconds</code>, <code>minutes</code>, <code>hours</code>, singular or plural); the interval may be a fraction (<code>schedule every 0.5 seconds</code>) and must be positive.</p>
 <h2 id="watch-path"><a class="header" href="#watch-path">watch “path”</a></h2>
 <p>Monitors a file or directory for changes and executes the block when changes are detected.</p>
 <pre><code class="language-forge">watch "src/" {
@@ -8286,8 +8592,9 @@ say page.links
 <p>Pauses execution for the specified duration.</p>
 <pre><code class="language-forge">wait 2 seconds
 wait 500 milliseconds
+wait 0.25 seconds
 </code></pre>
-<p>Supported units: <code>seconds</code>, <code>milliseconds</code>, <code>minutes</code>.</p>
+<p>Supported units: those of <code>timeout</code> (<code>ms</code>/<code>milliseconds</code>, <code>seconds</code>, <code>minutes</code>, <code>hours</code>, singular or plural). <code>wait(n)</code> (the builtin) takes seconds.</p>
 <h2 id="grab--from-url"><a class="header" href="#grab--from-url">grab … from “url”</a></h2>
 <p>Natural syntax for HTTP fetch. Assigns the response to a variable.</p>
 <pre><code class="language-forge">grab data from "https://api.example.com/users"
@@ -8890,9 +9197,12 @@ yield_stmt     = ( "yield" | "emit" ) expr NEWLINE ;
 <h3 id="innovation-statements"><a class="header" href="#innovation-statements">Innovation Statements</a></h3>
 <pre><code class="language-ebnf">check_stmt     = "check" expr ( "is" "not"? "empty" | "contains" expr | "between" expr "and" expr ) ;
 safe_block     = "safe" block ;
-timeout_block  = "timeout" expr "seconds" block ;
+timeout_block  = "timeout" expr duration_unit? block ;
 retry_block    = "retry" expr "times" block ;
-schedule_block = "schedule" "every" expr ( "seconds" | "minutes" ) block ;
+schedule_block = "schedule" "every" expr duration_unit? block ;
+wait_stmt      = "wait" expr duration_unit? ;
+duration_unit  = "milliseconds" | "millisecond" | "ms" | "seconds" | "second"
+               | "minutes" | "minute" | "hours" | "hour" ;
 watch_block    = "watch" expr block ;
 </code></pre>
 <h3 id="decorators"><a class="header" href="#decorators">Decorators</a></h3>

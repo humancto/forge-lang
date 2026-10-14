@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -269,8 +269,7 @@ let result = try_receive(ch)    // Some(42)
 <p><strong>Returns:</strong> <code>Some(value)</code> if a value was received, <code>None</code> if the channel is empty or closed.</p>
 <p><strong>Errors:</strong></p>
 <ul>
-<li><code>"try_receive() requires a channel"</code> — No argument provided.</li>
-<li><code>"try_receive() argument must be a channel"</code> — Argument is not a channel.</li>
+<li><code>"try_receive() requires a channel"</code> — The argument is not a channel.</li>
 </ul>
 <h2 id="producer-consumer-pattern"><a class="header" href="#producer-consumer-pattern">Producer-Consumer Pattern</a></h2>
 <p>Channels enable classic producer-consumer patterns:</p>
@@ -310,6 +309,43 @@ repeat 3 times {
     }
 }
 </code></pre>
+<h2 id="closing-and-selecting"><a class="header" href="#closing-and-selecting">Closing and Selecting</a></h2>
+<h3 id="closechannel"><a class="header" href="#closechannel">close(channel)</a></h3>
+<p><code>close</code> ends the channel for senders: later <code>send</code> calls fail with <code>channel closed</code> (E0030) and <code>try_send</code> returns <code>false</code>. Values sent before <code>close</code> stay
+in the buffer and are still received in order; once they are gone <code>receive</code>
+returns <code>null</code>.</p>
+<h3 id="is_closedchannel"><a class="header" href="#is_closedchannel">is_closed(channel)</a></h3>
+<p>Returns <code>true</code> once the channel is <em>finished</em>: closed <strong>and</strong> drained, so no
+value can be received from it any more. A closed channel that still holds
+values is not finished (this is Kotlin’s <code>isClosedForReceive</code>). Asking does
+not consume a value. <code>is_closed(5)</code> is E0015 <code>is_closed() requires a channel</code>.</p>
+<pre><code class="language-forge">let ch = channel()
+send(ch, 1)
+close(ch)
+println(is_closed(ch))   // false: 1 is still waiting
+println(receive(ch))     // 1
+println(is_closed(ch))   // true
+</code></pre>
+<h3 id="selectchannels-timeout_ms"><a class="header" href="#selectchannels-timeout_ms">select(channels, timeout_ms?)</a></h3>
+<p>Waits until one of <code>channels</code> has a value and returns <code>[index, value]</code>
+(channels are polled fairly). Finished channels are skipped. <code>select</code>
+returns <code>null</code> when the timeout (milliseconds) passes, and immediately when
+every channel is finished (or the array is empty); without a timeout it waits
+until one of the two happens. After a <code>null</code>, <code>all(chs, fn(c) { return is_closed(c) })</code> is <code>true</code> only in the second case, so a consumer merging
+several producers can tell “all finished” from “slow”:</p>
+<pre><code class="language-forge">while true {
+    let r = select(chs, 1000)
+    if r == null {
+        if all(chs, fn(c) { return is_closed(c) }) {
+            break
+        }
+        continue
+    }
+    handle(r[0], r[1])
+}
+</code></pre>
+<p><strong>Errors:</strong> <code>"select() requires an array of channels"</code> (E0015) when the first
+argument is not an array of channels.</p>
 <h2 id="channel-lifetime"><a class="header" href="#channel-lifetime">Channel Lifetime</a></h2>
 <p>Channels remain open as long as at least one reference exists. When all references to a channel are dropped (through garbage collection or scope exit), the underlying <code>SyncSender</code> and <code>Receiver</code> are dropped, which closes the channel. Subsequent <code>send</code> calls on a closed channel return an error; <code>receive</code> calls return <code>null</code>.</p>
 

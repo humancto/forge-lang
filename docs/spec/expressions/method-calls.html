@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -187,6 +187,8 @@
 <pre><code>expression.method(arguments)
 </code></pre>
 <p>The left operand (the <strong>receiver</strong>) is evaluated first, then the method is resolved, then arguments are evaluated left to right.</p>
+<p>Exception: <code>push</code>, <code>pop</code>, <code>add</code> and <code>remove</code> called on a mutable variable (<code>xs.push(f())</code>, <code>m = m.remove(g())</code>) evaluate their arguments first and read the variable afterwards, whatever it holds, so an argument that updates the variable is not overwritten. On a field/index place (<code>g[k].push(x)</code>) the index expressions come first, then the arguments, then the place is read.</p>
+<p>When the receiver is a place (a variable, or fields and indexes of one) and the method is a user method declared <code>mut it</code>, the method’s final <code>it</code> is assigned back to that place when it returns; see <a href="../type-system/method-blocks.html#receivers-are-read-only-mut-it-updates-them">Method Blocks</a>.</p>
 <h2 id="method-dispatch"><a class="header" href="#method-dispatch">Method Dispatch</a></h2>
 <p>When evaluating <code>obj.method(args)</code>, the interpreter follows this resolution order:</p>
 <h3 id="1-object-field-lookup"><a class="header" href="#1-object-field-lookup">1. Object Field Lookup</a></h3>

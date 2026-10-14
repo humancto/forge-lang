@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -222,19 +222,24 @@ check email contains "@"
     say resp.json
 }
 </code></pre>
-<p>If all retries fail, the error from the last attempt is raised.</p>
+<p><code>retry</code> is a statement (not an expression): pass a value out through a variable declared before it, or <code>return</code> from inside it in a function. <code>return</code>, <code>break</code> and <code>continue</code> leave the block without retrying. Between attempts it waits 100 ms, 200 ms, …; a count of 0 or less makes no attempt. If every attempt fails, it raises E0041 <code>retry failed after N attempts: &lt;the last error&gt;</code> (<code>e.type</code> is <code>RuntimeError</code>).</p>
 <h2 id="timeout-n-seconds"><a class="header" href="#timeout-n-seconds">timeout N seconds</a></h2>
-<p>Limits execution time for a block. If the block does not complete within the time limit, it is interrupted.</p>
+<p>Limits execution time for a block. If the block does not complete within the time limit, it is interrupted (waits, <code>receive</code>, loops and calls inside it included) and E0031 <code>timeout: operation exceeded N second limit</code> is raised (N in seconds, as a Forge number: <code>0.5</code>, <code>2</code>; <code>e.type</code> is <code>TimeoutError</code>), which <code>try</code>/<code>catch</code> can handle.</p>
 <pre><code class="language-forge">timeout 5 seconds {
     let result = http.get("https://slow-api.example.com")
     say result.json
 }
+
+timeout 250 ms {
+    wait 0.1 seconds
+}
 </code></pre>
+<p>Duration units (for <code>wait</code>, <code>timeout</code> and <code>schedule every</code>): <code>milliseconds</code> / <code>millisecond</code> / <code>ms</code>, <code>seconds</code> / <code>second</code>, <code>minutes</code> / <code>minute</code>, <code>hours</code> / <code>hour</code>. The number may be any expression and a fraction is exact (<code>timeout 0.5 seconds</code>, <code>wait 1.5 ms</code>); without a unit it counts seconds. The unit words are not reserved: they are only units right after the number, on the same line.</p>
 <blockquote>
 <p><strong>Note:</strong> This feature is experimental and may not interrupt all operations cleanly.</p>
 </blockquote>
 <h2 id="schedule-every-n-units"><a class="header" href="#schedule-every-n-units">schedule every N units</a></h2>
-<p>Runs a block repeatedly on a schedule (cron-like).</p>
+<p>Runs a block repeatedly in the background, first after one interval, while the program continues (in an <code>@server</code> program: after the top level, next to the server). It stops when the program ends. The block works on its own copy of the variables (kept between runs, invisible to the rest of the program), so it reports through channels, files or databases; an error in one run is ignored and the next run still happens.</p>
 <pre><code class="language-forge">schedule every 5 minutes {
     let status = http.get("https://api.example.com/health")
     if status.status != 200 {
@@ -242,7 +247,7 @@ check email contains "@"
     }
 }
 </code></pre>
-<p>Supported units: <code>seconds</code>, <code>minutes</code>, <code>hours</code>.</p>
+<p>Supported units: those of <code>timeout</code> (<code>ms</code>, <code>seconds</code>, <code>minutes</code>, <code>hours</code>, singular or plural); the interval may be a fraction (<code>schedule every 0.5 seconds</code>) and must be positive.</p>
 <h2 id="watch-path"><a class="header" href="#watch-path">watch “path”</a></h2>
 <p>Monitors a file or directory for changes and executes the block when changes are detected.</p>
 <pre><code class="language-forge">watch "src/" {
@@ -275,8 +280,9 @@ say page.links
 <p>Pauses execution for the specified duration.</p>
 <pre><code class="language-forge">wait 2 seconds
 wait 500 milliseconds
+wait 0.25 seconds
 </code></pre>
-<p>Supported units: <code>seconds</code>, <code>milliseconds</code>, <code>minutes</code>.</p>
+<p>Supported units: those of <code>timeout</code> (<code>ms</code>/<code>milliseconds</code>, <code>seconds</code>, <code>minutes</code>, <code>hours</code>, singular or plural). <code>wait(n)</code> (the builtin) takes seconds.</p>
 <h2 id="grab--from-url"><a class="header" href="#grab--from-url">grab … from “url”</a></h2>
 <p>Natural syntax for HTTP fetch. Assigns the response to a variable.</p>
 <pre><code class="language-forge">grab data from "https://api.example.com/users"

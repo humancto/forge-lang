@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -206,9 +206,10 @@
 <tr><td><code>Int</code>, <code>Float</code>, <code>String</code>, <code>Bool</code>, <code>Null</code></td><td>as shown (<code>int</code>, <code>str</code>, <code>boolean</code>, … are accepted aliases)</td><td>primitives</td></tr>
 <tr><td><code>Any</code></td><td><code>Any</code> (also <code>Json</code>)</td><td>anything</td></tr>
 <tr><td><code>Object</code></td><td><code>Object</code></td><td>object literals and struct instances</td></tr>
+<tr><td><code>Object&lt;T&gt;</code></td><td><code>Object&lt;Int&gt;</code>, <code>Object&lt;[String]&gt;</code></td><td>objects whose values are all <code>T</code> (string keys): a typed dictionary</td></tr>
 <tr><td><code>[T]</code></td><td><code>[Int]</code>, <code>Array&lt;T&gt;</code></td><td>arrays whose elements are <code>T</code></td></tr>
 <tr><td><code>(A, B)</code></td><td><code>(Int, String)</code></td><td>tuples</td></tr>
-<tr><td><code>Set&lt;T&gt;</code>, <code>Map&lt;K, V&gt;</code></td><td>as shown</td><td>sets and maps</td></tr>
+<tr><td><code>Set&lt;T&gt;</code>, <code>Map&lt;K, V&gt;</code></td><td>as shown</td><td>sets and <code>Map</code> values (<code>map()</code>); an object is never a <code>Map</code></td></tr>
 <tr><td><code>?T</code></td><td><code>?Int</code>, <code>Option&lt;Int&gt;</code></td><td><code>T</code>, <code>null</code>, <code>None</code> or <code>Some(t)</code></td></tr>
 <tr><td><code>Result&lt;T, E&gt;</code></td><td>as shown</td><td><code>Ok(t)</code> / <code>Err(e)</code></td></tr>
 <tr><td><code>fn(A, B) -&gt; R</code></td><td><code>fn(Int) -&gt; Bool</code>, <code>fn()</code></td><td>functions and lambdas</td></tr>
@@ -218,6 +219,31 @@
 </div>
 <p><code>type Id = Int | String</code> declares a union alias; <code>type Shape = Circle(Float) | Rect(Float, Float)</code> declares an algebraic data type whose variants are constructors.</p>
 <p>Assignability: <code>Any</code> fits everything in both directions; <code>Int</code> fits <code>Float</code> (but not the reverse); <code>?T</code> accepts <code>null</code>, <code>T</code> and <code>?U</code> when <code>U</code> fits <code>T</code>; a union accepts any of its members; function types are contravariant in parameters and covariant in results; collections compare element-wise; an <code>Object</code> and a struct instance are interchangeable. A struct satisfies an interface structurally: it must provide every interface member as a field or method, with matching parameter counts and return types.</p>
+<h3 id="typed-objects"><a class="header" href="#typed-objects">Typed objects</a></h3>
+<p><code>Object&lt;T&gt;</code> is the annotation for an object used as a dictionary: string keys (as
+in every object) and values of type <code>T</code>. An object literal or a parsed JSON
+object fits it when every value fits <code>T</code>; internal fields (<code>__type__</code>, …)
+are not values.</p>
+<pre><code class="language-forge">let ages: Object&lt;Int&gt; = { ada: 36, alan: 41 }
+fn total(counts: Object&lt;Int&gt;) -&gt; Int {
+    let mut sum = 0
+    for k, v in counts {        // v: Int
+        sum = sum + v
+    }
+    return sum
+}
+let ok = total(json.parse("""{"a": 1, "b": 2}"""))
+let bad: Object&lt;Int&gt; = { a: 1, b: "x" }   // T0001: assigned Object&lt;String&gt;
+</code></pre>
+<p>The checker checks the values of an object literal against <code>T</code> (like the
+elements of an array literal against <code>[T]</code>), types <code>o.key</code>, <code>o[key]</code> and
+<code>for k, v in o</code> with <code>T</code>, and checks <code>o.key = v</code> / <code>o[key] = v</code>. An object
+whose values it cannot see (<code>Object</code>, <code>json.parse(...)</code>) is accepted
+statically; under <code>--strict</code> and from edition 2027, annotated function
+arguments and results are checked at run time (<code>type error: argument 'counts' of 'total' must be Object&lt;Int&gt;, got Object</code>), and a declared
+<code>Object&lt;Float&gt;</code> turns Int values into Floats. <code>Map&lt;String, Int&gt;</code> is the
+<code>Map</code> value type and does not accept an object
+(<code>T0001</code>, with a hint to write <code>Object&lt;Int&gt;</code>).</p>
 <h2 id="inference"><a class="header" href="#inference">Inference</a></h2>
 <p>The checker infers, without annotations:</p>
 <ul>

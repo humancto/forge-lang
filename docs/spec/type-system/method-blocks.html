@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -189,7 +189,9 @@ GiveBlock        = "give" TypeName AbilityClause? "{" MethodDef* "}"
 ImplBlock        = "impl" (TypeName | AbilityForType) "{" MethodDef* "}"
 AbilityClause    = "the" "power" InterfaceName
 AbilityForType   = InterfaceName "for" TypeName
-MethodDef        = ("fn" | "define") Identifier "(" ParamList ")" Block
+MethodDef        = ("fn" | "define") Identifier "(" MethodParams ")" Block
+MethodParams     = ["mut"] Receiver ("," Param)* | ParamList
+Receiver         = "it" | "self"
 TypeName         = Identifier
 InterfaceName    = Identifier
 </code></pre>
@@ -232,6 +234,60 @@ p.birthday()    // returns 31
 <li>Prepends <code>p</code> to the argument list as the <code>it</code> parameter.</li>
 <li>Calls the resolved function with the full argument list.</li>
 </ol>
+<h2 id="receivers-are-read-only-mut-it-updates-them"><a class="header" href="#receivers-are-read-only-mut-it-updates-them">Receivers Are Read-Only; <code>mut it</code> Updates Them</a></h2>
+<p>Forge values are copied, so <code>it</code> is the method’s own copy of the receiver.
+A plain receiver is <strong>immutable</strong>: assigning to <code>it</code>, to one of its fields or
+elements (<code>it.n += 1</code>), or calling a mutating method on a part of it
+(<code>it.items.push(x)</code>) is the immutable-assignment error (E0006 at run time,
+T0017 from the type checker). This way an update can never be silently lost.</p>
+<p>A method that updates its receiver declares it <code>mut it</code>. When such a method
+returns normally (an explicit <code>return</code>, its last expression, or a <code>?</code> early
+return), the final value of <code>it</code> is written back to the place the method was
+called on, as if by an assignment:</p>
+<pre><code class="language-forge">struct Counter {
+    n: Int
+}
+
+impl Counter {
+    fn inc(mut it) {
+        it.n += 1
+        return it.n
+    }
+}
+
+let mut c = Counter { n: 0 }
+c.inc()                        // c.n == 1
+let mut cs = [Counter { n: 0 }]
+cs[0].inc()                    // elements and fields are places too
+let mut o = { c: Counter { n: 5 } }
+o.c.inc()                      // o.c.n == 6
+</code></pre>
+<p>Rules (both engines):</p>
+<ul>
+<li><code>mut</code> is allowed only on a method’s receiver: the first parameter of a
+method in a <code>give</code>/<code>impl</code> block, named <code>it</code> (or <code>self</code>). <code>mut</code> on any other
+parameter is a syntax error.</li>
+<li>The receiver place is a variable or a chain of fields and indexes rooted at
+one. Its index expressions are evaluated once, before the arguments; the
+receiver is read before the arguments too (for <code>push</code>/<code>pop</code>/<code>add</code>/<code>remove</code>
+on a plain variable, after them, like the collection methods).</li>
+<li>Writing back is an assignment to the place: on an immutable (<code>let</code>) root it
+is E0006 (<code>cannot reassign immutable variable</code>), reported statically as
+T0017. It happens after the method returns, so the method’s own effects
+(output) have happened.</li>
+<li>A <code>mut it</code> method called on a value that is not a place (<code>make().inc()</code>,
+<code>a.b().inc()</code>, a literal) raises E0006 <code>cannot update a temporary value</code>
+(T0017 statically): the update would have nowhere to go.</li>
+<li>If the method raises an error, nothing is written back.</li>
+<li>Aliases do not observe the update (<code>let w = c; c.inc()</code> leaves <code>w</code>
+unchanged): only the place the method was called on changes.</li>
+<li>The same holds for methods of algebraic <code>type</code>s (<code>it = Green</code> replaces the
+receiver), for methods called through an interface-typed value, and for a
+method found on an embedded field (<code>outer.hit()</code> updates <code>outer.inner</code>).</li>
+<li>A struct’s own method named like a collection method (<code>push</code>, <code>pop</code>,
+<code>add</code>, <code>remove</code>) is called like any other method: with <code>mut it</code> it updates
+the receiver, without it the variable is unchanged.</li>
+</ul>
 <h2 id="static-methods"><a class="header" href="#static-methods">Static Methods</a></h2>
 <p>A method without <code>it</code> as its first parameter is a static method. Static methods are called on the type name itself, not on instances. See <a href="static-methods.html">Static Methods</a> for full details.</p>
 <pre><code class="language-forge">give Person {

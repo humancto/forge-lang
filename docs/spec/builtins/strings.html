@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -273,6 +273,97 @@ snake_case("some string")    // "some_string"
 <p>Converts a string to camelCase.</p>
 <pre><code class="language-forge">camel_case("hello_world")    // "helloWorld"
 camel_case("some string")    // "someString"
+</code></pre>
+<h2 id="chrcode_point---string"><a class="header" href="#chrcode_point---string">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, U+10FFFF). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int"><a class="header" href="#ordstring---int">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-1"><a class="header" href="#chrcode_point---string-1">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-1"><a class="header" href="#ordstring---int-1">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-2"><a class="header" href="#chrcode_point---string-2">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-2"><a class="header" href="#ordstring---int-2">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-3"><a class="header" href="#chrcode_point---string-3">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-3"><a class="header" href="#ordstring---int-3">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-4"><a class="header" href="#chrcode_point---string-4">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-4"><a class="header" href="#ordstring---int-4">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-5"><a class="header" href="#chrcode_point---string-5">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-5"><a class="header" href="#ordstring---int-5">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
+</code></pre>
+<h2 id="chrcode_point---string-6"><a class="header" href="#chrcode_point---string-6">chr(code_point) -&gt; string</a></h2>
+<p>Returns the one-character string for a Unicode code point (an <code>Int</code> from 0 to 1114111, <code>0x10FFFF</code>). Surrogates (55296 to 57343) are not characters. Anything else is error E0015.</p>
+<pre><code class="language-forge">chr(65)        // "A"
+chr(233)       // "é"
+chr(128512)    // "😀"
+</code></pre>
+<h2 id="ordstring---int-6"><a class="header" href="#ordstring---int-6">ord(string) -&gt; int</a></h2>
+<p>Returns the code point of the only character of a string. A string that is empty or has more than one character is error E0015.</p>
+<pre><code class="language-forge">ord("A")       // 65
+ord("é")       // 233
+ord("\u{feff}") // 65279
+chr(ord("a") + 1)  // "b"
 </code></pre>
 
                     </main>

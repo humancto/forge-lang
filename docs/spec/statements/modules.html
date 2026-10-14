@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "../searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-fdd2f5ad.js"></script>
@@ -244,6 +244,59 @@ say user_name()
 say root(16)        // 4.0
 </code></pre>
 <p>Only functions and variables can be renamed. Structs, <code>type</code> definitions, their variants and interfaces keep their name — their values, methods and <code>match</code> patterns refer to it — so <code>import { Point as P } from "geometry.fg"</code> is error <code>E0019</code>. <code>as</code> is not available in native imports (<code>import native "lib" as name</code> names the whole library instead).</p>
+<h2 id="namespace-imports"><a class="header" href="#namespace-imports">Namespace Imports</a></h2>
+<p><code>import "path" as name</code> binds one name to the module’s namespace instead of
+bringing its definitions into scope:</p>
+<pre><code class="language-forge">// geo.fg
+let TAU = 6.28
+fn area(s) { ... }
+struct Point { x: Int, y: Int = 0 }
+impl Point { fn origin() { return Point { x: 0 } } }
+type Shape = Circle(Float) | Square(Float) | Dot
+</code></pre>
+<pre><code class="language-forge">// main.fg
+import "geo.fg" as geo
+println(geo.TAU)                         // 6.28
+println(geo.area(geo.Circle(2.0)))       // functions and variant constructors
+let p = geo.Point { x: 1 }               // a struct of the module
+let o = geo.Point.origin()               // its static methods
+let kind = match geo.Square(1.0) {
+    geo.Circle(r) =&gt; "circle",           // variants in patterns
+    geo.Square(w) =&gt; "square",
+    geo.Dot =&gt; "dot",
+}
+</code></pre>
+<p>The namespace is a read-only object. Its members are every name the
+module’s top level binds, in definition order, plus <code>__module__</code> (the path as
+written): functions, <code>let</code> variables (destructured names too), <code>type</code> names
+(the type’s description, e.g. <code>geo.Shape.variants</code> is
+<code>["Circle", "Square", "Dot"]</code>; not when a variant has the type’s name),
+variants, interfaces, structs, and the names the module’s own imports bind
+(re-exports). Methods and type tables come with the import as for every
+other form. The module is the same single run as every other import of the file,
+so <code>geo.f()</code> and an <code>f</code> imported with <code>import { f } from "geo.fg"</code> share the
+module’s state. A variable member is the variable’s value when the import
+ran, like <code>import { TAU }</code>; read state that changes through a function.</p>
+<ul>
+<li><code>geo.nope</code> (or <code>geo.nope()</code>) is error <code>E0013</code>,
+<code>module 'geo.fg' has no member 'nope'</code>, with a suggestion when a member
+has a close name. The type checker reports it statically (<code>T0008</code>) and
+checks <code>geo.f(x)</code> against <code>f</code>’s signature, as for a direct import.</li>
+<li><code>geo.x = 1</code> is error <code>E0006</code> (the namespace binding is immutable); a
+namespace has no builtin methods (<code>geo.len()</code> is <code>E0013</code> too).</li>
+<li><code>geo.Name { ... }</code> requires <code>Name</code> to be a struct of the module
+(<code>'geo.Name' is not a struct</code>, <code>E0013</code>, otherwise).</li>
+<li><code>geo.Name(...)</code> (or <code>geo.Name</code>) in a pattern matches only values built by
+the member <code>geo.Name</code>: that variant <em>of that type</em>. If another module’s
+type also has a <code>Name</code> variant, its values do not match. An unknown
+member is <code>E0013</code> (<code>T0008</code> statically) when the arm is tried; a member
+that is not a variant is <code>'geo.Name' is not a variant</code> (<code>E0013</code>). A bare
+<code>Name(...)</code> pattern still matches any value whose variant is <code>Name</code>.</li>
+<li>The namespace is a value: it can be passed to functions and stored;
+<code>typeof(geo)</code> is <code>Object</code>.</li>
+<li><code>import "math" as m</code> is error <code>E0019</code>: built-in modules keep their own
+name.</li>
+</ul>
 <h2 id="built-in-modules"><a class="header" href="#built-in-modules">Built-in Modules</a></h2>
 <p>Forge’s standard library modules (<code>math</code>, <code>fs</code>, <code>io</code>, <code>crypto</code>, <code>db</code>, <code>pg</code>, <code>env</code>, <code>json</code>, <code>regex</code>, <code>log</code>, <code>term</code>, <code>http</code>, <code>csv</code>, <code>exec</code>, <code>time</code>) are automatically available without import. Attempting to <code>import</code> a built-in module name produces an error with guidance:</p>
 <pre><code class="language-forge">import "math"
@@ -272,10 +325,11 @@ say c.debug                 // true
 <pre><code>circular import: a.fg -&gt; b.fg -&gt; a.fg
 </code></pre>
 <p>Move the shared code into a third module to break the cycle.</p>
-<h2 id="no-namespacing"><a class="header" href="#no-namespacing">No Namespacing</a></h2>
-<p>Imported definitions are placed directly into the importing file’s scope. There is no namespace or module prefix for file imports. If two imported files define the same name, the later import overwrites the earlier one; import one of them under another name with <code>as</code> to keep both.</p>
+<h2 id="name-clashes"><a class="header" href="#name-clashes">Name Clashes</a></h2>
+<p><code>import "file.fg"</code> and <code>import { ... } from "file.fg"</code> place definitions directly into the importing file’s scope. If two imported files define the same name, the later import overwrites the earlier one; import one of them under another name with <code>as</code>, or import a module as a namespace, to keep both.</p>
 <pre><code class="language-forge">import "a.fg"                              // defines fn helper()
 import { helper as b_helper } from "b.fg"  // b.fg's helper, renamed
+import "c.fg" as c                         // c.helper()
 </code></pre>
 <h2 id="no-export-keyword"><a class="header" href="#no-export-keyword">No Export Keyword</a></h2>
 <p>Forge does not have an explicit <code>export</code> keyword. All top-level <code>fn</code> and <code>let</code> bindings in a file are automatically available for import by other files.</p>

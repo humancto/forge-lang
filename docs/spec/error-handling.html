@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "navy";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-bd740dd4.js";
+            window.path_to_searchindex_js = "searchindex-d5ff92f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-fdd2f5ad.js"></script>
@@ -221,25 +221,27 @@
 <p>The catch variable receives an object with four fields, in this order:</p>
 <ul>
 <li><code>message</code> — the error message without its hint line (usually one line; an assertion’s <code>left:</code>/<code>right:</code> lines are kept).</li>
-<li><code>type</code> — a legacy classification (table below). Prefer <code>code</code>.</li>
+<li><code>type</code> — a category of the code (table below). Prefer <code>code</code>.</li>
 <li><code>code</code> — the stable error code (<code>E0008</code>), as <code>forge explain</code> lists it.</li>
 <li><code>hint</code> — the suggestion the error carries (<code>"available fields: a, b"</code>, <code>"did you mean 'count'?"</code>), or <code>null</code> when it has none.</li>
 </ul>
-<p>The <code>type</code> is derived from the message’s first line:</p>
+<p>The <code>type</code> is a category of the code, so every error with one code has the
+same type:</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Error Type</th><th>Triggered By</th></tr>
+<tr><th>Error Type</th><th>Codes</th></tr>
 </thead>
 <tbody>
-<tr><td><code>TimeoutError</code></td><td>An HTTP request timed out (<code>E0036</code>)</td></tr>
-<tr><td><code>ConnectionError</code></td><td>An HTTP connection failed (<code>E0037</code>)</td></tr>
-<tr><td><code>TypeError</code></td><td>Message contains “type” or “Type”</td></tr>
-<tr><td><code>ArithmeticError</code></td><td>Message contains “division by zero”</td></tr>
-<tr><td><code>AssertionError</code></td><td>Message contains “assertion”</td></tr>
-<tr><td><code>IndexError</code></td><td>Message contains “index” or “out of bounds”</td></tr>
-<tr><td><code>ReferenceError</code></td><td>Message contains “not found” or “undefined”</td></tr>
-<tr><td><code>RuntimeError</code></td><td>All other errors</td></tr>
+<tr><td><code>TypeError</code></td><td>E0004 E0005 E0006 E0007 E0011 E0012 E0014 E0015 E0017 E0028 E0029 E0034</td></tr>
+<tr><td><code>ReferenceError</code></td><td>E0003 E0010 E0013 E0019</td></tr>
+<tr><td><code>IndexError</code></td><td>E0009</td></tr>
+<tr><td><code>ArithmeticError</code></td><td>E0008</td></tr>
+<tr><td><code>ValueError</code></td><td>E0038 (not a number), E0039 (invalid JSON), E0040 (invalid regex)</td></tr>
+<tr><td><code>AssertionError</code></td><td>E0021 E0022</td></tr>
+<tr><td><code>TimeoutError</code></td><td>E0031 E0036</td></tr>
+<tr><td><code>ConnectionError</code></td><td>E0037</td></tr>
+<tr><td><code>RuntimeError</code></td><td>every other code (E0000, E0016, E0023, E0041, …)</td></tr>
 </tbody>
 </table>
 </div>
