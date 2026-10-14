@@ -1,2 +1,3 @@
-// A malformed JSON document: json.parse reports a parse failure
-let data = json.parse("{not json")
+// A malformed TOML document: toml.parse reports a parse failure, which has
+// no more specific code
+let data = toml.parse("= no key")

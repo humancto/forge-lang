@@ -1,0 +1,33 @@
+// Defines one name of every kind; reexport_lib.fg imports and re-exports them.
+fn twice(x: Int) -> Int {
+    return x * 2
+}
+
+let LIMIT = 10
+let { lo, hi } = { lo: 1, hi: 9 }
+
+struct Pt {
+    x: Int,
+    y: Int = 0
+}
+
+impl Pt {
+    fn sum(it) -> Int {
+        return it.x + it.y
+    }
+}
+
+interface Named {
+    fn name() -> String
+}
+
+type Tok = Num(Int) | End
+
+impl Tok {
+    fn show(it) -> String {
+        return match it {
+            Num(n) => "num " + str(n),
+            End => "end",
+        }
+    }
+}

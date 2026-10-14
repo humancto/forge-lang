@@ -14,7 +14,8 @@ use indexmap::IndexMap;
 use super::bytecode::Chunk;
 use super::compiler::{self, CompileError, CompileOptions};
 use super::machine::{VMError, VM};
-use super::value::{GcRef, ObjKind, Value, ValueKind, VmSet};
+use super::value::{GcRef, ObjKind, Value, ValueKind, VmMap, VmSet};
+
 use crate::interpreter::Value as HostValue;
 use crate::parser::ast::Program;
 
@@ -128,7 +129,8 @@ pub(crate) fn to_vm(vm: &mut VM, v: &HostValue) -> Result<Value, VMError> {
             for (k, x) in pairs {
                 out.push((to_vm(vm, k)?, to_vm(vm, x)?));
             }
-            alloc(vm, ObjKind::Map(out))
+            let map = VmMap::collect_unchecked(out, &vm.gc);
+            alloc(vm, ObjKind::Map(map))
         }
         HostValue::Some(inner) => {
             let inner = to_vm(vm, inner)?;
@@ -228,7 +230,7 @@ pub(crate) fn to_host(vm: &VM, v: Value) -> Result<HostValue, String> {
             for (k, x) in pairs {
                 out.push((to_host(vm, *k)?, to_host(vm, *x)?));
             }
-            HostValue::Map(out)
+            HostValue::Map(crate::interpreter::MapEntries::from_pairs_unchecked(out))
         }
         ObjKind::ResultOk(inner) => HostValue::ResultOk(Box::new(to_host(vm, *inner)?)),
         ObjKind::ResultErr(inner) => HostValue::ResultErr(Box::new(to_host(vm, *inner)?)),

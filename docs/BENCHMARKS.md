@@ -28,8 +28,9 @@ tools/bench_compare.py --base /path/to/old/forge --head target/release/forge
 
 | Suite | Programs | Engine |
 |---|---|---|
-| `vm` | `benchmarks/vm/*.fg`: `loop` (20M-iteration `while`), `fib` (recursive fib(30)), `string_build` (200k `s = s + "x"`), `array_push` (100k `push`), `map_filter` (map/filter/reduce over 1M items), `mandelbrot` (200×200 grid, 50 iterations, pure Float loops), `spectral_norm` (n = 100, Float helper called from array loops), `nbody` (5 bodies, 20k steps over Float arrays), `repeat_loop` / `range_loop` (5M-iteration top-level `repeat` / `for i in range(..)`), `toplevel_loop` / `toplevel_loop_fn` (the same 5M-iteration `while` at the top level and inside a function), `toplevel_string` (`string_build` at the top level), `toplevel_captured` (2M calls of a top-level `fn` that updates a captured top-level variable), `global_calls` (2M iterations reading two builtins as globals), and the higher-order collection shapes: `reduce_lambda` (`reduce` over 1M items with an arithmetic lambda), `sort_comparator` (`sort` of 200k pseudo-random ints with a comparator lambda), `stream_chain` (a lazy `.stream()` filter/map/reduce over 1M items), `records_pipeline` (300k objects built with `map`, then `.filter`/`.map`/`.reduce` reading their fields), and container building: `word_count` (100k words, 5,000 distinct, `counts[w] = get(counts, w, 0) + 1` at the top level), `object_build` (an object with 50k computed keys, `ob[k] = v`), `push_records` (100k `recs.push({ id: i, name: ... })`) | default (VM with JIT tier-up) |
-| `interp` | `benchmarks/interp/*.fg`: array reads, deep recursion, fib, push via method and reassignment, set building, string building, and the `vm` suite's `word_count`, `object_build`, `push_records` | `--interp` |
+| `vm` | `benchmarks/vm/*.fg`: `loop` (20M-iteration `while`), `fib` (recursive fib(30)), `string_build` (200k `s = s + "x"`), `array_push` (100k `push`), `map_filter` (map/filter/reduce over 1M items), `mandelbrot` (200×200 grid, 50 iterations, pure Float loops), `spectral_norm` (n = 100, Float helper called from array loops), `nbody` (5 bodies, 20k steps over Float arrays), `repeat_loop` / `range_loop` (5M-iteration top-level `repeat` / `for i in range(..)`), `toplevel_loop` / `toplevel_loop_fn` (the same 5M-iteration `while` at the top level and inside a function), `toplevel_string` (`string_build` at the top level), `toplevel_captured` (2M calls of a top-level `fn` that updates a captured top-level variable), `global_calls` (2M iterations reading two builtins as globals), and the higher-order collection shapes: `reduce_lambda` (`reduce` over 1M items with an arithmetic lambda), `sort_comparator` (`sort` of 200k pseudo-random ints with a comparator lambda), `stream_chain` (a lazy `.stream()` filter/map/reduce over 1M items), `records_pipeline` (300k objects built with `map`, then `.filter`/`.map`/`.reduce` reading their fields), and container building: `word_count` (100k words, 5,000 distinct, `counts[w] = get(counts, w, 0) + 1` at the top level), `object_build` (an object with 50k computed keys, `ob[k] = v`), `push_records` (100k `recs.push({ id: i, name: ... })`), `map_build` (a `Map` with 100k computed String keys built with `m = m.set(k, v)`, then every key looked up with `m.has`/`m.get`), `computed_keys` (300k `o[names[i]] += 1` / `o[r.sku] += 1` / `o[str(i)] += 1` on a 10k-key object), `captured_writes` (union-find over 50k nodes in top-level arrays updated by a function), `global_writes` (the same with the function written above the arrays, which makes them VM globals), `deep_push` (200k `r[k].lat.push(i)`), `regex_lines` (50k lines, five `regex` calls each) | default (VM with JIT tier-up) |
+| `interp` | `benchmarks/interp/*.fg`: array reads, deep recursion, fib, push via method and reassignment, set building, string building, and the `vm` suite's `word_count`, `object_build`, `push_records`, `map_build`, `captured_writes`, `regex_lines`; `slice_scan` (a function scanning a 20k-element top-level array with `slice`/`join`/`first`) | `--interp` |
+| `typed` | `benchmarks/typed/*.fg`: annotated code whose argument and result types are checked at run time: `sudoku` (backtracking over three puzzles, two small annotated functions called ~200k times), `geometry` (300k iterations calling helpers with widened `Float`, struct and `?Int` parameters) | `--edition 2027` |
 | `startup` | `benchmarks/startup/hello.fg` run 20 times per sample (`STARTUP_BATCH`) | default |
 | `peers` | `benchmarks/peers/*.{py,js,lua}`: line-for-line ports of the `vm` suite | `python3`, `node`, `lua`/`luajit` |
 
@@ -316,3 +317,144 @@ is object creation (a `String` per key and an `IndexMap` per record) and
 `str(i)`, shared with `records_pipeline`. On the regression gate
 (`tools/bench_compare.py`, interleaved rounds against v0.11.0) no other
 `vm`/`interp`/`startup` benchmark changed beyond this host's noise.
+
+## Maps
+
+`Map` values were association lists (eval tier v2, finding 13): `m.get(k)`,
+`m.has(k)`, `m.set(k, v)` and `m.remove(k)` scanned every entry, and
+`m.set`/`m.remove` returned a copy of the whole map, so building a map with
+`m = m.set(k, v)` in a loop was quadratic in time (and, on the VM, in
+garbage: the 100k-entry build was killed for memory). Benchmark:
+`map_build` in `benchmarks/vm/` and `benchmarks/interp/`, with Python and
+Node ports.
+
+### What changed
+
+- Maps use the set container (`semantics::ordered_set`), keyed: an
+  insertion-ordered list of entries plus a hash index on the key, hashed
+  and compared with each engine's set rules (`1` and `1.0` one key, NaN
+  finds NaN, nested values by content). Lookups, inserts and removals are
+  O(1) on average; order, printing, equality and conversions are
+  unchanged.
+- Interpreter: `m = m.set(k, v)` / `m = m.remove(k)` on a `let mut`
+  variable (effect-free arguments, which include `m.get(k)`) update the
+  binding in place; `m.get`/`m.has`/`m.len` borrow it.
+- VM: `m = m.set(k, v)` / `m = m.remove(k)` on a mutable local compile to
+  `UpdateMapLocal`, which updates a map the local owns in place
+  (`GcObject::unique`, as for `PushLocal`/`UpdateSetLocal`); `m.get`,
+  `m.has`, `m.len` and `s.has` on a local read it with `PeekLocal` +
+  `CallPure`, so a read does not make the next update copy the map.
+
+What still copies: `let b = a.set(k, v)` (a new map is a new value: one
+O(n) copy plus an O(1) update), the first update after the map was shared
+(passed to a function, stored in another variable or container, captured
+by a closure), and updates of a captured or global variable.
+
+### Numbers
+
+Measured 2026-10-13, release build, the same loaded 4-vCPU host
+(`tools/bench.sh`, 5 runs, median, whole process in seconds). "Before" is
+the commit before this change. The before column at 100k is extrapolated
+from the measured quadratic growth (10k and 20k entries below); the VM run
+was killed for memory after 77 s and the interpreter run did not finish in
+300 s.
+
+| Workload | VM before | VM after | interp before | interp after | Python 3.11 | Node 22 |
+|---|---:|---:|---:|---:|---:|---:|
+| `map_build`, 10k entries | 2.82 | 0.034 | 9.44 | 0.043 | | |
+| `map_build`, 20k entries | 11.96 | 0.058 | 35.4 | 0.074 | | |
+| `map_build`, 100k entries | ~300 (killed) | 0.31 | ~900 (> 300) | 0.38 | 0.10 | 0.097 |
+
+What remains is mostly building the 200k key strings (`"k" + str(i)`) and
+hashing them. The other `vm`/`interp` benchmarks (`fib`, `loop`,
+`array_push`, `object_build`, `word_count`, `set_build`) were unchanged
+within this host's noise.
+
+## Annotated code in edition 2027
+
+Edition 2027 (and `--strict`) checks the arguments and results of annotated functions on
+every call (`typechecker::enforce` inserts `__types.check(value, "<type>", "<context>")`).
+As calls, those checks cost about a microsecond each on the VM: small hot annotated
+functions ran 2-3x slower than the same program in edition 2026 (eval tier v3, finding 21:
+sudoku_solver 0.7 s → 2.1 s). The `typed` suite (`tools/bench.sh --suite typed`; add
+`-- --edition 2026` for the same programs without checks) measures this.
+
+### What changed
+
+- The VM compiler puts a `TypeCheck` opcode (`src/vm/type_check.rs`) in front of every
+  check of a common type: `Int`, `Float`, `String`, `Bool`, `Null`, `Object`, a struct or
+  `type` name, arrays of scalars and `?T` of those. When the value certainly fits and
+  nothing would be widened it takes the jump over the call; otherwise the original call
+  decides, so errors and Int → Float widening are unchanged. An argument check (a
+  statement on a local) reads the local in place: a passing check is one instruction.
+- The JIT decides `TypeCheck` from the value's kind, so checked pure functions stay native.
+- `enforce` leaves out checks of results that always fit: literals (`return true`,
+  `return "a{x}"`, `return null` for `?T`) and comparisons or `&&`/`||`/`!` for `Bool`.
+
+### Numbers
+
+Measured 2026-10-13 on a debug build (`opt-level = 1`; the host had no disk for a release
+build), the loaded 4-vCPU host above (load average ~17). Whole process in seconds, median
+of 7 (minimum in parentheses); "before" is the tree before the change.
+
+| Program | 2026 | 2027 before | 2027 after |
+|---|---:|---:|---:|
+| `typed/sudoku` | 0.92 (0.90) | 2.29 (1.99) | 1.20 (1.05) |
+| eval v3 `sudoku_solver` reference | 1.11 (1.03) | 2.37 (2.19) | 1.14 (1.07) |
+| `typed/geometry` | 0.68 (0.62) | (rejected by the checker before V3 finding 18) | 0.82 (0.73) |
+
+What is left is mostly the extra dispatch of the check's jump in value positions and the
+struct-tag lookup of a named type; an argument check that fails or widens still pays the
+full call.
+
+## Regexes, borrowed arguments and captured containers
+
+Eval tier v3 (`eval/V3_FINDINGS.md`, findings 1-4 and 22) found five
+performance cliffs that made natural code time out or exhaust memory:
+
+- every `regex.*` call compiled its pattern (~40 µs per call, both engines);
+- the interpreter copied a variable passed to a read-only builtin, so
+  `slice(chars, i, j)` on a large top-level array was O(n) per call;
+- on the VM, reading `o[xs[i]]`, `o[it.sku]` or `o[str(i)]` shared the
+  object, so the write in `o[k] += 1` copied all of it;
+- on the VM, a function writing an element of a captured top-level array
+  (and the top level writing an array a function captures) copied it per
+  write;
+- on the VM, `r[k].lat.push(x)` copied the inner array per push.
+
+### What changed
+
+- `regex_module::compiled`: a bounded LRU of 256 compiled patterns per
+  process, or per run when the run has a resource budget.
+- Interpreter: `places::read_only_builtin` runs `slice`, `first`, `last`,
+  `join`, `index_of`, `last_index_of`, `substring`, `starts_with`,
+  `ends_with` on a borrowed first argument (a variable or a field/index
+  chain of one), like `len`/`contains`/`get`/`has_key` before.
+- VM: index reads whose key runs no code use `GetIndexLocal`; keys that may
+  call read a `PeekLocal` snapshot. A captured local and its upvalue cell
+  are one owner (`GetUpvalue` shares), and functions alias the captured
+  containers they use with `BindUpvalue`, so the local in-place opcodes
+  apply; a global slot owns its value too (`GetGlobal` shares) and one
+  statement aliases it with `BindGlobal`. `PushPlaceLocal` pushes through
+  chains of two or more steps.
+
+### Numbers
+
+`tools/bench.sh`, whole process in seconds (median of 3 after, a single run
+before), on the `dev` profile build (`opt-level = 1`) of the commit before
+the change and of the change, on the shared 4-vCPU host (load from parallel
+compile jobs: absolute times are pessimistic).
+
+| Workload | VM before | VM after | interp before | interp after |
+|---|---:|---:|---:|---:|
+| `regex_lines`: 50k lines, 5 regex calls each | 75.5 | 0.97 | 72.8 | 0.99 |
+| `slice_scan`: 20k `slice`+`join` on a captured array | | | 121.1 | 0.12 |
+| `computed_keys`: 300k updates, 10k-key object | killed (memory) | 0.36 | | |
+| `captured_writes`: union-find, 50k nodes | 15.4 | 0.25 | 0.72 | 0.62 |
+| `global_writes`: the same, `find` above the `let`s | 11.4 | 0.16 | | |
+| `deep_push`: 200k `r[k].lat.push(i)` | 10.8 | 0.31 | | |
+
+The other `vm` benchmarks (`fib`, `global_calls`, `toplevel_captured`,
+`map_filter`, `string_build`, `push_records`, `records_pipeline`,
+`stream_chain`) were unchanged within this host's noise (two interleaved
+rounds of 3 runs).

@@ -1,0 +1,108 @@
+// Recursive-descent parser for nested integer lists, nesting up to 3,000
+// levels: parser state in top-level `let mut` bindings, errors as
+// Err(...) propagated with `?` through the recursion.
+
+let mut chars = []
+let mut pos = 0
+let mut lists = 0
+let mut ints = 0
+let mut max_depth = 0
+let mut weighted = 0
+
+fn peek() -> String {
+    if pos < len(chars) {
+        return chars[pos]
+    }
+    return ""
+}
+
+fn skip_spaces() {
+    while peek() == " " {
+        pos += 1
+    }
+    return null
+}
+
+fn is_digit(c: String) -> Bool {
+    return c != "" && contains("0123456789", c)
+}
+
+fn unexpected() {
+    let c = peek()
+    let what = if c == "" { "end of line" } else { "'{c}'" }
+    return Err("error at col {pos + 1}: unexpected {what}")
+}
+
+fn parse_value(depth: Int) {
+    skip_spaces()
+    let c = peek()
+    if c == "[" {
+        return parse_list(depth + 1)
+    }
+    if c == "-" || is_digit(c) {
+        let start = pos
+        if c == "-" {
+            pos += 1
+        }
+        if !is_digit(peek()) {
+            return unexpected()
+        }
+        while is_digit(peek()) {
+            pos += 1
+        }
+        let n = int(join(slice(chars, start, pos), ""))
+        ints += 1
+        weighted += n * depth
+        return Ok(null)
+    }
+    return unexpected()
+}
+
+fn parse_list(depth: Int) {
+    pos += 1
+    lists += 1
+    max_depth = max(max_depth, depth)
+    skip_spaces()
+    if peek() == "]" {
+        pos += 1
+        return Ok(null)
+    }
+    loop {
+        parse_value(depth)?
+        skip_spaces()
+        let c = peek()
+        if c == "," {
+            pos += 1
+        } else if c == "]" {
+            pos += 1
+            return Ok(null)
+        } else {
+            return unexpected()
+        }
+    }
+}
+
+fn parse_line(line: String) {
+    chars = split(line, "")
+    pos = 0
+    lists = 0
+    ints = 0
+    max_depth = 0
+    weighted = 0
+    parse_value(0)?
+    skip_spaces()
+    if pos < len(chars) {
+        return unexpected()
+    }
+    return Ok("depth={max_depth} lists={lists} ints={ints} weighted={weighted}")
+}
+
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    match parse_line(line) {
+        Ok(summary) => println(summary),
+        Err(msg) => println(msg),
+    }
+}

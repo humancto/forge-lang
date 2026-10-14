@@ -18,9 +18,10 @@ The same rules apply on every engine (`--interp`, the VM, `--jit`). Editors rece
 | `Int`, `Float`, `String`, `Bool`, `Null` | as shown (`int`, `str`, `boolean`, ... are accepted aliases) | primitives |
 | `Any` | `Any` (also `Json`) | anything |
 | `Object` | `Object` | object literals and struct instances |
+| `Object<T>` | `Object<Int>`, `Object<[String]>` | objects whose values are all `T` (string keys): a typed dictionary |
 | `[T]` | `[Int]`, `Array<T>` | arrays whose elements are `T` |
 | `(A, B)` | `(Int, String)` | tuples |
-| `Set<T>`, `Map<K, V>` | as shown | sets and maps |
+| `Set<T>`, `Map<K, V>` | as shown | sets and `Map` values (`map()`); an object is never a `Map` |
 | `?T` | `?Int`, `Option<Int>` | `T`, `null`, `None` or `Some(t)` |
 | `Result<T, E>` | as shown | `Ok(t)` / `Err(e)` |
 | `fn(A, B) -> R` | `fn(Int) -> Bool`, `fn()` | functions and lambdas |
@@ -29,6 +30,38 @@ The same rules apply on every engine (`--interp`, the VM, `--jit`). Editors rece
 `type Id = Int | String` declares a union alias; `type Shape = Circle(Float) | Rect(Float, Float)` declares an algebraic data type whose variants are constructors.
 
 Assignability: `Any` fits everything in both directions; `Int` fits `Float` (but not the reverse); `?T` accepts `null`, `T` and `?U` when `U` fits `T`; a union accepts any of its members; function types are contravariant in parameters and covariant in results; collections compare element-wise; an `Object` and a struct instance are interchangeable. A struct satisfies an interface structurally: it must provide every interface member as a field or method, with matching parameter counts and return types.
+
+
+### Typed objects
+
+`Object<T>` is the annotation for an object used as a dictionary: string keys (as
+in every object) and values of type `T`. An object literal or a parsed JSON
+object fits it when every value fits `T`; internal fields (`__type__`, ...)
+are not values.
+
+```forge
+let ages: Object<Int> = { ada: 36, alan: 41 }
+fn total(counts: Object<Int>) -> Int {
+    let mut sum = 0
+    for k, v in counts {        // v: Int
+        sum = sum + v
+    }
+    return sum
+}
+let ok = total(json.parse("""{"a": 1, "b": 2}"""))
+let bad: Object<Int> = { a: 1, b: "x" }   // T0001: assigned Object<String>
+```
+
+The checker checks the values of an object literal against `T` (like the
+elements of an array literal against `[T]`), types `o.key`, `o[key]` and
+`for k, v in o` with `T`, and checks `o.key = v` / `o[key] = v`. An object
+whose values it cannot see (`Object`, `json.parse(...)`) is accepted
+statically; under `--strict` and from edition 2027, annotated function
+arguments and results are checked at run time (`type error: argument
+'counts' of 'total' must be Object<Int>, got Object`), and a declared
+`Object<Float>` turns Int values into Floats. `Map<String, Int>` is the
+`Map` value type and does not accept an object
+(`T0001`, with a hint to write `Object<Int>`).
 
 ## Inference
 

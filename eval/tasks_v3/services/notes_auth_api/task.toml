@@ -1,0 +1,254 @@
+id = "notes_auth_api"
+category = "services"
+title = "Notes API with bearer tokens, ownership checks and paging headers"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18522 for personal notes, stored in the SQLite
+database file `notes.db` in the working directory (create it when missing). Responses with
+a body are JSON.
+
+There are three fixed users, identified by the request header
+`Authorization: Bearer <token>`: token `tok-ada` is user `ada`, `tok-bob` is `bob`, and
+`tok-cy` is `cy`, who is an admin. Every route answers 401 `{"error": "unauthorized"}` with
+the header `WWW-Authenticate: Bearer realm="notes"` when the header is missing or the
+token is unknown (check this first).
+
+A note is `{"id": <int>, "owner": <user>, "title": <string>, "body": <string>,
+"tags": [<strings>]}`; ids start at 1.
+
+- `POST /notes` with `{"title": ..., "body": ..., "tags": [...]}` creates a note owned by
+  the caller and answers 201 with it and `Location: /notes/<id>`. The title is trimmed and
+  must be a string of 1 to 80 characters after trimming, else 422
+  `{"error": "title must be 1-80 characters"}`. `body` is optional (default `""`) and must
+  be a string: 422 `{"error": "body must be a string"}`. `tags` is optional (default `[]`)
+  and must be an array of at most 5 items: 422
+  `{"error": "tags must be a list of up to 5 tags"}`; each tag must be 1 to 20 characters
+  from `a-z`, `0-9`, `-`, else 422 `{"error": "invalid tag: <tag>"}` (the first invalid
+  one); repeated tags are kept once, in first-seen order. Check in this order: title,
+  body, tags.
+- `GET /notes`: the notes the caller may see (their own; an admin sees all), ordered by
+  id, as `{"notes": [...]}`, with the header `X-Total-Count: <number of matching notes>`.
+  Query parameters: `tag` (only notes with that tag), `limit` (default 10; must be an
+  integer from 1 to 50, else 400 `{"error": "invalid limit"}`) and `offset` (default 0;
+  a non-negative integer, else 400 `{"error": "invalid offset"}`); the page is the
+  matching notes from position offset, at most limit of them. X-Total-Count counts all
+  matching notes, not just the page.
+- `GET /notes/<id>`: 404 `{"error": "not found"}` if there is no such note (or the id is
+  not a number); 403 `{"error": "forbidden"}` if it belongs to someone else and the caller
+  is not an admin; else 200 with the note.
+- `DELETE /notes/<id>`: the same 404 / 403 rules, else delete it and answer 204 with no body.
+- `GET /me`: `{"user": <name>, "admin": <bool>, "notes": <number of notes the caller owns>}`.
+
+The server runs until it is stopped.
+"""
+needs = ["net", "read", "write", "db"]
+timeout = 40
+mode = "server"
+port = 18522
+expected_stdout = """
+STATUS 401
+www-authenticate: Bearer realm="notes"
+{"error": "unauthorized"}
+STATUS 401
+{"error": "unauthorized"}
+STATUS 201
+location: /notes/1
+{"body": "milk", "id": 1, "owner": "ada", "tags": ["home", "todo"], "title": "Groceries"}
+STATUS 201
+{"body": "", "id": 2, "owner": "ada", "tags": ["work"], "title": "\\u00dcn\\u00efc\\u00f6d\\u00e9 \\u2713 notes"}
+STATUS 201
+{"body": "", "id": 3, "owner": "bob", "tags": ["work", "q3"], "title": "Bob plan"}
+STATUS 422
+{"error": "title must be 1-80 characters"}
+STATUS 422
+{"error": "title must be 1-80 characters"}
+STATUS 422
+{"error": "tags must be a list of up to 5 tags"}
+STATUS 422
+{"error": "tags must be a list of up to 5 tags"}
+STATUS 422
+{"error": "invalid tag: Bad Tag"}
+STATUS 422
+{"error": "body must be a string"}
+STATUS 200
+x-total-count: 2
+{"notes": [{"body": "milk", "id": 1, "owner": "ada", "tags": ["home", "todo"], "title": "Groceries"}, {"body": "", "id": 2, "owner": "ada", "tags": ["work"], "title": "\\u00dcn\\u00efc\\u00f6d\\u00e9 \\u2713 notes"}]}
+STATUS 200
+x-total-count: 2
+{"notes": [{"body": "", "id": 2, "owner": "ada", "tags": ["work"], "title": "\\u00dcn\\u00efc\\u00f6d\\u00e9 \\u2713 notes"}, {"body": "", "id": 3, "owner": "bob", "tags": ["work", "q3"], "title": "Bob plan"}]}
+STATUS 200
+x-total-count: 3
+{"notes": [{"body": "", "id": 2, "owner": "ada", "tags": ["work"], "title": "\\u00dcn\\u00efc\\u00f6d\\u00e9 \\u2713 notes"}]}
+STATUS 400
+{"error": "invalid limit"}
+STATUS 400
+{"error": "invalid limit"}
+STATUS 400
+{"error": "invalid offset"}
+STATUS 403
+{"error": "forbidden"}
+STATUS 200
+{"body": "", "id": 3, "owner": "bob", "tags": ["work", "q3"], "title": "Bob plan"}
+STATUS 404
+{"error": "not found"}
+STATUS 403
+{"error": "forbidden"}
+STATUS 204
+
+STATUS 404
+{"error": "not found"}
+STATUS 200
+{"admin": false, "notes": 1, "user": "ada"}
+STATUS 200
+{"admin": true, "notes": 0, "user": "cy"}
+CONCURRENT 25
+x25 STATUS 201
+STATUS 200
+x-total-count: 25
+STATUS 200
+x-total-count: 0
+{"notes": []}
+"""
+
+[[request]]
+path = "/me"
+show_headers = ["WWW-Authenticate"]
+
+[[request]]
+path = "/notes"
+headers = { Authorization = "Bearer nope" }
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": " Groceries ", "body": "milk", "tags": ["home", "todo", "home"]}'
+headers = { Authorization = "Bearer tok-ada" }
+show_headers = ["Location"]
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": "Ünïcödé ✓ notes", "tags": ["work"]}'
+headers = { Authorization = "Bearer tok-ada" }
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": "Bob plan", "tags": ["work", "q3"]}'
+headers = { Authorization = "Bearer tok-bob" }
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": "   "}'
+headers = { Authorization = "Bearer tok-bob" }
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}'
+headers = { Authorization = "Bearer tok-bob" }
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": "t", "tags": ["a", "b", "c", "d", "e", "f"]}'
+headers = { Authorization = "Bearer tok-bob" }
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": "t", "tags": "work"}'
+headers = { Authorization = "Bearer tok-bob" }
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": "t", "tags": ["ok", "Bad Tag"]}'
+headers = { Authorization = "Bearer tok-bob" }
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": "t", "body": 5, "tags": ["Bad Tag"]}'
+headers = { Authorization = "Bearer tok-bob" }
+
+[[request]]
+path = "/notes"
+headers = { Authorization = "Bearer tok-ada" }
+show_headers = ["X-Total-Count"]
+
+[[request]]
+path = "/notes?tag=work"
+headers = { Authorization = "Bearer tok-cy" }
+show_headers = ["X-Total-Count"]
+
+[[request]]
+path = "/notes?limit=1&offset=1"
+headers = { Authorization = "Bearer tok-cy" }
+show_headers = ["X-Total-Count"]
+
+[[request]]
+path = "/notes?limit=0"
+headers = { Authorization = "Bearer tok-cy" }
+
+[[request]]
+path = "/notes?limit=abc"
+headers = { Authorization = "Bearer tok-ada" }
+
+[[request]]
+path = "/notes?offset=-1"
+headers = { Authorization = "Bearer tok-ada" }
+
+[[request]]
+path = "/notes/3"
+headers = { Authorization = "Bearer tok-ada" }
+
+[[request]]
+path = "/notes/3"
+headers = { Authorization = "Bearer tok-cy" }
+
+[[request]]
+path = "/notes/99"
+headers = { Authorization = "Bearer tok-ada" }
+
+[[request]]
+method = "DELETE"
+path = "/notes/1"
+headers = { Authorization = "Bearer tok-bob" }
+
+[[request]]
+method = "DELETE"
+path = "/notes/1"
+headers = { Authorization = "Bearer tok-ada" }
+
+[[request]]
+method = "DELETE"
+path = "/notes/1"
+headers = { Authorization = "Bearer tok-ada" }
+
+[[request]]
+path = "/me"
+headers = { Authorization = "Bearer tok-ada" }
+
+[[request]]
+path = "/me"
+headers = { Authorization = "Bearer tok-cy" }
+
+[[request]]
+method = "POST"
+path = "/notes"
+body = '{"title": "bulk {i}", "tags": ["bulk"]}'
+headers = { Authorization = "Bearer tok-bob" }
+concurrent = 25
+status_only = true
+
+[[request]]
+path = "/notes?tag=bulk&limit=50"
+headers = { Authorization = "Bearer tok-bob" }
+status_only = true
+show_headers = ["X-Total-Count"]
+
+[[request]]
+path = "/notes?tag=bulk&limit=5"
+headers = { Authorization = "Bearer tok-ada" }
+show_headers = ["X-Total-Count"]

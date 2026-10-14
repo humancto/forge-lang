@@ -1,0 +1,137 @@
+// Replay 200,000 ledger operations: balances in an object, frozen accounts
+// in a Set, one pass.
+
+fn dollars(c: Int) -> String {
+    let cents = c % 100
+    let pad = if cents < 10 { "0" } else { "" }
+    return "{c / 100}.{pad}{cents}"
+}
+
+// A non-empty run of ASCII digits.
+fn is_digits(s: String) -> Bool {
+    return regex.test(s, "^[0-9]+$")
+}
+
+// A positive integer amount, or -1.
+fn amount(s: String) -> Int {
+    if !is_digits(s) {
+        return -1
+    }
+    let n = int(s)
+    if n <= 0 {
+        return -1
+    }
+    return n
+}
+
+fn cmp_str(a: String, b: String) -> Int {
+    if a < b {
+        return -1
+    }
+    if a > b {
+        return 1
+    }
+    return 0
+}
+
+let lines = fs.lines("/dev/stdin")
+let mut bal = {}
+let mut frozen = set([])
+let mut applied = 0
+let mut rej_frozen = 0
+let mut rej_insuf = 0
+let mut invalid = 0
+let mut peak_bal = -1
+let mut peak_acct = ""
+let mut peak_line = 0
+let mut n = 0
+
+for line in lines {
+    n += 1
+    let f = split(line, " ")
+    let op = f[0]
+    let mut ok = false
+    if (op == "deposit" || op == "withdraw") && len(f) == 3 && amount(f[2]) > 0 {
+        ok = true
+    } else if op == "transfer" && len(f) == 4 && amount(f[3]) > 0 && f[1] != f[2] {
+        ok = true
+    } else if (op == "freeze" || op == "unfreeze") && len(f) == 2 {
+        ok = true
+    }
+    if !ok {
+        invalid += 1
+        continue
+    }
+    let a = f[1]
+    if !has_key(bal, a) {
+        bal[a] = 0
+    }
+    if op == "transfer" {
+        if !has_key(bal, f[2]) {
+            bal[f[2]] = 0
+        }
+    }
+    let mut touched = ""
+    if op == "freeze" {
+        frozen.add(a)
+        applied += 1
+    } else if op == "unfreeze" {
+        frozen.remove(a)
+        applied += 1
+    } else if op == "deposit" {
+        if frozen.has(a) {
+            rej_frozen += 1
+        } else {
+            bal[a] += amount(f[2])
+            applied += 1
+            touched = a
+        }
+    } else if op == "withdraw" {
+        let x = amount(f[2])
+        if frozen.has(a) {
+            rej_frozen += 1
+        } else if bal[a] < x {
+            rej_insuf += 1
+        } else {
+            bal[a] -= x
+            applied += 1
+        }
+    } else {
+        let b = f[2]
+        let x = amount(f[3])
+        if frozen.has(a) || frozen.has(b) {
+            rej_frozen += 1
+        } else if bal[a] < x {
+            rej_insuf += 1
+        } else {
+            bal[a] -= x
+            bal[b] += x
+            applied += 1
+            touched = b
+        }
+    }
+    if touched != "" && bal[touched] > peak_bal {
+        peak_bal = bal[touched]
+        peak_acct = touched
+        peak_line = n
+    }
+}
+
+println("lines: {len(lines)}")
+println("applied: {applied}")
+println("rejected: frozen={rej_frozen} insufficient={rej_insuf}")
+println("invalid: {invalid}")
+println("accounts: {len(keys(bal))}")
+println("frozen: {len(frozen)}")
+println("total: {dollars(sum(values(bal)))}")
+println("top:")
+let ranked = sort(entries(bal), fn(x, y) {
+    if x[1] != y[1] {
+        return y[1] - x[1]
+    }
+    return cmp_str(x[0], y[0])
+})
+for e in slice(ranked, 0, 5) {
+    println("{e[0]} {dollars(e[1])}")
+}
+println("peak: {peak_acct} {dollars(peak_bal)} at line {peak_line}")

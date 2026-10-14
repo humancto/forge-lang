@@ -12,12 +12,14 @@ pub mod green;
 pub mod jit;
 mod local_ops; // local-variable access and in-place update opcodes
 pub mod machine;
+mod module_share; // a module runs once per program across spawned tasks
 pub mod nanbox;
 pub mod profiler;
 mod range_loop; // counting `for v in range(..)` / `repeat n times` loops
 pub mod serialize;
 #[cfg(feature = "host")]
 pub mod serve;
+mod type_check; // fast path of annotation checks (`TypeCheck`)
 pub mod value;
 pub mod verify;
 
@@ -61,6 +63,8 @@ mod async_tests;
 #[cfg(test)]
 mod callback_tests;
 #[cfg(test)]
+mod captured_container_tests;
+#[cfg(test)]
 mod container_ops_tests;
 #[cfg(test)]
 mod enum_methods_tests;
@@ -70,6 +74,8 @@ mod globals_tests;
 mod jit_tests;
 #[cfg(test)]
 mod limits_tests;
+#[cfg(test)]
+mod map_index_tests;
 #[cfg(test)]
 mod map_tests;
 #[cfg(test)]
@@ -92,3 +98,5 @@ mod squad_tests;
 mod stream_tests;
 #[cfg(test)]
 mod tuple_tests;
+#[cfg(test)]
+mod type_check_tests;

@@ -41,22 +41,24 @@ try {
 The catch variable receives an object with four fields, in this order:
 
 - `message` — the error message without its hint line (usually one line; an assertion's `left:`/`right:` lines are kept).
-- `type` — a legacy classification (table below). Prefer `code`.
+- `type` — a category of the code (table below). Prefer `code`.
 - `code` — the stable error code (`E0008`), as `forge explain` lists it.
 - `hint` — the suggestion the error carries (`"available fields: a, b"`, `"did you mean 'count'?"`), or `null` when it has none.
 
-The `type` is derived from the message's first line:
+The `type` is a category of the code, so every error with one code has the
+same type:
 
-| Error Type        | Triggered By                                |
-| ----------------- | ------------------------------------------- |
-| `TimeoutError`    | An HTTP request timed out (`E0036`)         |
-| `ConnectionError` | An HTTP connection failed (`E0037`)         |
-| `TypeError`       | Message contains "type" or "Type"           |
-| `ArithmeticError` | Message contains "division by zero"         |
-| `AssertionError`  | Message contains "assertion"                |
-| `IndexError`      | Message contains "index" or "out of bounds" |
-| `ReferenceError`  | Message contains "not found" or "undefined" |
-| `RuntimeError`    | All other errors                            |
+| Error Type        | Codes                                                                    |
+| ----------------- | ------------------------------------------------------------------------ |
+| `TypeError`       | E0004 E0005 E0006 E0007 E0011 E0012 E0014 E0015 E0017 E0028 E0029 E0034 |
+| `ReferenceError`  | E0003 E0010 E0013 E0019                                                  |
+| `IndexError`      | E0009                                                                    |
+| `ArithmeticError` | E0008                                                                    |
+| `ValueError`      | E0038 (not a number), E0039 (invalid JSON), E0040 (invalid regex)        |
+| `AssertionError`  | E0021 E0022                                                              |
+| `TimeoutError`    | E0031 E0036                                                              |
+| `ConnectionError` | E0037                                                                    |
+| `RuntimeError`    | every other code (E0000, E0016, E0023, E0041, ...)                       |
 
 ## Subsections
 

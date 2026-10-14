@@ -1,0 +1,86 @@
+id = "word_tool_args"
+category = "cli_text"
+title = "Word-count tool driven by command-line options"
+prompt = """
+Write a command-line word counter. The program is started with options after the program
+name (for example `--top 3 --ignore-case`) and reads the text from standard input.
+
+Options: `--top N` (how many words to print, default 5), `--min-length N` (ignore words
+shorter than N characters, default 1), `--ignore-case` (count words lower-cased). N must
+be a positive integer (digits only). Options may come in any order. On a usage error
+print `error: <message>` and then
+`usage: wordtool [--top N] [--min-length N] [--ignore-case] [--]` to standard error and
+exit with status 2, where message is `<option> needs a value` (the option is the last
+argument), `<option> needs a positive integer, got '<value>'`, or
+`unknown option '<argument>'` (the first problem from left to right).
+
+A word is a maximal run of ASCII letters and apostrophes, with apostrophes at its start
+and end removed (skip it if nothing is left). Print the top N words by count (ties: word
+ascending by code point) as the count right-aligned in 4 characters, a space and the word.
+Then print `<number of distinct counted words> distinct words` to standard error.
+"""
+needs = []
+
+[[case]]
+name = "defaults"
+stdin = """
+It's the cat's 'toy': the CAT, the Cat and the toy's box. The end, the END.
+"""
+expected_stdout = """
+   5 the
+   1 CAT
+   1 Cat
+   1 END
+   1 It's
+"""
+expected_stderr = """
+12 distinct words
+"""
+
+[[case]]
+name = "options"
+args = ["--min-length", "3", "--ignore-case", "--top", "3"]
+stdin = """
+It's the cat's 'toy': the CAT, the Cat and the toy's box. The end, the END.
+"""
+expected_stdout = """
+   6 the
+   2 cat
+   2 end
+"""
+expected_stderr = """
+9 distinct words
+"""
+
+[[case]]
+name = "bad_value"
+args = ["--top", "0"]
+stdin = "a b c\n"
+expected_stdout = ""
+expected_stderr = """
+error: --top needs a positive integer, got '0'
+usage: wordtool [--top N] [--min-length N] [--ignore-case] [--]
+"""
+exit_code = 2
+
+[[case]]
+name = "missing_value"
+args = ["--ignore-case", "--min-length"]
+stdin = "a b c\n"
+expected_stdout = ""
+expected_stderr = """
+error: --min-length needs a value
+usage: wordtool [--top N] [--min-length N] [--ignore-case] [--]
+"""
+exit_code = 2
+
+[[case]]
+name = "unknown"
+args = ["--top", "2", "--verbose", "--top", "x"]
+stdin = "a b c\n"
+expected_stdout = ""
+expected_stderr = """
+error: unknown option '--verbose'
+usage: wordtool [--top N] [--min-length N] [--ignore-case] [--]
+"""
+exit_code = 2

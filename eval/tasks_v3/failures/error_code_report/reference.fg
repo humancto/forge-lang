@@ -1,0 +1,63 @@
+// Perform each operation directly and report the runtime error code that
+// try/catch gives (e.code), or the result.
+
+fn perform(op: String, a, b) {
+    if op == "div" {
+        return a / b
+    }
+    if op == "mod" {
+        return a % b
+    }
+    if op == "index" {
+        return a[b]
+    }
+    if op == "call" {
+        return a()
+    }
+    if op == "neg" {
+        return -a
+    }
+    if op == "sub" {
+        return a - b
+    }
+    if op == "len" {
+        return len(a)
+    }
+    if op == "unwrap_err" {
+        return unwrap(Err(a))
+    }
+    if op == "assert" {
+        assert(false, a)
+        return null
+    }
+    return null
+}
+
+let mut counts = {}
+let mut n = 0
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" {
+        continue
+    }
+    n += 1
+    // `<op> <json a>` or `<op> <json a> | <json b>`
+    let space = index_of(line, " ")
+    let op = substring(line, 0, space)
+    let rest = substring(line, space + 1, len(line))
+    let parts = split(rest, " | ")
+    let a = json.parse(parts[0])
+    let b = if len(parts) > 1 { json.parse(parts[1]) } else { null }
+    try {
+        let v = perform(op, a, b)
+        println("{n} {op}: ok {json.compact(v)}")
+    } catch e {
+        counts[e.code] = get(counts, e.code, 0) + 1
+        if op == "unwrap_err" || op == "assert" {
+            println("{n} {op}: {e.code} {e.message}")
+        } else {
+            println("{n} {op}: {e.code}")
+        }
+    }
+}
+let summary = map(sort(keys(counts)), fn(k) { return "{k}={counts[k]}" })
+println("errors: {join(summary, " ")}")

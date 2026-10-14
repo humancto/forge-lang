@@ -1,0 +1,87 @@
+// file: units/constants.fg
+// Conversion factors.
+let INCH_CM = 2.54
+let MILE_KM = 1.609344
+let LB_KG = 0.45359237
+let GAL_L = 3.785411784
+
+// file: units/log.fg
+// Shared conversion log (module state: every importer sees the same log).
+let mut entries = []
+
+fn record(entry: String) {
+    entries.push(entry)
+    return null
+}
+
+fn history() -> [String] {
+    return entries
+}
+
+fn count() -> Int {
+    return len(entries)
+}
+
+// file: units/metric.fg
+// Imperial -> metric.
+import { INCH_CM, MILE_KM, LB_KG, GAL_L } from "constants.fg"
+import { record } from "log.fg"
+
+fn unit(u: String) -> String {
+    return match u {
+        "in" => "cm",
+        "mi" => "km",
+        "lb" => "kg",
+        "gal" => "l",
+        "F" => "C",
+        _ => "?",
+    }
+}
+
+fn convert(v: Float, u: String) -> Result<String, String> {
+    let r = match u {
+        "in" => v * INCH_CM,
+        "mi" => v * MILE_KM,
+        "lb" => v * LB_KG,
+        "gal" => v * GAL_L,
+        "F" => (v - 32.0) * 5.0 / 9.0,
+        _ => null,
+    }
+    if r == null {
+        return Err("unknown imperial unit {u}")
+    }
+    record("{u}->{unit(u)}")
+    return Ok(to_fixed(r, 2))
+}
+
+// file: units/imperial.fg
+// Metric -> imperial.
+import { INCH_CM, MILE_KM, LB_KG, GAL_L } from "constants.fg"
+import { record } from "log.fg"
+
+fn unit(u: String) -> String {
+    return match u {
+        "cm" => "in",
+        "km" => "mi",
+        "kg" => "lb",
+        "l" => "gal",
+        "C" => "F",
+        _ => "?",
+    }
+}
+
+fn convert(v: Float, u: String) -> Result<String, String> {
+    let r = match u {
+        "cm" => v / INCH_CM,
+        "km" => v / MILE_KM,
+        "kg" => v / LB_KG,
+        "l" => v / GAL_L,
+        "C" => v * 9.0 / 5.0 + 32.0,
+        _ => null,
+    }
+    if r == null {
+        return Err("unknown metric unit {u}")
+    }
+    record("{u}->{unit(u)}")
+    return Ok(to_fixed(r, 2))
+}

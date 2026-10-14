@@ -46,7 +46,8 @@
 
 use super::bytecode::{
     decode_a, decode_b, decode_bx, decode_c, decode_op, decode_sbx, Chunk, Constant, OpCode,
-    UpvalueSource, SET_UPDATE_ADD, SET_UPDATE_REMOVE,
+    UpvalueSource, MAP_UPDATE_REMOVE, MAP_UPDATE_SET, PEEK_PLAIN, PEEK_SHARE_IF_CAPTURED,
+    SET_UPDATE_ADD, SET_UPDATE_REMOVE,
 };
 use std::fmt;
 
@@ -418,7 +419,7 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                 self.reg(ip, "A", a)?;
                 self.reg(ip, "B", b)?;
             }
-            GetGlobal | SetGlobal => {
+            GetGlobal | SetGlobal | BindGlobal => {
                 self.reg(ip, "value", a)?;
                 self.name_constant(ip, bx)?;
             }
@@ -458,6 +459,9 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
             PeekLocal => {
                 self.reg(ip, "destination", a)?;
                 self.reg(ip, "local", b)?;
+                if c != PEEK_PLAIN && c != PEEK_SHARE_IF_CAPTURED {
+                    return Err(self.fail(Some(ip), format!("PeekLocal has an unknown mode {}", c)));
+                }
             }
             CallPure => {
                 self.reg(ip, "callee", a)?;
@@ -484,6 +488,26 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                     ));
                 }
             }
+            TypeCheck => {
+                // Reads R(A); continues at ip+1 (a jump) or skips to ip+2
+                // (vm/type_check.rs).
+                self.reg(ip, "value", a)?;
+                if !super::type_check::valid_code(b) {
+                    return Err(self.fail(Some(ip), format!("TypeCheck has an unknown code {}", b)));
+                }
+                if b & super::type_check::BASE_MASK == super::type_check::NAMED {
+                    self.name_constant(ip, c as usize)?;
+                }
+                // The VM takes the jump at ip+1 itself (it is checked as an
+                // instruction of its own).
+                let jump = self.chunk.code.get(ip + 1).map(|&i| decode_op(i));
+                if jump != Some(Jump as u8) || ip + 2 >= self.chunk.code.len() {
+                    return Err(self.fail(
+                        Some(ip),
+                        "TypeCheck must be followed by a Jump and the check".to_string(),
+                    ));
+                }
+            }
             UpdateSetLocal => {
                 self.reg(ip, "local", a)?;
                 self.reg(ip, "value", b)?;
@@ -494,9 +518,24 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
                     ));
                 }
             }
+            UpdateMapLocal => {
+                self.reg(ip, "local", a)?;
+                let operands = match c {
+                    MAP_UPDATE_SET => 3,
+                    MAP_UPDATE_REMOVE => 1,
+                    _ => {
+                        return Err(self.fail(
+                            Some(ip),
+                            format!("UpdateMapLocal has an unknown operation {}", c),
+                        ))
+                    }
+                };
+                self.reg_range(ip, "operand", b as usize, operands)?;
+            }
+
             Jump => self.target(ip, sbx, false)?,
             Loop => self.target(ip, sbx, true)?,
-            JumpIfFalse | JumpIfTrue | PushHandler | PushTimeout => {
+            JumpIfFalse | JumpIfTrue | PushHandler | PushTimeout | TakeReceiver => {
                 self.reg(ip, "operand", a)?;
                 self.target(ip, sbx, false)?;
             }
@@ -538,6 +577,18 @@ impl<'c, 'p> ChunkVerifier<'c, 'p> {
             SetUpvalue => {
                 self.upvalue(ip, a)?;
                 self.reg(ip, "source", b)?;
+            }
+            BindUpvalue => {
+                self.reg(ip, "local", a)?;
+                self.upvalue(ip, b)?;
+            }
+            PushPlaceLocal => {
+                self.reg(ip, "local", a)?;
+                if c == 0 {
+                    return Err(self.fail(Some(ip), "PushPlaceLocal has no steps".to_string()));
+                }
+                // The keys, the value and the result flag.
+                self.reg_range(ip, "operand", b as usize, c as usize + 2)?;
             }
             CloseUpvalues => {
                 self.reg(ip, "first", a)?;
@@ -728,6 +779,7 @@ mod tests {
             "constant index 9",
         );
         rejects(&with(encode_abx(OpCode::SetGlobal, 0, 0)), "not a string");
+        rejects(&with(encode_abx(OpCode::BindGlobal, 0, 0)), "not a string");
         rejects(&with(encode_abc(OpCode::GetField, 0, 0, 0)), "not a string");
         rejects(
             &with(encode_abc(OpCode::SetField, 0, 7, 0)),
@@ -759,6 +811,54 @@ mod tests {
     }
 
     #[test]
+    fn type_check_needs_its_jump_and_a_valid_code() {
+        use crate::vm::type_check::{ARRAY, INT, NAMED, OPTION};
+        // LoadConst; TypeCheck; <next>; LoadNull; Return.
+        let chunk = |check: u32, next: u32| {
+            let mut c = base();
+            let ret = c.code.pop().unwrap();
+            c.lines.pop();
+            c.cols.pop();
+            c.emit(check, 1);
+            c.emit(next, 1);
+            c.emit(encode_abc(OpCode::LoadNull, 0, 0, 0), 1);
+            c.emit(ret, 1);
+            c
+        };
+        let jump = encode_asbx(OpCode::Jump, 0, 1);
+        verify_chunk(&chunk(encode_abc(OpCode::TypeCheck, 0, INT, 0), jump)).unwrap();
+        verify_chunk(&chunk(
+            encode_abc(OpCode::TypeCheck, 0, OPTION | ARRAY | INT, 0),
+            jump,
+        ))
+        .unwrap();
+        verify_chunk(&chunk(encode_abc(OpCode::TypeCheck, 0, NAMED, 1), jump)).unwrap();
+        rejects(
+            &chunk(
+                encode_abc(OpCode::TypeCheck, 0, INT, 0),
+                encode_abc(OpCode::LoadNull, 0, 0, 0),
+            ),
+            "followed by a Jump",
+        );
+        rejects(
+            &chunk(encode_abc(OpCode::TypeCheck, 0, 0x30, 0), jump),
+            "unknown code",
+        );
+        rejects(
+            &chunk(encode_abc(OpCode::TypeCheck, 0, ARRAY | NAMED, 1), jump),
+            "unknown code",
+        );
+        rejects(
+            &chunk(encode_abc(OpCode::TypeCheck, 0, NAMED, 0), jump),
+            "not a string",
+        );
+        rejects(
+            &chunk(encode_abc(OpCode::TypeCheck, 3, INT, 0), jump),
+            "register 3",
+        );
+    }
+
+    #[test]
     fn back_edges_must_be_loop() {
         // A backward `Jump` would spin without polling cancellation.
         rejects(
@@ -784,6 +884,43 @@ mod tests {
         rejects(
             &with(encode_abx(OpCode::Closure, 0, 0)),
             "prototype index 0",
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_peek_modes() {
+        verify_chunk(&with(encode_abc(OpCode::PeekLocal, 0, 0, PEEK_PLAIN))).unwrap();
+        verify_chunk(&with(encode_abc(
+            OpCode::PeekLocal,
+            0,
+            0,
+            PEEK_SHARE_IF_CAPTURED,
+        )))
+        .unwrap();
+        rejects(
+            &with(encode_abc(OpCode::PeekLocal, 0, 0, 2)),
+            "unknown mode 2",
+        );
+    }
+
+    #[test]
+    fn rejects_bad_bind_upvalue() {
+        rejects(
+            &with(encode_abc(OpCode::BindUpvalue, 0, 0, 0)),
+            "upvalue index 0",
+        );
+        rejects(&with(encode_abc(OpCode::BindUpvalue, 200, 0, 0)), "200");
+    }
+
+    #[test]
+    fn rejects_bad_push_place() {
+        rejects(
+            &with(encode_abc(OpCode::PushPlaceLocal, 0, 0, 0)),
+            "no steps",
+        );
+        rejects(
+            &with(encode_abc(OpCode::PushPlaceLocal, 0, 0, 200)),
+            "operand",
         );
     }
 

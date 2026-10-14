@@ -41,6 +41,11 @@ class Result:
     def stdout(self) -> str:
         """Everything the program printed with ``say`` / ``println`` / ``print``."""
 
+    @property
+    def stderr(self) -> str:
+        """Everything the program wrote to stderr: ``eprint`` / ``eprintln``,
+        ``log.*`` (one ``[level] message`` line per call), ``sus``, ``term.*``."""
+
 @final
 class Diagnostic:
     """One problem reported by :func:`check`."""
@@ -145,6 +150,8 @@ class ForgeError(Exception):
     kind: str
     #: Output printed before the failure (empty for syntax errors).
     stdout: str
+    #: stderr output written before the failure (``eprintln``, ``log.*``).
+    stderr: str
     #: 1-based line of the failure, when known (syntax and runtime errors).
     line: Optional[int]
     #: 1-based column, when known (syntax errors).

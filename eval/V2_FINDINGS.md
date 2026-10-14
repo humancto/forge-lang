@@ -24,7 +24,7 @@ that a model cannot guess from `llms.txt`).
 | 10 | perf (fixed) | VM: `obj[key] = v` copies the whole object; building an object with n keys is O(n^2) time and memory (OOM at 20,000 keys). **Fixed** (`4ae27a6`) | data (latest_record_wins, word_freq_large, ...) |
 | 11 | perf (fixed) | VM: `xs.push({ ...object literal... })` is O(n^2) (50,000 pushes: 6 s, OOM inside a function). **Fixed** (`ebe7a6b`, any value: `4ae27a6`) | data |
 | 12 | perf (fixed) | Interpreter: `get(obj, k)` and `has_key(obj, k)` copy the whole object per call (O(n) each). **Fixed** (`e9ec31c`) | data |
-| 13 | perf | `set`/`map` are linear lists: `st.has`, `st.add`, `m.get`, `m.set` are O(n) per call on both engines | data |
+| 13 | perf (fixed) | `set`/`map` are linear lists: `st.has`, `st.add`, `m.get`, `m.set` are O(n) per call on both engines. **Fixed** (sets, then maps: hash-indexed on both engines) | data |
 | 14 | perf (fixed) | Net effect: the textbook word count over 100,000 words takes 28 s (VM) / 30 s (interp); Python takes 0.03 s. **Fixed**: 0.13 s (VM) / 0.31 s (interp) | word_freq_large |
 | 15 | gap (fixed) | HTTP handlers cannot set a status code or response headers, and cannot read request headers | servers |
 | 16 | gap (fixed) | A database opened at the top level of a server is not visible in handlers ("no database connection open") | todo_sqlite |
@@ -38,7 +38,7 @@ that a model cannot guess from `llms.txt`).
 | 24 | gap (fixed) | `e.message` of some caught errors contains a `\n  hint: ...` line | error_handling |
 | 25 | gap (fixed) | No way to write to stderr except `log.*` (structured tracing) | error_handling |
 | 26 | bug (fixed) | `forge check`: a module-level variable named like a builtin (`let mut count = 0`) is typed as the builtin inside the module's functions (false T0005 in the importer) | multifile |
-| 27 | perf (open) | macOS CI: the three-stage channel pipeline `staged_pipeline` runs about as slowly as a serial one on the VM (over 7 s vs about 2.7 s on Linux); the interpreter and Python pass there | parallel |
+| 27 | perf (fixed) | macOS CI: the three-stage channel pipeline `staged_pipeline` runs about as slowly as a serial one on the VM (over 7 s vs about 2.7 s on Linux); the interpreter and Python pass there | parallel |
 
 ---
 
@@ -369,6 +369,21 @@ Suggested fix: back `Set`/`Map` by hash maps (the interpreter's `Value` would ne
 or a key projection); `CLAUDE.md` already notes "hashed Set/Map indexes" as blocked on
 Arc-backed values.
 
+**Fixed:** sets and then maps use one insertion-ordered, hash-indexed container on both
+engines (`src/semantics/ordered_set.rs`; `Value::Set(SetItems)` / `Value::Map(MapEntries)`,
+VM `ObjKind::Set(VmSet)` / `ObjKind::Map(VmMap)`), hashed and compared with each engine's
+set rules, so `st.has`/`st.add`/`m.get`/`m.set`/`m.has`/`m.remove` are O(1) on average with
+the same order, printing and equality as before (including non-transitive Int/Float key
+equality: `get`/`set` see the oldest equal key). Updating a variable does not copy:
+`st.add(x)` (VM `UpdateSetLocal`) and `m = m.set(k, v)` / `m = m.remove(k)` (interpreter
+`try_update_map_ident`, VM `UpdateMapLocal`) update a collection the variable owns in place,
+and `m.get`/`m.has`/`m.len` borrow it. Building a 100,000-entry map with `m = m.set(k, v)`
+and looking every key up (`benchmarks/vm/map_build.fg`) takes 0.31 s on the VM and 0.38 s on
+the interpreter (was quadratic: 12 s / 35 s already at 20,000 entries; CPython 0.10 s); see
+`docs/BENCHMARKS.md`, "Maps". `let b = a.set(k, v)` still copies `a` once (value semantics).
+Tests: `tests/map_semantics_test.fg` (both engines), `tests/parity/supported/map_hash_index.fg`,
+`vm::map_index_tests`, `interpreter::tests::map_lookups_agree_with_a_linear_scan`.
+
 ### 14. What a model's natural solution costs
 
 **Fixed**: `benchmarks/vm/word_count.fg` (this loop at the top level) runs in 0.13 s on
@@ -559,6 +574,25 @@ Suggested fix: let an object literal (or `Object`) be assignable to `Map<String,
 its values fit, or add an `Object<T>`/`{String: T}` annotation; state the rule in
 `llms.txt`.
 
+**Fixed:** `Object<T>` is the typed dictionary: an object (string keys, as every object)
+whose values are all `T`. `let ages: Object<Int> = { ada: 36 }`, a parsed JSON object, and
+`fn total(counts: Object<Int>)` all work; the checker checks an object literal's values
+against `T` (`T0001 ... declared as Object<Int> but assigned Object<String>`), types `o.k`,
+`o[k]` and `for k, v in o` as `T`, and checks `o.k = v`; under `--strict` and in edition 2027
+annotated boundaries check it at run time on both engines (`type error: argument 'counts'
+of 'total' must be Object<Int>, got Object`, the shared rule in `semantics::types` and the
+VM's `fits_vm`), and `Object<Float>` turns Int values into Floats. `Object<T>` was chosen
+over `{String: T}` because it extends the existing `Object` annotation, already parses as a
+generic everywhere (formatter, LSP, MCP), has no key type that could only ever be `String`,
+and reads unambiguously next to `Map<K, V>`. `Map<String, T>` stays the `Map` value type (an
+object is not a Map, so assigning one stays T0001, now with the help `annotate it
+Object<Int> ..., or build a Map with map()`). MCP tool parameters typed `Object<T>` are
+JSON objects with `additionalProperties` of `T`'s schema; `llms.txt` lists `Object<T>` in
+the annotation syntax and the MCP parameter types. Tests: `tests/typed_objects_test.fg`,
+`tests/edition2027/typed_objects_test.fg` (both engines),
+`typechecker::tests::typed_objects_check_their_values`, `semantics::types` and
+`typechecker::types` unit tests, the MCP schema test.
+
 ### 23. HTTP client errors
 
 `http.get(url, { timeout: 1 })` against a server that answers after 2 s and `http.get` of
@@ -606,7 +640,7 @@ can only report errors on stdout plus an exit status.
 
 Suggested fix: `eprintln(...)` / `eprint(...)` builtins routed through `runtime::stdio::err`.
 
-**Fixed:** `eprintln(...)` / `eprint(...)` (registry, both engines, both editions, type checker, LSP) write like `println`/`print` to stderr through `runtime::stdio::err_line`/`err`, so a capture (the playground) records them as stderr and spawned tasks inherit it. Tests: `tests/cli_diagnostics.rs::eprintln_writes_to_stderr_on_both_engines`, `vm::parity_tests::eprintln_goes_to_the_captured_stderr_on_both_engines`, `tests/stderr_output_test.fg`.
+**Fixed:** `eprintln(...)` / `eprint(...)` (registry, both engines, both editions, type checker, LSP) write like `println`/`print` to stderr through `runtime::stdio::err_line`/`err`, so a capture (the playground) records them as stderr and spawned tasks inherit it. Tests: `tests/cli_diagnostics.rs::eprintln_writes_to_stderr_on_both_engines`, `vm::parity_tests::eprintln_goes_to_the_captured_stderr_on_both_engines`, `tests/stderr_output_test.fg`. `Sandbox`, `forge mcp` (`run_forge`, sessions, `forge mcp serve` tool calls) and the Python binding capture stderr now too: `eprint`/`eprintln` and `log.*` (as `[level] message` lines, not tracing events) come back as the run's stderr (`Output::stderr`, `structuredContent.stderr`, `Result.stderr`) under the same output budget as stdout, from spawned tasks as well. Tests: `sandbox::tests::captures_stderr_and_logs`, `max_output_counts_stderr_and_logs`, `mcp::tests::run_forge_returns_stderr`, `tests/mcp_stdio.rs::mcp_stderr_and_logs_are_returned_not_leaked`.
 
 ### 27. Channel pipeline slower on macOS
 
@@ -625,6 +659,25 @@ makes each `wait`/`receive` far more expensive); Linux runs the same program in 
 Until it is explained, `tests/eval_tasks.rs` leaves this one task out on macOS
 (`validate --exclude staged_pipeline`); the Linux eval job still checks it on both engines.
 
-Suggested next step: on a macOS machine, time `wait(0.04)` loops, two spawned tasks that
-each `wait(1)`, and channel ping-pong on both engines, with and without `--sandbox` and
-`--jit`, to find what serializes the VM's tasks.
+**Fixed (cause: `wait` paid the timer oversleep once per internal slice).** Nothing
+serialized the tasks. Both engines implemented `wait(s)` as a loop of short sleeps (to stay
+cancellable) and stopped after the *requested* slice lengths added up to `s`, never looking
+at the clock: the VM in 50 ms slices, the interpreter in 100 ms slices. Where every sleep
+wakes late by `X` (macOS CI runners), `wait(0.1)` took `0.1 + 2X` on the VM and `0.1 + X`
+on the interpreter (and Python's single `time.sleep`). A stage of the pipeline does one
+`wait(0.1)` per record, so 25 records cost `25 * (0.1 + 2X)` on the VM: over 7 s once `X`
+is above about 90 ms, while the interpreter stays under 7 s for `X` up to about 180 ms. That
+matches every observation: with 40 ms sleeps (one slice on both engines) both engines
+missed 2.5 s; with 100 ms sleeps only the VM missed 7 s.
+
+Reproduced on Linux with a 100 ms timer slack (`prctl(PR_SET_TIMERSLACK)`, which lets every
+timed sleep end up to 100 ms late; inherited by threads): before the fix the reference took
+8.0 s on the VM and 5.4 s on the interpreter (2.7 s for both without slack); `strace -f -c`
+showed no busy polling (150 `clock_nanosleep` calls on the VM, 75 on the interpreter, the
+same futex counts). Now both engines share `clock::sleep_interruptible`: it sleeps in slices
+of at most 50 ms (cancellation and `timeout` deadlines are still noticed within one slice)
+but against one deadline on the monotonic clock, so a `wait` is late by at most one
+oversleep: 4.0 s on both engines with the 100 ms slack, 2.7 s without. Tests:
+`tests/task_timing.rs` (tasks and pipeline stages overlap on both engines; four `wait(0.25)`
+under a 100 ms timer slack take less than 2 s on both engines, about 3 s before). The macOS
+exclusion in `tests/eval_tasks.rs` is removed.

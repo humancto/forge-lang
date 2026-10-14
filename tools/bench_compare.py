@@ -168,7 +168,7 @@ def main(argv=None):
     ap.add_argument("--confirm-rounds", type=int, default=5,
                     help="extra interleaved rounds for flagged benchmarks before failing "
                          "(default 5; 0 disables)")
-    ap.add_argument("--suite", default="vm,interp,startup")
+    ap.add_argument("--suite", default="vm,interp,startup,typed")
     ap.add_argument("--filter", default="")
     ap.add_argument("--base-root",
                     help="the BASE checkout: only benchmarks that exist there too are "
@@ -196,7 +196,7 @@ def main(argv=None):
             found = set()
             for suite in args.suite.split(","):
                 d = os.path.join(root, "benchmarks", suite)
-                if suite in ("vm", "interp", "startup") and os.path.isdir(d):
+                if suite in ("vm", "interp", "startup", "typed") and os.path.isdir(d):
                     found |= {f"{suite}/{f[:-3]}" for f in os.listdir(d) if f.endswith(".fg")}
             return found
         head_ids, base_ids = ids_in(ROOT), ids_in(args.base_root)

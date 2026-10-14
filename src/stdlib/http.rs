@@ -205,7 +205,7 @@ fn do_request(method: &str, args: &[Value]) -> Result<Value, String> {
                     s.clone(),
                     serde_json::from_str::<serde_json::Value>(s).is_ok(),
                 ),
-                other => (other.to_json_string(), true),
+                other => (crate::stdlib::json_module::to_compact(other)?, true),
             };
             body_str = Some(text);
             if !headers_map.contains_key("Content-Type") {

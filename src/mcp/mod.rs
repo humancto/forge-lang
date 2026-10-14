@@ -768,7 +768,8 @@ fn code_tool_definitions(config: &ServerConfig) -> Vec<Value> {
             "name": "run_forge",
             "title": "Run Forge code",
             "description": format!(
-                "Run a Forge program in a sandbox and return what it printed (say/println/print). \
+                "Run a Forge program in a sandbox and return what it printed (say/println/print; \
+                 stderr from eprintln and log.* comes back separately). \
                  Use it to do multi-step work in one call: fetch, transform, compute, then print \
                  the result. Runtime errors, permission denials and timeouts come back as tool \
                  errors with the output printed so far. {} Call forge_reference to learn the \
@@ -781,6 +782,12 @@ fn code_tool_definitions(config: &ServerConfig) -> Vec<Value> {
                     "code": {
                         "type": "string",
                         "description": "Forge source code to run."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional. Command-line arguments for the program: \
+                                        io.args() returns [\"<run_forge>\", ...args]."
                     },
                     "session_id": {
                         "type": "string",
@@ -825,7 +832,15 @@ fn code_tool_definitions(config: &ServerConfig) -> Vec<Value> {
                 "properties": {
                     "ok": { "type": "boolean" },
                     "stdout": { "type": "string" },
-                    "truncated": { "type": "boolean" },
+                    "stderr": {
+                        "type": "string",
+                        "description": "What the program wrote to stderr: eprint/eprintln, \
+                                        log.* as `[level] message` lines, sus and term.* chrome."
+                    },
+                    "truncated": {
+                        "type": "boolean",
+                        "description": "stdout or stderr was cut to the response size limit."
+                    },
                     "elapsed_ms": { "type": "number" },
                     "session": {
                         "type": "object",
@@ -854,7 +869,7 @@ fn code_tool_definitions(config: &ServerConfig) -> Vec<Value> {
                         "required": ["kind", "message"]
                     }
                 },
-                "required": ["ok", "stdout", "truncated", "elapsed_ms", "error"]
+                "required": ["ok", "stdout", "stderr", "truncated", "elapsed_ms", "error"]
             },
             "annotations": {
                 "readOnlyHint": !writes,
@@ -1105,7 +1120,7 @@ impl Job {
             Job::Run(_) => {
                 let mut result = tool_error(message);
                 result["structuredContent"] = json!({
-                    "ok": false, "stdout": "", "truncated": false, "elapsed_ms": 0,
+                    "ok": false, "stdout": "", "stderr": "", "truncated": false, "elapsed_ms": 0,
                     "error": { "kind": kind, "message": message }
                 });
                 Ok(result)
@@ -1251,7 +1266,7 @@ fn code_arg(args: &Map<String, Value>) -> Result<&str, Value> {
 fn run_refused(kind: &str, message: &str) -> Value {
     let mut result = tool_error(message);
     result["structuredContent"] = json!({
-        "ok": false, "stdout": "", "truncated": false, "elapsed_ms": 0,
+        "ok": false, "stdout": "", "stderr": "", "truncated": false, "elapsed_ms": 0,
         "error": { "kind": kind, "message": message }
     });
     result
@@ -1341,7 +1356,7 @@ fn run_in_session(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .checkin(id, generation, run.interp, run.memory_held);
-    let outcome = run.result.map(|((), stdout)| Output { stdout });
+    let outcome = run.result.map(|((), output)| output);
     Ok((outcome, note(created, !alive)))
 }
 
@@ -1369,6 +1384,15 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
             return tool_error("`session_id` must be 1-128 letters, digits, `_`, `-`, `.` or `:`")
         }
     };
+    // The program's command line: its name, then the caller's arguments.
+    let mut program_args = vec!["<run_forge>".to_string()];
+    match args.get("args") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(items)) if items.iter().all(Value::is_string) => {
+            program_args.extend(items.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+        Some(_) => return tool_error("`args` must be an array of strings"),
+    }
     let mut limits = run_limits(config, session_id.is_some());
     match args.get("max_fuel") {
         None | Some(Value::Null) => {}
@@ -1382,6 +1406,7 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
         .max_output(CAPTURE_LIMIT.max(config.max_response_bytes))
         .limits(limits.clone())
         .source_label("<run_forge>")
+        .args(program_args)
         .engine(config.engine);
     let started = Instant::now();
     let (outcome, session) = match session_id {
@@ -1393,25 +1418,44 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
     };
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
-    let full = match &outcome {
-        Ok(out) => out.stdout.clone(),
-        Err(e) => e.stdout().to_string(),
+    let (full, full_stderr) = match &outcome {
+        Ok(out) => (out.stdout.clone(), out.stderr.clone()),
+        Err(e) => (e.stdout().to_string(), e.stderr().to_string()),
     };
     let total = full.len();
-    let truncated = total > config.max_response_bytes;
+    let stdout_truncated = total > config.max_response_bytes;
     let stdout = truncate_utf8(full, config.max_response_bytes);
-    let note = truncated.then(|| {
+    let note = stdout_truncated.then(|| {
         format!(
             "[output truncated: showing the first {} of {} bytes]",
             stdout.len(),
             total
         )
     });
+    let stderr_total = full_stderr.len();
+    let stderr_truncated = stderr_total > config.max_response_bytes;
+    let stderr = truncate_utf8(full_stderr, config.max_response_bytes);
+    let truncated = stdout_truncated || stderr_truncated;
+    // stderr is its own content block, after the main one, so the main
+    // block reads exactly as it does for a program that wrote none.
+    let stderr_block = (!stderr.is_empty()).then(|| {
+        let mut block = format!("stderr:\n{}", stderr);
+        if stderr_truncated {
+            block.push_str(&format!(
+                "\n[stderr truncated: showing the first {} of {} bytes]",
+                stderr.len(),
+                stderr_total
+            ));
+        }
+        block
+    });
 
     let (mut text, error) = match &outcome {
         Ok(_) => {
-            let mut text = if stdout.is_empty() {
+            let mut text = if stdout.is_empty() && stderr.is_empty() {
                 "(no output)".to_string()
+            } else if stdout.is_empty() {
+                "(no output on stdout)".to_string()
             } else {
                 stdout.clone()
             };
@@ -1505,11 +1549,16 @@ fn run_forge(server: &Server, args: &Map<String, Value>, cancel: &CancelHandle) 
         ));
     }
     let ok = outcome.is_ok();
+    let mut content = vec![json!({ "type": "text", "text": text })];
+    if let Some(block) = stderr_block {
+        content.push(json!({ "type": "text", "text": block }));
+    }
     let mut result = json!({
-        "content": [{ "type": "text", "text": text }],
+        "content": content,
         "structuredContent": {
             "ok": ok,
             "stdout": stdout,
+            "stderr": stderr,
             "truncated": truncated,
             "elapsed_ms": elapsed_ms,
             "error": error,
@@ -1862,6 +1911,91 @@ mod tests {
         assert_eq!(r(6)["isError"], true);
         assert_eq!(r(7)["isError"], true);
         assert_eq!(r(8)["content"][0]["text"], "(no output)");
+        assert_eq!(r(8)["structuredContent"]["stderr"], "");
+        assert!(r(8)["content"].get(1).is_none());
+    }
+
+    #[test]
+    fn run_forge_passes_program_arguments() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            run_forge_passes_program_arguments_on(engine);
+        }
+    }
+
+    fn run_forge_passes_program_arguments_on(engine: Engine) {
+        let call = |id: i64, args: &str| {
+            format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"run_forge\",\"arguments\":{args}}}}}\n"
+            )
+        };
+        let input = [
+            call(1, r#"{"code":"say io.args()","args":["--top","3"]}"#),
+            call(2, r#"{"code":"say io.args()"}"#),
+            call(3, r#"{"code":"say 1","args":"--top"}"#),
+        ]
+        .concat();
+        let msgs = session(&input, deny_all(engine));
+        let r = |id| by_id(&msgs, id)["result"].clone();
+        assert_eq!(r(1)["content"][0]["text"], "[<run_forge>, --top, 3]\n");
+        assert_eq!(r(2)["content"][0]["text"], "[<run_forge>]\n");
+        assert_eq!(r(3)["isError"], true);
+    }
+
+    #[test]
+    fn run_forge_returns_stderr() {
+        for engine in ENGINES {
+            eprintln!("engine: {engine}");
+            run_forge_returns_stderr_on(engine);
+        }
+    }
+
+    fn run_forge_returns_stderr_on(engine: Engine) {
+        let call = |id: i64, args: &str| {
+            format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"run_forge\",\"arguments\":{args}}}}}\n"
+            )
+        };
+        let mut config = deny_all(engine);
+        config.max_response_bytes = 30;
+        let input = [
+            call(
+                1,
+                r#"{"code":"say \"hi\"\neprintln(\"oops\")\nlog.warn(\"low\", 3)"}"#,
+            ),
+            call(2, r#"{"code":"eprintln(\"only err\")"}"#),
+            call(3, r#"{"code":"eprintln(\"before\")\nlet x = 1 / 0"}"#),
+            call(
+                4,
+                r#"{"code":"for i in range(0, 50) { eprintln(\"line\") }"}"#,
+            ),
+        ]
+        .concat();
+        let msgs = session(&input, config);
+        let r = |id| by_id(&msgs, id)["result"].clone();
+
+        assert_eq!(r(1)["structuredContent"]["stdout"], "hi\n");
+        assert_eq!(r(1)["structuredContent"]["stderr"], "oops\n[warn] low 3\n");
+        assert_eq!(r(1)["content"][0]["text"], "hi\n");
+        assert_eq!(r(1)["content"][1]["text"], "stderr:\noops\n[warn] low 3\n");
+
+        assert_eq!(r(2)["content"][0]["text"], "(no output on stdout)");
+        assert_eq!(r(2)["content"][1]["text"], "stderr:\nonly err\n");
+
+        assert_eq!(r(3)["isError"], true);
+        assert_eq!(r(3)["structuredContent"]["error"]["kind"], "runtime");
+        assert_eq!(r(3)["structuredContent"]["stderr"], "before\n");
+        assert_eq!(r(3)["content"][1]["text"], "stderr:\nbefore\n");
+
+        assert_eq!(r(4)["structuredContent"]["truncated"], true);
+        assert_eq!(r(4)["structuredContent"]["stdout"], "");
+        assert_eq!(
+            r(4)["structuredContent"]["stderr"],
+            "line\nline\nline\nline\nline\nline\n"
+        );
+        assert!(r(4)["content"][1]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("[stderr truncated: showing the first 30 of 250 bytes]")));
     }
 
     #[test]

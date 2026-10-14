@@ -33,9 +33,9 @@ fn miri_execute_bytecode_rejects_bad_input_without_ub() {
     let mut bad = bytes.clone();
     let n = bad.len();
     // The final instruction (`Return R0`) sits before the line/column tables,
-    // the two u16 table counts and the edition byte: patch its A operand
-    // to 200.
-    let ret_a = n - 1 - 2 - 2 - (4 + 4 * 4) - (4 + 4 * 4) - 4 + 2;
+    // the two u16 table counts, the ADT constructor tag and the edition
+    // byte: patch its A operand to 200.
+    let ret_a = n - 1 - 1 - 2 - 2 - (4 + 4 * 4) - (4 + 4 * 4) - 4 + 2;
     assert_eq!(bad[ret_a], 0);
     bad[ret_a] = 200;
     assert_eq!(forge_execute_bytecode(bad.as_ptr(), bad.len()), 1);

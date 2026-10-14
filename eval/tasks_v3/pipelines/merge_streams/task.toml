@@ -1,0 +1,33 @@
+id = "merge_streams"
+category = "pipelines"
+title = "Merge concurrent producers and detect the stalled ones"
+prompt = """
+Each non-blank line of standard input configures a producer:
+`<name> <interval ms> <count> <ends|stalls>`. Run all producers concurrently. A producer
+sends the messages `<name>-1`, `<name>-2`, ... `<name>-<count>`, sleeping the interval
+before each one. A producer marked `ends` then sends the message `end`; one marked
+`stalls` sends nothing more and never finishes.
+
+Consume all producers' messages as they arrive. Stop as soon as every producer has sent
+`end`, or when no message at all has arrived for 500 ms. Then print one line per producer
+in input order: `<name>: <its messages in the order sent, separated by commas> (<count>
+items, ended)`, or `stalled` instead of `ended` for a producer whose `end` did not arrive.
+
+The program must finish within 3 seconds (it must not wait for stalled producers).
+"""
+needs = []
+timeout = 3
+stdin = """
+alpha 50 6 ends
+beta 80 5 ends
+gamma 20 10 ends
+delta 100 2 stalls
+epsilon 30 0 ends
+"""
+expected_stdout = """
+alpha: alpha-1,alpha-2,alpha-3,alpha-4,alpha-5,alpha-6 (6 items, ended)
+beta: beta-1,beta-2,beta-3,beta-4,beta-5 (5 items, ended)
+gamma: gamma-1,gamma-2,gamma-3,gamma-4,gamma-5,gamma-6,gamma-7,gamma-8,gamma-9,gamma-10 (10 items, ended)
+delta: delta-1,delta-2 (2 items, stalled)
+epsilon:  (0 items, ended)
+"""

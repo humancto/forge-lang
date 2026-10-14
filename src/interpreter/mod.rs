@@ -6,31 +6,14 @@ use crate::parser::ast::*;
 /// Walks the AST and executes it directly.
 /// Phase 1 only — replaced by bytecode VM in Phase 3.
 use indexmap::IndexMap;
+use places::PlaceStep;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-/// Escape a string for safe JSON embedding. Handles backslashes, quotes,
-/// newlines, tabs, carriage returns, and control characters.
-fn escape_json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+/// Strings inside displayed collections are written as JSON literals (the
+/// same escapes as `json.stringify`, on both engines).
+use crate::stdlib::json_module::escape_json_string;
 
 /// Sender variant: bounded (sync_channel) or unbounded (channel)
 #[derive(Debug)]
@@ -44,7 +27,7 @@ pub enum ChannelSender {
 #[allow(dead_code)]
 pub struct ChannelInner {
     pub tx: std::sync::Mutex<Option<ChannelSender>>,
-    pub rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<Value>>>,
+    pub rx: std::sync::Mutex<Option<crate::semantics::channel::Receiver<Value>>>,
     pub capacity: Option<usize>,
 }
 
@@ -195,6 +178,63 @@ impl SetItems {
     }
 }
 
+/// A map's `(key, value)` entries: insertion-ordered and hash-indexed by
+/// key (`semantics::ordered_set`). Keys are compared with
+/// [`Value::container_eq`] and hashed with [`Value::set_hash`], exactly
+/// like set items, so `1` and `1.0` are one key and NaN finds NaN.
+pub type MapEntries = crate::semantics::ordered_set::OrderedSet<(Value, Value)>;
+
+impl MapEntries {
+    /// A map of `pairs` in order; a key equal to an earlier one replaces
+    /// that entry's value and keeps its position (what `map(pairs)` does).
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (Value, Value)>) -> Self {
+        let mut map = MapEntries::new();
+        for (key, value) in pairs {
+            map.insert_value(key, value);
+        }
+        map
+    }
+
+    /// A map of `pairs` in order, kept as given even if some keys compare
+    /// equal (entries converted from the VM keep exactly what they had).
+    pub fn from_pairs_unchecked(pairs: impl IntoIterator<Item = (Value, Value)>) -> Self {
+        let mut map = MapEntries::new();
+        for (key, value) in pairs {
+            map.push_unchecked(key.set_hash(), (key, value));
+        }
+        map
+    }
+
+    /// The value of the first entry whose key equals `key`.
+    pub fn get_value(&self, key: &Value) -> Option<&Value> {
+        self.find(key.set_hash(), |(k, _)| Value::container_eq(k, key))
+            .map(|(_, v)| v)
+    }
+
+    /// Whether some entry's key equals `key`.
+    pub fn has_key_value(&self, key: &Value) -> bool {
+        self.contains(key.set_hash(), |(k, _)| Value::container_eq(k, key))
+    }
+
+    /// `m.set(key, value)` in place: replace the value of the first entry
+    /// whose key equals `key` (keeping that entry's key and position), or
+    /// append a new entry.
+    pub fn insert_value(&mut self, key: Value, value: Value) {
+        let hash = key.set_hash();
+        if let Some(entry) = self.find_mut(hash, |(k, _)| Value::container_eq(k, &key)) {
+            entry.1 = value;
+            return;
+        }
+        self.push_unchecked(hash, (key, value));
+    }
+
+    /// `m.remove(key)` in place: remove every entry whose key equals `key`;
+    /// returns whether any was.
+    pub fn remove_key(&mut self, key: &Value) -> bool {
+        self.remove_matching(key.set_hash(), |(k, _)| Value::container_eq(k, key)) > 0
+    }
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -207,10 +247,11 @@ pub enum Value {
     /// Insertion-ordered set; hash-indexed so `has`/`add`/`remove` are
     /// O(1) on average (see [`SetItems`]).
     Set(SetItems),
-    /// First-class Map with any-value keys. Ordered vec preserves insertion
-    /// order; keys compared via `container_eq` so NaN self-matches and
-    /// Int/Float promote (e.g. `1` and `1.0` collide).
-    Map(Vec<(Value, Value)>),
+    /// First-class Map with any-value keys, in insertion order; hash-indexed
+    /// by key so `get`/`set`/`has`/`remove` are O(1) on average (see
+    /// [`MapEntries`]). Keys compare via `container_eq`: NaN self-matches
+    /// and Int/Float promote (`1` and `1.0` collide).
+    Map(MapEntries),
     /// Lazy iterator. Single-use; terminal ops drain it. Rc-shared so
     /// combinators can wrap upstreams without cloning cursor state.
     Stream(Arc<Mutex<StreamCell>>),
@@ -253,10 +294,13 @@ impl PartialEq for Value {
             (Value::Map(a), Value::Map(b)) => {
                 // Order-independent on entries. Keys use container_eq
                 // (NaN self-match, Int/Float promote). Values use full ==.
+                // Every entry with an equal key hashes alike, so probing
+                // `b`'s index finds exactly what a scan of `b` would.
                 a.len() == b.len()
                     && a.iter().all(|(ak, av)| {
-                        b.iter()
-                            .any(|(bk, bv)| Value::container_eq(ak, bk) && av == bv)
+                        b.contains(ak.set_hash(), |(bk, bv)| {
+                            Value::container_eq(ak, bk) && av == bv
+                        })
                     })
             }
             (Value::Object(a), Value::Object(b)) => a == b,
@@ -439,7 +483,7 @@ impl Value {
             (Value::Map(x), Value::Map(y)) => {
                 x.len() == y.len()
                     && x.iter().all(|(xk, xv)| {
-                        y.iter().any(|(yk, yv)| {
+                        y.contains(xk.set_hash(), |(yk, yv)| {
                             Value::container_eq(xk, yk) && Value::container_eq(xv, yv)
                         })
                     })
@@ -551,6 +595,33 @@ impl Value {
             Value::Frozen(inner) => inner.to_json_string(),
             _ => format!("\"<{}>\"", self.type_name()),
         }
+    }
+}
+
+/// The struct a static method call `Type.method()` is made on: a struct
+/// name (`struct:Point`) or a struct marker read from a module namespace
+/// (`{__kind__: "struct", name: "Point"}`, `m.Point`).
+fn static_struct_name(value: &Value) -> Option<String> {
+    match value {
+        Value::BuiltIn(tag) => tag.strip_prefix("struct:").map(str::to_string),
+        Value::Object(map) => struct_marker_name(map).map(str::to_string),
+        _ => None,
+    }
+}
+
+/// `{__kind__: "struct", name: N}` (a namespace's struct member) → `N`.
+fn struct_marker_name(map: &IndexMap<String, Value>) -> Option<&str> {
+    match (map.get("__kind__"), map.get("name")) {
+        (Some(Value::String(kind)), Some(Value::String(name))) if kind == "struct" => Some(name),
+        _ => None,
+    }
+}
+
+/// The path of a module namespace object (its `__module__` key).
+fn namespace_module(map: &IndexMap<String, Value>) -> Option<&str> {
+    match map.get(crate::semantics::NAMESPACE_MODULE_KEY) {
+        Some(Value::String(path)) => Some(path),
+        _ => None,
     }
 }
 
@@ -992,17 +1063,12 @@ impl Environment {
             Value::Set(arr) => {
                 Value::Set(arr.into_map_same_hash(|x| Self::dup_value(x, scope_map)))
             }
-            Value::Map(pairs) => Value::Map(
-                pairs
-                    .into_iter()
-                    .map(|(k, val)| {
-                        (
-                            Self::dup_value(k, scope_map),
-                            Self::dup_value(val, scope_map),
-                        )
-                    })
-                    .collect(),
-            ),
+            Value::Map(pairs) => Value::Map(pairs.into_map_same_hash(|(k, val)| {
+                (
+                    Self::dup_value(k, scope_map),
+                    Self::dup_value(val, scope_map),
+                )
+            })),
             Value::Object(o) => Value::Object(
                 o.into_iter()
                     .map(|(k, val)| (k, Self::dup_value(val, scope_map)))
@@ -1242,6 +1308,46 @@ pub struct Interpreter {
     /// by `child_context` (imports, `timeout`, `spawn`) and background
     /// forks; an HTTP request fork starts empty (`fork_for_serving`).
     modules: ModuleCache,
+    /// Set when a method declared `mut it` returns: the function (by
+    /// pointer) and the final value of its receiver. Taken by the method
+    /// dispatch that called that very function (`call_user_method`).
+    receiver_out: Option<(usize, Value)>,
+}
+
+/// A user method found for a receiver: the function, and the embedded
+/// field it was found through (`outer.inner_method()` delegation).
+pub(super) struct FoundMethod {
+    func: Value,
+    embedded: Option<String>,
+}
+
+/// Whether `func` is a method whose receiver is declared `mut it`.
+fn is_mut_method(func: &Value) -> bool {
+    matches!(func, Value::Function(f)
+        if f.params.first().is_some_and(|p| p.kind == ParamKind::MutReceiver))
+}
+
+/// The field/index chain `object` names when it is a place rooted at a
+/// variable (`c`, `xs[i]`, `o.f[k]`): the root and the steps.
+fn receiver_place_path(object: &Expr) -> Option<(&str, Vec<Result<&str, &Expr>>)> {
+    let mut steps = Vec::new();
+    let mut cur = object;
+    let root = loop {
+        match cur {
+            Expr::FieldAccess { object, field } => {
+                steps.push(Ok(field.as_str()));
+                cur = object;
+            }
+            Expr::Index { object, index } => {
+                steps.push(Err(index.as_ref()));
+                cur = object;
+            }
+            Expr::Ident(name) => break name.as_str(),
+            _ => return None,
+        }
+    };
+    steps.reverse();
+    Some((root, steps))
 }
 
 /// A module that ran in this program: what importing it again binds.
@@ -1255,7 +1361,9 @@ pub(crate) struct LoadedModule {
     struct_defaults: HashMap<String, IndexMap<String, Value>>,
 }
 
-type ModuleCache = Arc<Mutex<HashMap<std::path::PathBuf, Arc<LoadedModule>>>>;
+/// Shared by every interpreter of a program; makes a module's top level run
+/// once even when tasks import it concurrently (`runtime::imports`).
+type ModuleCache = Arc<crate::runtime::imports::ModuleRegistry<Arc<LoadedModule>>>;
 
 /// Teardown: release this interpreter's own roots, and if it was the last
 /// interpreter on its heap, reclaim the scope cycles nothing else holds
@@ -1273,9 +1381,7 @@ impl Drop for Interpreter {
         // The last interpreter of a program releases its imported modules,
         // so their scope cycles are collected below.
         if Arc::strong_count(&self.modules) == 1 {
-            let modules =
-                std::mem::take(&mut *self.modules.lock().unwrap_or_else(|e| e.into_inner()));
-            drop(modules);
+            drop(self.modules.take_loaded());
         }
         if self.heap.detach() {
             self.heap.collect(&[]);
@@ -1323,6 +1429,7 @@ impl Interpreter {
             caps: crate::runtime::limits::Caps::current(),
             edition: crate::semantics::edition::current(),
             modules: ModuleCache::default(),
+            receiver_out: None,
         };
         interp.register_builtins();
         interp
@@ -1430,15 +1537,26 @@ impl Interpreter {
         let file_path = crate::package::resolve_import_from(path, base_dir.as_deref())
             .ok_or_else(|| RuntimeError::new(&crate::semantics::import_not_found(path)))?;
         let key = std::fs::canonicalize(&file_path).unwrap_or_else(|_| file_path.clone());
-        let cached = self
-            .modules
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .cloned();
-        if let Some(module) = cached {
-            return Ok(module);
-        }
+        // A module runs once per program: the first import (on any thread)
+        // runs it, a concurrent one waits for it (cancellably), and every
+        // later one binds that instance.
+        let modules = Arc::clone(&self.modules);
+        let claim = modules.claim(
+            &key,
+            &file_path,
+            || {
+                if self.is_cancelled() {
+                    Err(RuntimeError::new("cancelled"))
+                } else {
+                    Ok(())
+                }
+            },
+            |message| RuntimeError::new(&message),
+        )?;
+        let claim = match claim {
+            crate::runtime::imports::Claim::Loaded(module) => return Ok(module),
+            crate::runtime::imports::Claim::Run(claim) => claim,
+        };
         // Read the path that was checked (resolved under a scoped grant).
         let checked = crate::permissions::require_import(&file_path)
             .map_err(|e| RuntimeError::new(&e.to_string()))?;
@@ -1447,12 +1565,9 @@ impl Interpreter {
         let program = crate::typechecker::prepare_module(&source, path, &file_path)
             .map_err(|e| RuntimeError::new(&e))?;
 
-        // Shared cycle detection (runtime/imports.rs); the guard keeps
-        // this module on the import chain while it runs.
-        let _import_guard = crate::runtime::imports::enter_import(&file_path)
-            .map_err(|msg| RuntimeError::new(&msg))?;
         // Same containment as ours: cancellation, output capture,
-        // and no host runtime (see `child_context`).
+        // and no host runtime (see `child_context`). The claim keeps this
+        // module on the import chain (cycle detection) while it runs.
         let mut import_interp = self.child_context();
         import_interp.source_file = Some(file_path.clone());
         import_interp.run(&program)?;
@@ -1465,15 +1580,7 @@ impl Interpreter {
             embedded_fields: import_interp.embedded_fields.clone(),
             struct_defaults: import_interp.struct_defaults.clone(),
         });
-        // Two tasks importing the module at once may both run it; the
-        // first to finish is the program's instance.
-        Ok(Arc::clone(
-            self.modules
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(key)
-                .or_insert(module),
-        ))
+        Ok(claim.finish(module))
     }
 
     /// The language edition this interpreter runs programs under.
@@ -1720,6 +1827,23 @@ impl Interpreter {
         interp.edition = self.edition;
         interp.modules = Arc::clone(&self.modules);
         interp
+    }
+
+    /// The `type` metadata (`__type_Name__`, used by `match` exhaustiveness)
+    /// the module knows: its own types and those it imported, so a type it
+    /// re-exports keeps its metadata in the importer.
+    fn absorb_type_metadata(&mut self, from: &LoadedModule) {
+        for key in from.env.all_names() {
+            let is_meta = key
+                .strip_prefix("__type_")
+                .and_then(|rest| rest.strip_suffix("__"))
+                .is_some_and(|name| !name.is_empty());
+            if is_meta {
+                if let Some(val) = from.env.get(&key) {
+                    self.env.define(key, val);
+                }
+            }
+        }
     }
 
     /// Merge an imported module's method tables, static methods, struct
@@ -2003,6 +2127,12 @@ impl Interpreter {
                     "variants".to_string(),
                     Value::Array(variant_names.into_iter().map(Value::String).collect()),
                 );
+                // The type's name is a value too (its description), like a
+                // struct or interface name, so it can be imported.
+                if crate::semantics::type_name_is_value(name, variants) {
+                    self.env
+                        .define(name.clone(), Value::Object(type_meta.clone()));
+                }
                 self.env
                     .define(format!("__type_{}__", name), Value::Object(type_meta));
                 Ok(Signal::None)
@@ -2244,9 +2374,9 @@ impl Interpreter {
                     Value::Channel(ch) => loop {
                         // `None` = channel closed; waits stay cancellable.
                         let next = self.wait_cancellable(|slice| {
-                            let rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
-                            match rx_guard.as_ref() {
-                                Some(rx) => match crate::clock::recv_timeout(rx, slice) {
+                            let mut rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
+                            match rx_guard.as_mut() {
+                                Some(rx) => match rx.recv_timeout(slice) {
                                     Ok(v) => Some(Some(v)),
                                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -2420,31 +2550,80 @@ impl Interpreter {
                                     self.env.define(name.clone(), val);
                                 }
                             }
-                            Stmt::TypeDef { variants, .. } => {
-                                // Import each variant individually
-                                for variant in variants {
-                                    if let Some(val) = module.env.get(&variant.name) {
-                                        self.env.define(variant.name.clone(), val);
+                            Stmt::TypeDef { name, variants } => {
+                                // The type's name (its description) and
+                                // each variant.
+                                let names =
+                                    std::iter::once(name).chain(variants.iter().map(|v| &v.name));
+                                for n in names {
+                                    if let Some(val) = module.env.get(n) {
+                                        self.env.define(n.clone(), val);
                                     }
+                                }
+                            }
+                            Stmt::InterfaceDef { name, .. } => {
+                                if let Some(val) = module.env.get(name) {
+                                    self.env.define(name.clone(), val);
                                 }
                             }
                             _ => {}
                         }
                     }
                 }
-                // Type metadata travels with every import, selective or
-                // not: a value built from an imported struct or variant
-                // dispatches through these tables (the VM registers them
-                // process-wide when the module runs).
-                for spanned in &module.program.statements {
-                    if let Stmt::TypeDef { name, .. } = &spanned.stmt {
-                        let meta_key = format!("__type_{}__", name);
-                        if let Some(val) = module.env.get(&meta_key) {
-                            self.env.define(meta_key, val);
+                self.absorb_type_metadata(&module);
+                self.absorb_type_tables(&module);
+                Ok(Signal::None)
+            }
+
+            Stmt::ImportNamespace { path, name } => {
+                if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
+                    return Err(RuntimeError::new(
+                        &crate::semantics::namespace_of_builtin_module(path, name),
+                    ));
+                }
+                let module = self.load_module(path)?;
+                // The same members, in the same order, as the VM's
+                // namespace (`semantics::namespace_members`).
+                let mut members = IndexMap::new();
+                members.insert(
+                    crate::semantics::NAMESPACE_MODULE_KEY.to_string(),
+                    Value::String(path.clone()),
+                );
+                let struct_marker = |n: &str| {
+                    let mut marker = IndexMap::new();
+                    marker.insert("__kind__".to_string(), Value::String("struct".into()));
+                    marker.insert("name".to_string(), Value::String(n.to_string()));
+                    Value::Object(marker)
+                };
+                for member in crate::semantics::namespace_members(&module.program) {
+                    match member {
+                        crate::semantics::NamespaceMember::Value(n) => {
+                            let val = module.env.get(&n).ok_or_else(|| {
+                                RuntimeError::new(&crate::semantics::import_missing_name(path, &n))
+                            })?;
+                            // A struct the module imported is a struct
+                            // member too (the VM's value of a struct name).
+                            let val = match &val {
+                                Value::BuiltIn(b) => match b.strip_prefix("struct:") {
+                                    Some(s) => struct_marker(s),
+                                    None => val,
+                                },
+                                _ => val,
+                            };
+                            members.insert(n, val);
+                        }
+                        crate::semantics::NamespaceMember::Struct(n) => {
+                            let marker = struct_marker(&n);
+                            members.insert(n, marker);
                         }
                     }
                 }
+                // Type metadata travels with the import, as for the other
+                // forms (values built here dispatch through it).
+                self.absorb_type_metadata(&module);
                 self.absorb_type_tables(&module);
+                self.env
+                    .define_with_mutability(name.clone(), Value::Object(members), false);
                 Ok(Signal::None)
             }
 
@@ -2633,11 +2812,11 @@ impl Interpreter {
             },
 
             Stmt::TimeoutBlock { duration, body } => {
-                let secs = match self.eval_expr(duration)? {
-                    Value::Int(n) => n.max(0) as u64,
-                    Value::Float(n) => n.max(0.0) as u64,
-                    _ => 5,
-                };
+                let secs = crate::semantics::timeout_seconds(match self.eval_expr(duration)? {
+                    Value::Int(n) => n as f64,
+                    Value::Float(n) => n,
+                    _ => 5.0,
+                });
                 let body = body.clone();
                 let task = crate::runtime::limits::acquire(crate::runtime::limits::Resource::Tasks)
                     .map_err(|m| RuntimeError::new(&m))?;
@@ -2659,8 +2838,10 @@ impl Interpreter {
                 })?;
                 // Wait for the body or the deadline, waking up regularly so
                 // a cancel of *this* program is not held up by a long limit.
-                let deadline =
-                    crate::clock::Instant::now().checked_add(std::time::Duration::from_secs(secs));
+                let deadline = Some(crate::semantics::timeout_deadline(
+                    crate::clock::Instant::now(),
+                    secs,
+                ));
                 let outcome = loop {
                     let slice = match deadline {
                         Some(d) => d.saturating_duration_since(crate::clock::Instant::now()),
@@ -2693,20 +2874,17 @@ impl Interpreter {
                         cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                         // Give the thread a moment to notice and exit
                         let _ = handle.join();
-                        Err(RuntimeError::new(&format!(
-                            "timeout: operation exceeded {} second limit",
-                            secs
-                        )))
+                        Err(RuntimeError::new(&crate::semantics::timeout_exceeded(secs)))
                     }
                     Err(_) => Err(RuntimeError::new("timeout: execution failed")),
                 }
             }
 
             Stmt::RetryBlock { count, body } => {
-                let max = match self.eval_expr(count)? {
-                    Value::Int(n) => n as usize,
-                    _ => 3,
-                };
+                let max = crate::semantics::retry_attempts(match self.eval_expr(count)? {
+                    Value::Int(n) => Some(n),
+                    _ => None,
+                });
                 let mut last_err = String::new();
                 for attempt in 0..max {
                     match self.exec_body(body) {
@@ -2722,9 +2900,8 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(RuntimeError::new(&format!(
-                    "retry failed after {} attempts: {}",
-                    max, last_err
+                Err(RuntimeError::new(&crate::semantics::retry_exhausted(
+                    max, &last_err,
                 )))
             }
 
@@ -2803,7 +2980,7 @@ impl Interpreter {
         arms: &'a [MatchArm],
     ) -> Result<Option<&'a MatchArm>, RuntimeError> {
         for arm in arms {
-            if !self.match_pattern(&arm.pattern, val) {
+            if !self.match_pattern(&arm.pattern, val)? {
                 continue;
             }
             self.env.push_scope();
@@ -3432,7 +3609,42 @@ impl Interpreter {
                     return result;
                 }
                 if let Expr::FieldAccess { object, field } = function.as_ref() {
-                    let obj = self.eval_expr(object)?;
+                    // A receiver that is a place (`c`, `xs[i]`, `o.f`) can
+                    // take back the update of a method declared `mut it`.
+                    // Index expressions with effects are evaluated once,
+                    // in order, while reading the receiver; effect-free
+                    // ones are evaluated again when needed.
+                    let place =
+                        receiver_place_path(object).filter(|(root, _)| self.env.contains(root));
+                    let mut walked: Option<Vec<PlaceStep<'_>>> = None;
+                    let obj = match &place {
+                        Some((root, exprs))
+                            if exprs.iter().any(
+                                |step| matches!(step, Err(index) if !self.is_effect_free(index)),
+                            ) =>
+                        {
+                            let mut value = self.env.get(root).ok_or_else(|| {
+                                RuntimeError::new(&format!("undefined: {}", root))
+                            })?;
+                            let mut steps = Vec::with_capacity(exprs.len());
+                            for step in exprs {
+                                match step {
+                                    Ok(field) => {
+                                        value = self.field_of(&value, field)?;
+                                        steps.push(PlaceStep::Field(field));
+                                    }
+                                    Err(index) => {
+                                        let index = self.eval_expr(index)?;
+                                        value = Self::index_of(&value, &index)?;
+                                        steps.push(PlaceStep::Index(index));
+                                    }
+                                }
+                            }
+                            walked = Some(steps);
+                            value
+                        }
+                        _ => self.eval_expr(object)?,
+                    };
                     let method_name = field.as_str();
                     let known_methods = [
                         "map",
@@ -3524,9 +3736,19 @@ impl Interpreter {
                             // Safety: guarded by `is_some()` above; use unwrap_or for defence-in-depth
                             map.get(field).cloned().unwrap_or(Value::Null)
                         }
-                        // Static method call: Type.method(args)
-                        Value::BuiltIn(ref tag) if tag.starts_with("struct:") => {
-                            let type_name = tag[7..].to_string();
+                        // A module namespace has only its members: no
+                        // builtin methods.
+                        Value::Object(map) if namespace_module(map).is_some() => {
+                            return Err(RuntimeError::new(&crate::semantics::no_module_member(
+                                namespace_module(map).unwrap_or_default(),
+                                field,
+                                map.keys().map(String::as_str),
+                            )));
+                        }
+                        // Static method call: Type.method(args), also through
+                        // a namespace's struct marker (`m.Point.new()`).
+                        _ if static_struct_name(&obj).is_some() => {
+                            let type_name = static_struct_name(&obj).unwrap_or_default();
                             let func_opt = self
                                 .static_methods
                                 .get(&type_name)
@@ -3555,45 +3777,45 @@ impl Interpreter {
                                 Some(Value::String(t)) => t.clone(),
                                 _ => String::new(),
                             };
-                            // Clone func out before calling self methods
-                            let func_opt = self
-                                .method_tables
-                                .get(&type_name)
-                                .and_then(|m| m.get(method_name))
-                                .cloned();
-                            if let Some(func) = func_opt {
-                                let mut full_args = vec![obj.clone()];
-                                for arg in args {
-                                    full_args.push(self.eval_expr(arg)?);
-                                }
-                                check_method_call_arity(&func, method_name, args.len(), true)?;
-                                return self.call_function(func, full_args);
-                            }
-                            // Check embedded fields for delegation
-                            let embeds = self.embedded_fields.get(&type_name).cloned();
-                            if let Some(embedded) = embeds {
-                                for (embed_field, embed_type) in &embedded {
-                                    let efunc = self
-                                        .method_tables
-                                        .get(embed_type)
-                                        .and_then(|m| m.get(method_name))
-                                        .cloned();
-                                    if let Some(func) = efunc {
-                                        let embed_obj =
-                                            map.get(embed_field).cloned().unwrap_or(Value::Null);
-                                        let mut full_args = vec![embed_obj];
-                                        for arg in args {
-                                            full_args.push(self.eval_expr(arg)?);
+                            if let Some(found) = self.user_method_of(&obj, method_name) {
+                                // A `mut it` method writes its receiver back:
+                                // fix the place's indexes before the
+                                // arguments run.
+                                let steps = match (&place, walked) {
+                                    (Some(_), Some(steps)) => Some(steps),
+                                    (Some((_, exprs)), None) if is_mut_method(&found.func) => {
+                                        let mut steps = Vec::with_capacity(exprs.len());
+                                        for step in exprs {
+                                            steps.push(match step {
+                                                Ok(field) => PlaceStep::Field(field),
+                                                Err(index) => {
+                                                    PlaceStep::Index(self.eval_expr(index)?)
+                                                }
+                                            });
                                         }
-                                        check_method_call_arity(
-                                            &func,
-                                            method_name,
-                                            args.len(),
-                                            true,
-                                        )?;
-                                        return self.call_function(func, full_args);
+                                        Some(steps)
+                                    }
+                                    _ => None,
+                                };
+                                let mut values = Vec::with_capacity(args.len());
+                                for arg in args {
+                                    values.push(self.eval_expr(arg)?);
+                                }
+                                let (result, updated) =
+                                    self.call_found_method(found, &obj, method_name, values)?;
+                                if let Some(updated) = updated {
+                                    match (&place, steps) {
+                                        (Some((root, _)), Some(steps)) => {
+                                            self.assign_receiver_place(root, &steps, updated)?
+                                        }
+                                        _ => {
+                                            return Err(RuntimeError::new(
+                                                &crate::semantics::temporary_receiver(method_name),
+                                            ))
+                                        }
                                     }
                                 }
+                                return Ok(result);
                             }
                             // Fall through to known_methods / error
                             if known_methods.contains(&method_name) {
@@ -3682,7 +3904,7 @@ impl Interpreter {
                                 "add" => {
                                     if is_frozen {
                                         return Err(RuntimeError::new(
-                                            "cannot add to a frozen set",
+                                            &crate::semantics::frozen_method("add", "set"),
                                         ));
                                     }
                                     if args.len() != 1 {
@@ -3698,7 +3920,7 @@ impl Interpreter {
                                 "remove" => {
                                     if is_frozen {
                                         return Err(RuntimeError::new(
-                                            "cannot remove from a frozen set",
+                                            &crate::semantics::frozen_method("remove", "set"),
                                         ));
                                     }
                                     if args.len() != 1 {
@@ -3773,14 +3995,15 @@ impl Interpreter {
                                 )
                         } =>
                         {
-                            let is_frozen = matches!(&obj, Value::Frozen(_));
-                            let pairs: Vec<(Value, Value)> = match &obj {
-                                Value::Map(pairs) => pairs.clone(),
-                                Value::Frozen(inner) => match inner.as_ref() {
-                                    Value::Map(pairs) => pairs.clone(),
-                                    _ => unreachable!(),
+                            // `obj` is already this call's own copy of the
+                            // receiver: take its entries without copying.
+                            let (pairs, is_frozen): (MapEntries, bool) = match obj {
+                                Value::Map(pairs) => (pairs, false),
+                                Value::Frozen(inner) => match *inner {
+                                    Value::Map(pairs) => (pairs, true),
+                                    _ => return Err(RuntimeError::new("BUG: map receiver")),
                                 },
-                                _ => unreachable!(),
+                                _ => return Err(RuntimeError::new("BUG: map receiver")),
                             };
                             match method_name {
                                 "get" => {
@@ -3790,12 +4013,10 @@ impl Interpreter {
                                         ));
                                     }
                                     let key = self.eval_expr(&args[0])?;
-                                    for (k, v) in &pairs {
-                                        if Value::container_eq(k, &key) {
-                                            return Ok(v.clone());
-                                        }
-                                    }
-                                    return Ok(Value::Null);
+                                    return Ok(pairs
+                                        .get_value(&key)
+                                        .cloned()
+                                        .unwrap_or(Value::Null));
                                 }
                                 "has" => {
                                     if args.len() != 1 {
@@ -3804,14 +4025,12 @@ impl Interpreter {
                                         ));
                                     }
                                     let key = self.eval_expr(&args[0])?;
-                                    return Ok(Value::Bool(
-                                        pairs.iter().any(|(k, _)| Value::container_eq(k, &key)),
-                                    ));
+                                    return Ok(Value::Bool(pairs.has_key_value(&key)));
                                 }
                                 "set" => {
                                     if is_frozen {
                                         return Err(RuntimeError::new(
-                                            "cannot mutate a frozen map",
+                                            &crate::semantics::frozen_method("set", "map"),
                                         ));
                                     }
                                     if args.len() != 2 {
@@ -3822,23 +4041,13 @@ impl Interpreter {
                                     let key = self.eval_expr(&args[0])?;
                                     let val = self.eval_expr(&args[1])?;
                                     let mut new_pairs = pairs;
-                                    let mut replaced = false;
-                                    for entry in new_pairs.iter_mut() {
-                                        if Value::container_eq(&entry.0, &key) {
-                                            entry.1 = val.clone();
-                                            replaced = true;
-                                            break;
-                                        }
-                                    }
-                                    if !replaced {
-                                        new_pairs.push((key, val));
-                                    }
+                                    new_pairs.insert_value(key, val);
                                     return Ok(Value::Map(new_pairs));
                                 }
                                 "remove" => {
                                     if is_frozen {
                                         return Err(RuntimeError::new(
-                                            "cannot mutate a frozen map",
+                                            &crate::semantics::frozen_method("remove", "map"),
                                         ));
                                     }
                                     if args.len() != 1 {
@@ -3847,10 +4056,8 @@ impl Interpreter {
                                         ));
                                     }
                                     let key = self.eval_expr(&args[0])?;
-                                    let new_pairs: Vec<(Value, Value)> = pairs
-                                        .into_iter()
-                                        .filter(|(k, _)| !Value::container_eq(k, &key))
-                                        .collect();
+                                    let mut new_pairs = pairs;
+                                    new_pairs.remove_key(&key);
                                     return Ok(Value::Map(new_pairs));
                                 }
                                 "keys" => {
@@ -3891,7 +4098,11 @@ impl Interpreter {
                                     items: items.into_vec(),
                                     idx: 0,
                                 },
-                                Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
+                                Value::Map(pairs) => StreamKind::MapIter {
+                                    pairs: pairs.into_vec(),
+                                    idx: 0,
+                                },
+
                                 Value::String(s) => StreamKind::StringIter {
                                     chars: s.chars().collect(),
                                     idx: 0,
@@ -3903,7 +4114,10 @@ impl Interpreter {
                                         items: items.into_vec(),
                                         idx: 0,
                                     },
-                                    Value::Map(pairs) => StreamKind::MapIter { pairs, idx: 0 },
+                                    Value::Map(pairs) => StreamKind::MapIter {
+                                        pairs: pairs.into_vec(),
+                                        idx: 0,
+                                    },
                                     other => {
                                         return Err(RuntimeError::new(&format!(
                                             "stream() not supported on {}",
@@ -3992,7 +4206,26 @@ impl Interpreter {
                 closure: Arc::new(std::sync::Mutex::new(self.capture_env())),
             }),
 
-            Expr::StructInit { name, fields } => {
+            Expr::StructInit {
+                name,
+                fields,
+                namespace,
+            } => {
+                if let Some(ns) = namespace {
+                    // `m.Point { ... }`: `m.Point` must be the module's
+                    // struct (an unknown member is the namespace's error).
+                    let member = self.eval_expr(&Expr::FieldAccess {
+                        object: Box::new(Expr::Ident(ns.clone())),
+                        field: name.clone(),
+                    })?;
+                    let is_struct = matches!(&member, Value::Object(m)
+                        if struct_marker_name(m) == Some(name.as_str()));
+                    if !is_struct {
+                        return Err(RuntimeError::new(
+                            &crate::semantics::not_a_namespace_struct(ns, name),
+                        ));
+                    }
+                }
                 let mut map = IndexMap::new();
                 // Apply defaults first, then override with provided fields
                 if let Some(defaults) = self.struct_defaults.get(name).cloned() {
@@ -4256,7 +4489,9 @@ impl Interpreter {
                                 self.env.set(var_name, new_arr.clone())?;
                                 return Ok(new_arr);
                             }
-                            return Err(RuntimeError::new("push() first argument must be array"));
+                            return Err(RuntimeError::new(
+                                &crate::semantics::builtin_args::bad_args("push"),
+                            ));
                         }
                         if method == "pop" && args.is_empty() {
                             let arr = self.eval_expr(object)?;
@@ -4265,7 +4500,9 @@ impl Interpreter {
                                 self.env.set(var_name, Value::Array(items))?;
                                 return Ok(popped);
                             }
-                            return Err(RuntimeError::new("pop() requires array"));
+                            return Err(RuntimeError::new(
+                                &crate::semantics::builtin_args::bad_args("pop"),
+                            ));
                         }
                     }
                 }
@@ -4313,7 +4550,8 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(RuntimeError::new(&crate::semantics::no_field(
+                Err(RuntimeError::new(&crate::semantics::missing_member(
+                    namespace_module(map),
                     field,
                     map.keys().map(String::as_str),
                 )))
@@ -5194,8 +5432,102 @@ impl Interpreter {
                     .and_then(|d| self.eval_expr(d).ok())
                     .unwrap_or(Value::Null),
             };
-            self.env.define(param.name.clone(), val);
+            // A method's plain receiver `it` is immutable (E0006); `mut it`
+            // is handed back to the caller when the method returns.
+            self.env
+                .define_with_mutability(param.name.clone(), val, param.is_mutable());
         }
+    }
+
+    /// The user method `obj.method(...)` calls, if any: the receiver's type
+    /// has it in its method table (unless the object has a field of that
+    /// name, which is called instead), or one of its embedded fields'
+    /// types does.
+    pub(super) fn user_method_of(&self, obj: &Value, method: &str) -> Option<FoundMethod> {
+        let Value::Object(map) = obj else {
+            return None;
+        };
+        if map.contains_key(method) {
+            return None;
+        }
+        let Some(Value::String(type_name)) = map.get("__type__") else {
+            return None;
+        };
+        if let Some(func) = self
+            .method_tables
+            .get(type_name)
+            .and_then(|m| m.get(method))
+        {
+            return Some(FoundMethod {
+                func: func.clone(),
+                embedded: None,
+            });
+        }
+        for (embed_field, embed_type) in self.embedded_fields.get(type_name)? {
+            if let Some(func) = self
+                .method_tables
+                .get(embed_type)
+                .and_then(|m| m.get(method))
+            {
+                return Some(FoundMethod {
+                    func: func.clone(),
+                    embedded: Some(embed_field.clone()),
+                });
+            }
+        }
+        None
+    }
+
+    /// Call a method found by [`Interpreter::user_method_of`] on
+    /// `receiver` with evaluated arguments: its result and, when it is
+    /// declared `mut it`, the updated receiver (for an embedded method, the
+    /// outer value with that field replaced).
+    pub(super) fn call_found_method(
+        &mut self,
+        found: FoundMethod,
+        receiver: &Value,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<(Value, Option<Value>), RuntimeError> {
+        check_method_call_arity(&found.func, method, args.len(), true)?;
+        let this = match (&found.embedded, receiver) {
+            (Some(field), Value::Object(map)) => map.get(field).cloned().unwrap_or(Value::Null),
+            _ => receiver.clone(),
+        };
+        let mut full_args = Vec::with_capacity(args.len() + 1);
+        full_args.push(this);
+        full_args.extend(args);
+        let (result, updated) = self.call_user_method(found.func, full_args)?;
+        let updated = match (updated, found.embedded, receiver) {
+            (Some(inner), Some(field), Value::Object(map)) => {
+                let mut outer = map.clone();
+                outer.insert(field, inner);
+                Some(Value::Object(outer))
+            }
+            (updated, _, _) => updated,
+        };
+        Ok((result, updated))
+    }
+
+    /// Call a user method: its result and, when it is declared `mut it`,
+    /// its receiver's final value (handed over by `call_function_inner`
+    /// for this very function).
+    fn call_user_method(
+        &mut self,
+        func: Value,
+        args: Vec<Value>,
+    ) -> Result<(Value, Option<Value>), RuntimeError> {
+        let id = match &func {
+            Value::Function(f) => Some(Arc::as_ptr(f) as usize),
+            _ => None,
+        };
+        self.receiver_out = None;
+        let result = self.call_function(func, args)?;
+        let updated = match self.receiver_out.take() {
+            Some((from, value)) if Some(from) == id => Some(value),
+            _ => None,
+        };
+        Ok((result, updated))
     }
 
     pub fn call_function(&mut self, func: Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -5270,6 +5602,12 @@ impl Interpreter {
                 self.env.push_scope();
                 self.bind_params(params, args);
                 let result = self.exec_stmts(body);
+                if let Some(receiver) = params.first().filter(|p| p.kind == ParamKind::MutReceiver)
+                {
+                    if let Some(value) = self.env.get(&receiver.name) {
+                        self.receiver_out = Some((Arc::as_ptr(&func) as usize, value));
+                    }
+                }
                 self.env = saved_env;
 
                 match result {
@@ -5465,13 +5803,16 @@ impl Interpreter {
 
     // ========== Pattern Matching ==========
 
-    fn match_pattern(&self, pattern: &Pattern, value: &Value) -> bool {
+    /// Whether `value` matches `pattern`. Fails only for a namespaced
+    /// constructor pattern (`ns.Name(..)`) whose member is unknown or not
+    /// a variant.
+    fn match_pattern(&self, pattern: &Pattern, value: &Value) -> Result<bool, RuntimeError> {
         match pattern {
-            Pattern::Wildcard => true,
+            Pattern::Wildcard => Ok(true),
             Pattern::Binding(name) => {
                 // Native None matches by name
                 if name == "None" {
-                    return matches!(value, Value::None);
+                    return Ok(matches!(value, Value::None));
                 }
                 // If the binding name matches a known ADT unit variant, treat as constructor match
                 if let std::option::Option::Some(ref bound_val) = self.env.get(name) {
@@ -5483,23 +5824,20 @@ impl Interpreter {
                                 if let std::option::Option::Some(Value::String(val_variant)) =
                                     val_obj.get("__variant__")
                                 {
-                                    return bound_variant == val_variant;
+                                    return Ok(bound_variant == val_variant);
                                 }
                             }
-                            return false;
+                            return Ok(false);
                         }
                     }
                     // Native None check via binding
-                    if matches!(bound_val, Value::None) && matches!(value, Value::None) {
-                        return true;
-                    }
-                    if matches!(bound_val, Value::None) && !matches!(value, Value::None) {
-                        return false;
+                    if matches!(bound_val, Value::None) {
+                        return Ok(matches!(value, Value::None));
                     }
                 }
-                true
+                Ok(true)
             }
-            Pattern::Literal(expr) => match (expr, value) {
+            Pattern::Literal(expr) => Ok(match (expr, value) {
                 (Expr::Int(a), Value::Int(b)) => a == b,
                 (Expr::Float(a), Value::Float(b)) => a == b,
                 // Numbers match numerically, like `==` (and the VM's `Eq`).
@@ -5508,76 +5846,130 @@ impl Interpreter {
                 (Expr::StringLit(a), Value::String(b)) => a == b,
                 (Expr::Bool(a), Value::Bool(b)) => a == b,
                 _ => false,
-            },
-            Pattern::Constructor { name, fields } => {
+            }),
+            Pattern::Constructor {
+                name,
+                fields,
+                namespace: Some(ns),
+            } => {
+                // `ns.Name(..)`: reading the member raises the namespace's
+                // error for an unknown name; the value must be the variant
+                // that member builds (`semantics::namespaced_variant_matches`).
+                let member = self.namespace_member(ns, name)?;
+                let (value_type, value_variant) = match value {
+                    Value::Object(map) => (
+                        string_field(map, "__type__"),
+                        string_field(map, "__variant__"),
+                    ),
+                    _ => (None, None),
+                };
+                let matched = crate::semantics::namespaced_variant_matches(
+                    ns,
+                    name,
+                    variant_member(&member),
+                    value_type,
+                    value_variant,
+                )
+                .map_err(|e| RuntimeError::new(&e))?;
+                match value {
+                    Value::Object(map) if matched => self.match_variant_fields(fields, map),
+                    _ => Ok(false),
+                }
+            }
+            Pattern::Constructor {
+                name,
+                fields,
+                namespace: None,
+            } => {
                 match (name.as_str(), value) {
-                    ("Ok", Value::ResultOk(inner)) => {
-                        return fields.is_empty()
-                            || (fields.len() == 1
-                                && self.match_pattern(&fields[0], inner.as_ref()));
-                    }
-                    ("Err", Value::ResultErr(inner)) => {
-                        return fields.is_empty()
-                            || (fields.len() == 1
-                                && self.match_pattern(&fields[0], inner.as_ref()));
-                    }
-                    ("Some", Value::Some(inner)) => {
-                        return fields.is_empty()
-                            || (fields.len() == 1
-                                && self.match_pattern(&fields[0], inner.as_ref()));
+                    ("Ok", Value::ResultOk(inner))
+                    | ("Err", Value::ResultErr(inner))
+                    | ("Some", Value::Some(inner)) => {
+                        return Ok(fields.is_empty()
+                            || (fields.len() == 1 && self.match_pattern(&fields[0], inner)?));
                     }
                     ("None", Value::None) => {
-                        return fields.is_empty();
+                        return Ok(fields.is_empty());
                     }
                     _ => {}
                 }
 
                 if let Value::Object(map) = value {
-                    if let Some(Value::String(type_name)) = map.get("__type__") {
-                        if type_name == name {
-                            if fields.is_empty() {
-                                return true;
-                            }
-                            return fields.iter().enumerate().all(|(i, pat)| {
-                                let key = format!("_{}", i);
-                                map.get(&key)
-                                    .map(|field_val| self.match_pattern(pat, field_val))
-                                    .unwrap_or(false)
-                            });
-                        }
-                    }
-                    if let Some(Value::String(variant)) = map.get("__variant__") {
-                        if variant == name {
-                            if fields.is_empty() {
-                                return true;
-                            }
-                            return fields.iter().enumerate().all(|(i, pat)| {
-                                let key = format!("_{}", i);
-                                map.get(&key)
-                                    .map(|field_val| self.match_pattern(pat, field_val))
-                                    .unwrap_or(false)
-                            });
-                        }
+                    if string_field(map, "__type__") == Some(name.as_str())
+                        || string_field(map, "__variant__") == Some(name.as_str())
+                    {
+                        return self.match_variant_fields(fields, map);
                     }
                 }
-                false
+                Ok(false)
             }
-            Pattern::Or(alts) => alts.iter().any(|p| self.match_pattern(p, value)),
+            Pattern::Or(alts) => {
+                for p in alts {
+                    if self.match_pattern(p, value)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
         }
+    }
+
+    /// `ns.name` for a namespaced pattern, with the errors of reading it
+    /// as a field (an unknown member is E0013 `module '...' has no member`).
+    fn namespace_member(&self, ns: &str, name: &str) -> Result<Value, RuntimeError> {
+        let namespace = self
+            .env
+            .get(ns)
+            .ok_or_else(|| RuntimeError::new(&crate::semantics::undefined_variable(ns, None)))?;
+        let Value::Object(members) = &namespace else {
+            return Err(RuntimeError::new(
+                &crate::semantics::not_a_namespace_variant(ns, name),
+            ));
+        };
+        if let Some(member) = members.get(name) {
+            return Ok(member.clone());
+        }
+        let module = string_field(members, crate::semantics::NAMESPACE_MODULE_KEY);
+        Err(RuntimeError::new(&crate::semantics::missing_member(
+            module,
+            name,
+            members.keys().map(String::as_str),
+        )))
+    }
+
+    /// The fields of a constructor pattern against an ADT value's `_0`,
+    /// `_1`, ... (a missing field does not match).
+    fn match_variant_fields(
+        &self,
+        fields: &[Pattern],
+        map: &IndexMap<String, Value>,
+    ) -> Result<bool, RuntimeError> {
+        for (i, pat) in fields.iter().enumerate() {
+            match map.get(&format!("_{}", i)) {
+                Some(field_val) if self.match_pattern(pat, field_val)? => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, value: &Value) {
         match pattern {
             Pattern::Or(alts) => {
                 // The first matching alternative supplies the bindings.
-                if let Some(alt) = alts.iter().find(|p| self.match_pattern(p, value)) {
+                // `select_match_arm` already tested the pattern, so an
+                // alternative's test cannot fail here.
+                if let Some(alt) = alts
+                    .iter()
+                    .find(|p| matches!(self.match_pattern(p, value), Ok(true)))
+                {
                     self.bind_pattern(alt, value);
                 }
             }
             Pattern::Binding(name) => {
                 self.env.define(name.clone(), value.clone());
             }
-            Pattern::Constructor { name, fields } => {
+            Pattern::Constructor { name, fields, .. } => {
                 match (name.as_str(), value) {
                     ("Ok", Value::ResultOk(inner))
                     | ("Err", Value::ResultErr(inner))
@@ -5601,6 +5993,28 @@ impl Interpreter {
             }
             _ => {}
         }
+    }
+}
+
+/// A string-valued field of an object (`__type__`, `__variant__`, ...).
+fn string_field<'a>(map: &'a IndexMap<String, Value>, key: &str) -> Option<&'a str> {
+    match map.get(key) {
+        Some(Value::String(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// The `(type, variant)` a namespace member constructs: an ADT constructor
+/// (`adt:Type:Variant:n`) or a unit variant (an object holding only its
+/// `__type__` and `__variant__`). `None` for anything else.
+fn variant_member(member: &Value) -> Option<(&str, &str)> {
+    match member {
+        Value::BuiltIn(b) => crate::semantics::adt_constructor_parts(b),
+        Value::Object(map) if map.len() == 2 => Some((
+            string_field(map, "__type__")?,
+            string_field(map, "__variant__")?,
+        )),
+        _ => None,
     }
 }
 
@@ -5628,31 +6042,6 @@ fn check_interface_satisfaction(value: &Value, methods: &[Value], env: &Environm
         }
     }
     true
-}
-
-fn json_to_value(v: serde_json::Value) -> Value {
-    match v {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
-            } else {
-                Value::Null
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s),
-        serde_json::Value::Array(items) => {
-            Value::Array(items.into_iter().map(json_to_value).collect())
-        }
-        serde_json::Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, json_to_value(v)))
-                .collect(),
-        ),
-    }
 }
 
 /// Runtime error

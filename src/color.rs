@@ -30,8 +30,17 @@ pub enum Stream {
 }
 
 /// Whether text written to `stream` should carry ANSI color.
-/// Computed once per stream per process.
+/// Computed once per stream per process; always off for a stream the
+/// thread's output capture takes (`runtime::stdio`): a capture is not a
+/// terminal, whatever the host's own stream is.
 pub fn enabled(stream: Stream) -> bool {
+    let captured = match stream {
+        Stream::Stdout => crate::runtime::stdio::Stream::Stdout,
+        Stream::Stderr => crate::runtime::stdio::Stream::Stderr,
+    };
+    if crate::runtime::stdio::captures(captured) {
+        return false;
+    }
     static STDOUT: OnceLock<bool> = OnceLock::new();
     static STDERR: OnceLock<bool> = OnceLock::new();
     let (cell, is_tty): (&OnceLock<bool>, fn() -> bool) = match stream {

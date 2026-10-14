@@ -264,6 +264,65 @@ fn interface_multi_method() {
     );
 }
 
+// V3 finding 6: a value declared with an interface type satisfies that
+// interface, and any interface whose methods it has.
+const IFACE_PRELUDE: &str = "interface Shape { fn area() -> Int }\ninterface Named { fn name() -> String }\ninterface Both {\n  fn area() -> Int\n  fn name() -> String\n}\ninterface Loose { fn area() }\ninterface Wide { fn area(scale: Int) -> Int }\ninterface Stringy { fn area() -> String }\nfn inner(x: Shape) -> Int { return x.area() }\n";
+
+#[test]
+fn interface_value_satisfies_its_interface() {
+    for body in [
+        "fn outer(x: Shape) -> Int { return inner(x) }",
+        "fn outer(x: Both) -> Int { return inner(x) }",
+        // An unannotated return is unknown: it may be an Int.
+        "fn outer(x: Loose) -> Int { return inner(x) }",
+        "fn outer(xs: [Shape]) -> [Shape] { return xs }",
+        "fn outer(xs: [Both]) -> [Shape] { return xs }",
+        "fn outer(x: Shape) -> ?Shape { return x }",
+    ] {
+        let src = format!("{}{}", IFACE_PRELUDE, body);
+        for edition in [Edition::E2026, Edition::E2027] {
+            let d = check_in(&src, false, edition);
+            assert!(
+                d.is_empty(),
+                "{:?} in {:?}: {:?}",
+                body,
+                edition,
+                d.iter().map(|w| &w.message).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn interface_value_missing_methods_is_t0012() {
+    for (body, needle) in [
+        (
+            "fn outer(x: Named) -> Int { return inner(x) }",
+            "missing 'area'",
+        ),
+        ("fn outer(x: Wide) -> Int { return inner(x) }", "parameter"),
+        (
+            "fn outer(x: Stringy) -> Int { return inner(x) }",
+            "returns String",
+        ),
+        (
+            "fn outer(xs: [Named]) -> [Shape] { return xs }",
+            "missing 'area'",
+        ),
+    ] {
+        let src = format!("{}{}", IFACE_PRELUDE, body);
+        let d = check_in(&src, false, Edition::E2027);
+        assert!(
+            d.iter().any(|w| w.code == Code::InterfaceNotSatisfied
+                && w.is_error()
+                && w.message.contains(needle)),
+            "{:?}: {:?}",
+            body,
+            d.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+}
+
 // ========== M3.3: Option<T> Type Checking ==========
 
 #[test]
@@ -483,6 +542,102 @@ fn narrowing_unknown_not_narrowed() {
     // x is Unknown (no annotation), narrowing Unknown stays Unknown,
     // and Unknown is compatible with anything — no warning
     assert!(w.is_empty());
+}
+
+// V3 finding 18: the right operand of `||` / `&&` sees the left one's
+// null test.
+#[test]
+fn narrowing_or_right_operand_after_eq_null() {
+    let src = "fn lowest(xs: [Int]) {\n  let mut lo = null\n  for v in xs {\n    if lo == null || v < lo {\n      lo = v\n    }\n  }\n  return lo\n}";
+    let w = warnings_for(src);
+    assert!(
+        w.is_empty(),
+        "`lo == null || v < lo` is guarded: {:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn narrowing_and_right_operand_after_not_null() {
+    let w = warnings_for("fn f(x: ?Int) -> Bool {\n  return x != null && x > 3\n}");
+    assert!(
+        w.is_empty(),
+        "`x != null && x > 3` is guarded: {:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn narrowing_false_or_proves_both_negations() {
+    // `if best == null || v < best { return v }`: afterwards best is set.
+    for src in [
+        "fn f(best: ?Int, v: Int) -> Int {\n  if best == null || v < best {\n    return v\n  }\n  return best\n}",
+        "fn f(best: ?Int, v: Int) -> Int {\n  if best == null || v < best {\n    return v\n  } else {\n    return best\n  }\n}",
+        "fn f(best: ?Int) -> Int {\n  if !(best != null) { return 0 }\n  return best\n}",
+    ] {
+        let w = warnings_for(src);
+        assert!(
+            w.is_empty(),
+            "{:?}: {:?}",
+            src,
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn narrowing_false_and_proves_nothing() {
+    // The else of `x != null && y != null` knows neither is null nor set:
+    // `x` stays `?Int` (it used to become Null: `x + 1` there was a false
+    // certain error, and this assignment passed).
+    let src = "fn f(x: ?Int, y: ?Int) -> Int {\n  if x != null && y != null {\n    return x + y\n  } else {\n    let z: Null = x\n    return 0\n  }\n}";
+    let w = warnings_for(src);
+    assert!(
+        w.len() == 1 && w[0].message.contains("type mismatch"),
+        "{:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+    let src = "fn f(x: ?Int, y: ?Int) -> Int {\n  if x != null && y != null {\n    return 0\n  }\n  return x\n}";
+    let w = warnings_for(src);
+    assert!(
+        w.iter().any(|w| w.message.contains("return type mismatch")),
+        "{:?}",
+        w.iter().map(|w| &w.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn narrowing_operands_stay_sound() {
+    // `x == null && x > 3`, `x != null || x > 3`: x is null there, a
+    // certain run-time error.
+    for src in [
+        "fn f(x: ?Int) -> Bool {\n  return x == null && x > 3\n}",
+        "fn f(x: ?Int) -> Bool {\n  return x != null || x > 3\n}",
+    ] {
+        let w = warnings_for(src);
+        assert!(
+            w.iter()
+                .any(|w| w.message.contains("cannot be applied to Null")),
+            "{:?}",
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+    // The wrong test, or a test of another variable, guards nothing; and
+    // the narrowing ends with the expression.
+    for src in [
+        "fn f(x: ?Int, y: ?Int) -> Bool {\n  return y != null && x > 3\n}",
+        // `!(a && b)` false says nothing about a or b alone.
+        "fn f(x: ?Int, y: ?Int) -> Bool {\n  return (x == null && y == null) || x > 3\n}",
+        "fn f(x: ?Int) -> Bool {\n  let a = x != null && x > 3\n  return x > 3\n}",
+    ] {
+        let w = warnings_for(src);
+        assert!(
+            w.iter().any(|w| w.code == Code::OptionMisuse),
+            "expected T0014 for {:?}, got {:?}",
+            src,
+            w.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
@@ -1310,6 +1465,54 @@ fn immutable_assignment_is_reported() {
 }
 
 #[test]
+fn method_receivers_are_read_only_unless_mut_it() {
+    let counter = "struct C { n: Int }\nimpl C {\n    fn inc(mut it) { it.n += 1 }\n    fn get(it) { return it.n }\n}\nfn make() { return C { n: 0 } }\n";
+    // Writing to a plain receiver.
+    assert_eq!(
+        codes("struct P { n: Int }\nimpl P {\n    fn bump(it) { it.n += 1 }\n}"),
+        vec![Code::ImmutableAssign]
+    );
+    assert_eq!(
+        codes("struct P { xs: [Int] }\nimpl P {\n    fn add(it, x: Int) { it.xs.push(x) }\n}"),
+        vec![Code::ImmutableAssign]
+    );
+    assert_eq!(
+        codes("struct P { n: Int }\nimpl P {\n    fn reset(it) { it = P { n: 0 } }\n}"),
+        vec![Code::ImmutableAssign]
+    );
+    // A `mut it` receiver may be updated, through any place.
+    assert!(codes(&format!(
+        "{counter}let mut c = make()\nc.inc()\nlet mut cs = [make()]\ncs[0].inc()\nlet mut o = {{ c: make() }}\no.c.inc()"
+    ))
+    .is_empty());
+    // ... but not on an immutable root or a temporary.
+    assert_eq!(
+        codes(&format!("{counter}let c = make()\nc.inc()")),
+        vec![Code::ImmutableAssign]
+    );
+    assert_eq!(
+        codes(&format!("{counter}make().inc()")),
+        vec![Code::ImmutableAssign]
+    );
+    // Read-only methods are fine anywhere; a copy of `it` is mutable.
+    assert!(codes(&format!(
+        "{counter}let c = make()\nc.get()\nmake().get()\nimpl C {{\n    fn bumped(it) {{\n        let mut copy = it\n        copy.n += 1\n        return copy\n    }}\n}}"
+    ))
+    .is_empty());
+    // A `mut it` method calling another one on `it`; a plain one cannot.
+    assert!(codes(&format!(
+        "{counter}impl C {{\n    fn twice(mut it) {{\n        it.inc()\n        it.inc()\n    }}\n}}"
+    ))
+    .is_empty());
+    assert_eq!(
+        codes(&format!(
+            "{counter}impl C {{\n    fn bad(it) {{\n        it.inc()\n    }}\n}}"
+        )),
+        vec![Code::ImmutableAssign]
+    );
+}
+
+#[test]
 fn nested_push_on_an_immutable_root_is_reported() {
     // The method form updates the place, so its root must be mutable.
     assert_eq!(
@@ -1558,6 +1761,34 @@ fn prepare_instruments_annotated_code_from_2027() {
 }
 
 #[test]
+fn instrumentation_leaves_out_checks_of_values_that_always_fit() {
+    let checks = |src: &str| {
+        let (program, _) = prepare(
+            src,
+            &CheckOptions {
+                edition: Some(Edition::E2027),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("prepares");
+        format!("{:?}", program).matches("__types").count()
+    };
+    // Literals and Bool-valued operators fit their declared result.
+    assert_eq!(
+        checks("fn f(x: Int) -> Bool {\n  if x > 1 { return true }\n  return x == 0 || x < -5\n}"),
+        1
+    );
+    assert_eq!(checks("fn f() -> String { return \"a{1}\" }"), 0);
+    assert_eq!(checks("fn f() -> ?Int { return null }"), 0);
+    assert_eq!(checks("fn f() -> Int { 7 }"), 0);
+    // A literal that would be widened keeps its check.
+    assert_eq!(checks("fn f() -> Float { return 1 }"), 1);
+    assert_eq!(checks("fn f() -> Float { return 1.5 }"), 0);
+    // Anything else is checked.
+    assert_eq!(checks("fn f(x) -> Int { return x + 1 }"), 1);
+}
+
+#[test]
 fn prepare_refuses_declared_type_errors_from_2027() {
     let src = "fn f(x: Int) { return x }\nf(\"a\")";
     let options = |edition| CheckOptions {
@@ -1800,6 +2031,183 @@ fn renaming_a_type_in_an_import_is_reported() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// `import "path" as m`: `m.f(x)` is checked against the module's signature
+// (arity and argument types, as for a direct import), an unknown member is
+// T0008 with a suggestion, and `m.S { ... }` / `m.V(...)` patterns resolve
+// to the module's struct and variants.
+#[test]
+fn namespace_imports_are_checked_against_the_module() {
+    let dir = std::env::temp_dir().join(format!(
+        "forge_tc_namespace_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("geo.fg"),
+        "let mut count = 0\n\
+         fn add(a: Int, b: Int) -> Int { return a + b }\n\
+         fn bump() {\n    count = count + 1\n    return count\n}\n\
+         struct Point { x: Int, y: Int = 0 }\n\
+         type Shape = Circle(Float) | Dot\n",
+    )
+    .expect("write module");
+    let main = dir.join("main.fg");
+    let check = |source: &str, edition| {
+        analyze(
+            source,
+            &CheckOptions {
+                file: Some(main.clone()),
+                edition: Some(edition),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("parses")
+        .diagnostics
+    };
+    // Correct uses are silent in both editions.
+    let ok = "import \"geo.fg\" as geo\n\
+              let n: Int = geo.add(1, 2) + geo.bump()\n\
+              let p = geo.Point { x: n }\n\
+              let k = match geo.Circle(1.0) {\n    geo.Circle(r) => r,\n    geo.Dot => 0.0,\n}\n\
+              println(p.x, k, geo.count, geo.__module__)\n";
+    for edition in [Edition::E2026, Edition::E2027] {
+        let ds = check(ok, edition);
+        assert!(ds.is_empty(), "{edition:?}: {ds:?}");
+    }
+    let found = |source: &str| -> Vec<(String, String)> {
+        check(source, Edition::E2027)
+            .iter()
+            .map(|d| (d.code.as_str().to_string(), d.message.clone()))
+            .collect()
+    };
+    // Arity and argument types, as for `import { add }`.
+    let ds = found("import \"geo.fg\" as geo\nprintln(geo.add(1))\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].0, "T0004", "{ds:?}");
+    let ds = found("import \"geo.fg\" as geo\nprintln(geo.add(1, \"x\"))\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].0, "T0002", "{ds:?}");
+    // An unknown member, with the module's closest name.
+    let ds = check(
+        "import \"geo.fg\" as geo\nprintln(geo.ad(1, 2))\n",
+        Edition::E2027,
+    );
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].code.as_str(), "T0008");
+    assert_eq!(ds[0].message, "module 'geo.fg' has no member 'ad'");
+    assert_eq!(ds[0].help.as_deref(), Some("did you mean 'add'?"));
+    assert_eq!((ds[0].span.start.line, ds[0].span.start.col), (2, 13));
+    let ds = found("import \"geo.fg\" as geo\nlet p = geo.Pointt { x: 1 }\n");
+    assert_eq!(
+        ds,
+        vec![(
+            "T0008".to_string(),
+            "module 'geo.fg' has no struct 'Pointt'".to_string()
+        )]
+    );
+    // A namespaced pattern naming no member of the namespace (the engines'
+    // E0013), at the member's position; field patterns are still typed.
+    let ds = check(
+        "import \"geo.fg\" as geo\nmatch geo.Dot {\n    geo.Circel(r) => println(r),\n    _ => println(0),\n}\n",
+        Edition::E2027,
+    );
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].code.as_str(), "T0008");
+    assert_eq!(ds[0].message, "module 'geo.fg' has no member 'Circel'");
+    assert_eq!(ds[0].help.as_deref(), Some("did you mean 'Circle'?"));
+    assert_eq!((ds[0].span.start.line, ds[0].span.start.col), (3, 9));
+    assert!(found(
+        "import \"geo.fg\" as geo\nmatch geo.Circle(1.0) {\n    geo.Circle(r) => println(r + 1.0),\n    geo.Dot => println(0),\n}\n"
+    )
+    .is_empty());
+    // The namespace binding is immutable.
+    let ds = found("import \"geo.fg\" as geo\ngeo.count = 3\n");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].0, "T0017", "{ds:?}");
+    // A local of the same name shadows the namespace.
+    assert!(check(
+        "import \"geo.fg\" as geo\nfn f(geo) { return geo.anything }\nprintln(f({anything: 1}))\n",
+        Edition::E2027
+    )
+    .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// V2 finding 22: `Object<T>` is a typed dictionary that object literals
+// and JSON objects satisfy; `Map<K, V>` stays the Map value type, and
+// annotating an object as one says how to fix it.
+#[test]
+fn typed_objects_check_their_values() {
+    let fine = "let ages: Object<Int> = { ada: 36, alan: 41 }\n\
+                let n: Int = ages.ada + ages[\"alan\"]\n\
+                let mut prices: Object<Float> = { a: 1, b: 2.5 }\n\
+                prices.c = 3\n\
+                prices[\"d\"] = 4.5\n\
+                let parsed: Object<[String]> = json.parse(\"{}\")\n\
+                let any: Object = ages\n\
+                let empty: Object<String> = {}\n\
+                let maybe: ?Object<Int> = { x: 1 }\n\
+                fn total(c: Object<Int>) -> Int {\n    let mut s = 0\n    for k, v in c {\n        s = s + v\n    }\n    return s\n}\n\
+                println(n, total(ages), total({ z: 1 }), parsed, any, empty, maybe, prices)\n";
+    assert!(errors_for(fine).is_empty(), "{:?}", errors_for(fine));
+
+    let found = |src: &str| -> Vec<(Code, String)> {
+        errors_for(src)
+            .into_iter()
+            .map(|d| (d.code, d.message))
+            .collect()
+    };
+    assert_eq!(
+        found("let c: Object<Int> = { a: 1, b: \"x\" }"),
+        vec![(
+            Code::TypeMismatch,
+            "type mismatch: 'c' declared as Object<Int> but assigned Object<String>".to_string()
+        )]
+    );
+    assert_eq!(
+        found("fn f(c: Object<Int>) { return c }\nprintln(f({ a: true }))"),
+        vec![(
+            Code::ArgumentType,
+            "argument 1 of 'f': expected Object<Int> but got Object<Bool>".to_string()
+        )]
+    );
+    assert_eq!(
+        found("let c: Object<Int> = { a: 1 }\nlet s: String = c.a"),
+        vec![(
+            Code::TypeMismatch,
+            "type mismatch: 's' declared as String but assigned Int".to_string()
+        )]
+    );
+    assert_eq!(
+        found("let mut c: Object<Int> = { a: 1 }\nc.b = \"x\""),
+        vec![(
+            Code::TypeMismatch,
+            "type mismatch: field 'b' is Int but assigned String".to_string()
+        )]
+    );
+    assert_eq!(
+        found("let mut c: Object<Int> = {}\nc[\"k\"] = [1]").len(),
+        1
+    );
+    // A Map annotation on an object: the hint names `Object<T>`.
+    let ds = errors_for("let c: Map<String, Int> = { a: 1 }");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(
+        ds[0].message,
+        "type mismatch: 'c' declared as Map<String, Int> but assigned Object"
+    );
+    assert_eq!(
+        ds[0].help.as_deref(),
+        Some("an object is not a Map: annotate it Object<Int> (an object whose values are Int), or build a Map with map()")
+    );
+    // An `Object<T>` is not a Map either.
+    assert_eq!(
+        found("let c: Object<Int> = { a: 1 }\nlet m: Map<String, Int> = c").len(),
+        1
+    );
+}
+
 #[test]
 fn imports_are_not_resolved_when_skipped() {
     let ds = analyze(
@@ -1831,4 +2239,61 @@ fn structs_fit_interfaces_inside_generic_types() {
         "{:?}",
         w
     );
+}
+
+// V3 findings 8 and 9: a `type` name can be imported and used in
+// annotations, and a name a module imports (a re-export) is checked
+// against its definition in the module that defines it.
+#[test]
+fn imported_types_and_reexports_are_checked() {
+    let dir = std::env::temp_dir().join(format!(
+        "forge_tc_reexports_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(dir.join("pkg")).expect("temp dir");
+    std::fs::write(
+        dir.join("pkg/core.fg"),
+        "fn twice(x: Int) -> Int { return x * 2 }\nstruct Pt { x: Int }\ntype Tok = Num(Int) | End\n",
+    )
+    .expect("write module");
+    std::fs::write(
+        dir.join("pkg/lib.fg"),
+        "import { twice as double, Pt, Tok, Num, End } from \"core.fg\"\nfn quad(x: Int) -> Int { return double(double(x)) }\n",
+    )
+    .expect("write module");
+    let main = dir.join("main.fg");
+    let check = |source: &str, edition| {
+        analyze(
+            source,
+            &CheckOptions {
+                file: Some(main.clone()),
+                edition: Some(edition),
+                ..CheckOptions::default()
+            },
+        )
+        .expect("parses")
+        .diagnostics
+    };
+    let clean = "import { Tok, Num, End } from \"pkg/core.fg\"\n\
+                 import { double, quad, Pt } from \"pkg/lib.fg\"\n\
+                 import \"pkg/lib.fg\" as lib\n\
+                 fn show(t: Tok) -> String {\n    return match t {\n        Num(n) => str(n),\n        End => \"end\",\n    }\n}\n\
+                 let p: Pt = lib.Pt { x: 1 }\n\
+                 println(show(Num(double(2))) + str(quad(1)) + str(p.x))\n";
+    for edition in [Edition::E2026, Edition::E2027] {
+        let ds = check(clean, edition);
+        assert!(ds.is_empty(), "{edition:?}: {ds:?}");
+    }
+    // The re-exported function keeps its signature (under the alias).
+    let ds = check(
+        "import { double } from \"pkg/lib.fg\"\nprintln(double(\"x\"))\n",
+        Edition::E2027,
+    );
+    assert_eq!(
+        ds.iter().map(|d| d.code.as_str()).collect::<Vec<_>>(),
+        vec!["T0002"],
+        "{ds:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

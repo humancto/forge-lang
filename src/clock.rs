@@ -37,6 +37,43 @@ pub fn sleep(duration: Duration) {
     }
 }
 
+/// Longest single sleep of [`sleep_interruptible`]: how late a cancellation
+/// or `timeout` deadline can be noticed by a sleeping program.
+pub const SLEEP_SLICE: Duration = Duration::from_millis(50);
+
+/// Sleep for `duration` (the `wait` builtin on both engines), calling
+/// `interrupted` before every slice of at most [`SLEEP_SLICE`] and once at
+/// the end, so cancellation and deadlines stop the sleep early.
+///
+/// The slices are measured against one deadline on the monotonic clock, not
+/// added up: an OS whose timers oversleep (macOS CI wakes a short sleep
+/// tens of milliseconds late) makes the whole `wait` late by at most one
+/// oversleep, not one per slice. Counting slices made a `wait(0.1)` cost
+/// two oversleeps on the VM (50 ms slices) against one on the interpreter
+/// (100 ms slices), which made a channel pipeline on the VM as slow as a
+/// serial one on macOS (eval/V2_FINDINGS.md, finding 27).
+pub fn sleep_interruptible<E>(
+    duration: Duration,
+    mut interrupted: impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    // `None`: too far in the future to represent, i.e. forever.
+    let deadline = Instant::now().checked_add(duration);
+    loop {
+        interrupted()?;
+        let slice = match deadline {
+            Some(deadline) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Ok(());
+                }
+                (deadline - now).min(SLEEP_SLICE)
+            }
+            None => SLEEP_SLICE,
+        };
+        sleep(slice);
+    }
+}
+
 /// `rx.recv_timeout(timeout)`. On `wasm32-unknown-unknown` (one thread, no
 /// std clock) nothing can arrive while we wait, so it is a non-blocking
 /// poll that reports `Timeout` when the channel is empty (cancellable waits
@@ -81,6 +118,48 @@ mod tests {
         let start = Instant::now();
         sleep(Duration::from_millis(5));
         assert!(start.elapsed() >= Duration::from_millis(5));
+    }
+
+    #[test]
+    fn sleep_interruptible_sleeps_the_duration_and_stops_when_interrupted() {
+        let start = Instant::now();
+        let mut polls = 0;
+        let done: Result<(), ()> = sleep_interruptible(Duration::from_millis(120), || {
+            polls += 1;
+            Ok(())
+        });
+        assert!(done.is_ok());
+        assert!(start.elapsed() >= Duration::from_millis(120));
+        // One poll before each slice and one at the deadline. Slices are at
+        // most 50 ms, but a timer that oversleeps (macOS) can make the
+        // first slice reach the deadline, so only two polls are certain.
+        assert!(polls >= 2, "{}", polls);
+
+        let start = Instant::now();
+        let mut polls = 0;
+        let stopped = sleep_interruptible(Duration::from_secs(60), || {
+            polls += 1;
+            if polls == 2 {
+                Err("cancelled")
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(stopped, Err("cancelled"));
+        assert!(start.elapsed() < Duration::from_secs(5));
+
+        // A duration too large for the clock sleeps "forever" (until
+        // interrupted) instead of overflowing.
+        let mut polls = 0;
+        let stopped = sleep_interruptible(Duration::MAX, || {
+            polls += 1;
+            if polls == 2 {
+                Err(())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(stopped, Err(()));
     }
 
     #[test]

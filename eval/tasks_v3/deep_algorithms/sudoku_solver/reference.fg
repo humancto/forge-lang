@@ -1,0 +1,88 @@
+// Backtracking sudoku solver: the grid is a top-level `let mut` array of
+// 81 Ints that the recursive search updates in place and restores.
+
+let mut grid = []
+let mut found = []
+
+fn fits(i: Int, d: Int) -> Bool {
+    let r = i / 9
+    let c = i % 9
+    for k in range(0, 9) {
+        if grid[r * 9 + k] == d || grid[k * 9 + c] == d {
+            return false
+        }
+    }
+    let br = r / 3 * 3
+    let bc = c / 3 * 3
+    for rr in range(br, br + 3) {
+        for cc in range(bc, bc + 3) {
+            if grid[rr * 9 + cc] == d {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+// Fill empty cells in row-major order, digits ascending; stop after two
+// solutions.
+fn search() {
+    let i = index_of(grid, 0)
+    if i < 0 {
+        found.push(join(map(grid, fn(d) { return str(d) }), ""))
+        return null
+    }
+    for d in range(1, 10) {
+        if fits(i, d) {
+            grid[i] = d
+            search()
+            grid[i] = 0
+            if len(found) >= 2 {
+                return null
+            }
+        }
+    }
+    return null
+}
+
+let mut n = 0
+for raw in fs.lines("/dev/stdin") {
+    let line = raw.trim()
+    if line == "" || starts_with(line, "#") {
+        continue
+    }
+    n += 1
+    if len(line) != 81 || !regex.test(line, "^[.1-9]+$") {
+        println("puzzle {n}: malformed")
+        continue
+    }
+    grid = map(split(line, ""), fn(ch) {
+        if ch == "." {
+            return 0
+        }
+        return int(ch)
+    })
+    let mut bad = false
+    for i in range(0, 81) {
+        let d = grid[i]
+        if d != 0 {
+            grid[i] = 0
+            if !fits(i, d) {
+                bad = true
+            }
+            grid[i] = d
+        }
+    }
+    if bad {
+        println("puzzle {n}: invalid")
+        continue
+    }
+    found = []
+    search()
+    if len(found) == 0 {
+        println("puzzle {n}: no solution")
+    } else {
+        let kind = if len(found) == 1 { "unique" } else { "multiple" }
+        println("puzzle {n}: {found[0]} {kind}")
+    }
+}

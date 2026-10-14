@@ -1,0 +1,64 @@
+// Edition 2027: `Object<T>` is a typed dictionary — an object (string
+// keys) whose values are all `T`. Object literals and parsed JSON objects
+// fit it; a value the checker cannot see is checked at annotated function
+// boundaries, and a declared `Object<Float>` makes Int values Floats.
+//   forge --edition 2027 test tests/edition2027 --engine both
+
+fn total(counts: Object<Int>) -> Int {
+    let mut sum = 0
+    for k, v in counts {
+        sum = sum + v
+    }
+    return sum
+}
+
+fn prices(xs: Object<Float>) -> Object<Float> {
+    return xs
+}
+
+fn tags_of(t: Object<[String]>) -> [String] {
+    return t.post
+}
+
+// Unannotated: the checker knows nothing about what this returns.
+fn opaque(v) {
+    return v
+}
+
+@test
+fn object_literals_and_json_fit() {
+    let ages: Object<Int> = { ada: 36, alan: 41 }
+    assert_eq(ages.ada, 36)
+    assert_eq(total(ages), 77)
+    assert_eq(total({}), 0)
+    assert_eq(total(json.parse("""{"a": 1, "b": 2}""")), 3)
+    assert_eq(tags_of({ post: ["x", "y"] }), ["x", "y"])
+}
+
+@test
+fn values_are_checked_at_run_time() {
+    assert_throws(fn() { total(json.parse("""{"a": 1, "b": "x"}""")) })
+    assert_throws(fn() { total(opaque([1, 2])) })
+    assert_throws(fn() { tags_of(opaque({ post: [1] })) })
+    try {
+        total(opaque({ a: "x" }))
+    } catch e {
+        assert_eq(e.message, "type error: argument 'counts' of 'total' must be Object<Int>, got Object")
+        assert_eq(e.code, "E0017")
+    }
+}
+
+@test
+fn declared_float_values_become_floats() {
+    let p = prices({ a: 1, b: 2.5 })
+    assert_eq(typeof(p.a), "Float")
+    assert_eq(typeof(p.b), "Float")
+}
+
+@test
+fn a_map_is_not_an_object() {
+    // `Map<String, Int>` is the Map value type.
+    let m: Map<String, Int> = map().set("a", 1)
+    assert_eq(m.get("a"), 1)
+    assert_throws(fn() { total(opaque(m)) })
+}

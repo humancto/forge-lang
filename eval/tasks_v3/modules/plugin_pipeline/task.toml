@@ -1,0 +1,105 @@
+id = "plugin_pipeline"
+category = "modules"
+title = "Plugins behind an interface, spread over five modules"
+answer = "files"
+prompt = '''
+The working directory already contains this `main.fg`, which you must not change (it is
+provided as is when your files are run):
+
+```forge
+// main.fg (provided): runs a text pipeline built from plugins.
+import { describe } from "plugins/api.fg"
+import { registry } from "plugins/registry.fg"
+import { run } from "pipeline.fg"
+
+let lines = fs.lines("/dev/stdin")
+println("plugins: {join(map(registry(), fn(p) { return describe(p) }), ", ")}")
+let specs = filter(split(lines[0], " "), fn(s) { return s != "" })
+match run(specs, slice(lines, 1, len(lines))) {
+    Ok(out) => {
+        for l in out {
+            println("| {l}")
+        }
+        println("{len(out)} lines")
+    },
+    Err(msg) => println("error: {msg}"),
+}
+```
+
+Write the modules it imports, each in its own file:
+
+- `plugins/api.fg`: an interface `Plugin` with two methods: `name()` returning the
+  plugin's name (a String) and `apply(lines)` taking and returning an array of Strings.
+  Also `describe(p)`, which returns `"<" + p.name() + ">"`.
+- `plugins/text.fg`: three structs implementing `Plugin`: `Trim` (name `trim`: trims
+  spaces around every line), `Lower` (`lower`: lower-cases every line) and `Upper`
+  (`upper`: upper-cases every line).
+- `plugins/filters.fg`: three structs implementing `Plugin`: `Dedupe` (`dedupe`: drops
+  every line equal to an earlier one), `NonEmpty` (`nonempty`: drops empty lines) and
+  `Grep`, which has a `pattern` field (name `grep=<pattern>`: keeps the lines that contain
+  the pattern as a substring).
+- `plugins/registry.fg`: `registry()` returns one instance of each of `Trim`, `Lower`,
+  `Upper`, `Dedupe`, `NonEmpty`, in that order; `find(spec)` returns `Some(plugin)` for a
+  registered plugin's name, `Some(Grep { pattern: <text> })` for `grep=<text>` (text not
+  empty), else `None`.
+- `pipeline.fg`: `run(specs, lines)` looks up every spec with `find`; if one is unknown it
+  returns `Err("unknown plugin <spec>")` (the first unknown one) without running anything;
+  otherwise it applies the plugins to the lines in order and returns `Ok(<resulting lines>)`.
+'''
+needs = ["read"]
+
+[[case]]
+name = "chain"
+stdin = """
+trim lower nonempty dedupe grep=a
+  Apple pie
+banana
+
+APPLE PIE
+cherry
+  Banana
+"""
+expected_stdout = """
+plugins: <trim>, <lower>, <upper>, <dedupe>, <nonempty>
+| apple pie
+| banana
+2 lines
+"""
+
+[[case]]
+name = "upper"
+stdin = """
+upper dedupe
+x
+X
+y
+"""
+expected_stdout = """
+plugins: <trim>, <lower>, <upper>, <dedupe>, <nonempty>
+| X
+| Y
+2 lines
+"""
+
+[[case]]
+name = "unknown"
+stdin = """
+trim reverse grep=
+a
+"""
+expected_stdout = """
+plugins: <trim>, <lower>, <upper>, <dedupe>, <nonempty>
+error: unknown plugin reverse
+"""
+
+[[case]]
+name = "nothing"
+stdin = """
+
+keep  this
+"""
+expected_stdout = """
+plugins: <trim>, <lower>, <upper>, <dedupe>, <nonempty>
+| keep  this
+1 lines
+"""

@@ -1,0 +1,240 @@
+id = "bank_ledger_api"
+category = "services"
+title = "Bank ledger API on SQLite with status codes and concurrent transfers"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18521 for a small bank ledger. Store everything in
+the SQLite database file `bank.db` in the working directory (create the file and tables
+when they do not exist). Every response body is JSON. Amounts are integers (cents).
+
+An account is `{"id": <int>, "owner": <string>, "currency": "EUR" or "USD", "balance": <int>}`;
+ids start at 1. A transfer is `{"id": <int>, "from": <account id>, "to": <account id>,
+"amount": <int>}`; ids start at 1 and only successful transfers get one.
+
+- `POST /accounts` with `{"owner": ..., "currency": ...}`: the owner must be a string that is
+  not empty after trimming spaces (it is stored trimmed), else answer 422
+  `{"error": "owner is required"}`; the currency must be `"EUR"` or `"USD"`, else 422
+  `{"error": "currency must be EUR or USD"}` (check the owner first). On success answer 201
+  with the new account (balance 0) and the header `Location: /accounts/<id>`.
+- `GET /accounts/<id>`: 200 with the account, or 404 `{"error": "account not found"}` (also
+  for an id that is not a number).
+- `POST /accounts/<id>/deposits` with `{"amount": ...}`: 404 as above for an unknown account;
+  then the amount must be a positive integer (not a float, not a string), else 422
+  `{"error": "amount must be a positive integer"}`. On success 200
+  `{"id": <account id>, "balance": <new balance>}`.
+- `POST /transfers` with `{"from": <id>, "to": <id>, "amount": ...}`, checked in this order:
+  amount not a positive integer: 422 as for deposits; either account does not exist: 404
+  `{"error": "account not found"}`; from equals to: 422
+  `{"error": "cannot transfer to the same account"}`; different currencies: 409
+  `{"error": "currency mismatch"}`; the sender's balance is smaller than the amount: 409
+  `{"error": "insufficient funds"}`. Otherwise move the money and record the transfer
+  atomically and answer 201 with the transfer and `Location: /transfers/<id>`.
+- `GET /accounts/<id>/transfers`: 200 `{"transfers": [...]}`, every transfer from or to the
+  account, ordered by transfer id (404 for an unknown account).
+- `GET /stats`: 200 `{"accounts": <count>, "total": <sum of all balances>, "transfers": <count>}`.
+
+Many requests arrive at the same time: concurrent deposits must all be counted, and
+concurrent transfers from one account must never take its balance below zero. The server
+runs until it is stopped.
+"""
+needs = ["net", "read", "write", "db"]
+timeout = 60
+mode = "server"
+port = 18521
+expected_stdout = """
+STATUS 200
+{"accounts": 0, "total": 0, "transfers": 0}
+STATUS 201
+location: /accounts/1
+{"balance": 0, "currency": "EUR", "id": 1, "owner": "Ada"}
+STATUS 201
+location: /accounts/2
+{"balance": 0, "currency": "EUR", "id": 2, "owner": "Bo"}
+STATUS 201
+{"balance": 0, "currency": "EUR", "id": 3, "owner": "Cy"}
+STATUS 201
+{"balance": 0, "currency": "USD", "id": 4, "owner": "Di"}
+STATUS 422
+{"error": "owner is required"}
+STATUS 422
+{"error": "currency must be EUR or USD"}
+STATUS 422
+{"error": "owner is required"}
+STATUS 404
+{"error": "account not found"}
+STATUS 404
+{"error": "account not found"}
+CONCURRENT 40
+x40 STATUS 200
+STATUS 200
+{"balance": 820, "currency": "EUR", "id": 1, "owner": "Ada"}
+STATUS 200
+{"balance": 1000, "id": 2}
+STATUS 422
+{"error": "amount must be a positive integer"}
+STATUS 422
+{"error": "amount must be a positive integer"}
+STATUS 422
+{"error": "amount must be a positive integer"}
+STATUS 404
+{"error": "account not found"}
+CONCURRENT 30
+x20 STATUS 201
+x10 STATUS 409
+STATUS 200
+{"balance": 0, "currency": "EUR", "id": 2, "owner": "Bo"}
+STATUS 200
+{"balance": 1000, "currency": "EUR", "id": 3, "owner": "Cy"}
+STATUS 409
+{"error": "currency mismatch"}
+STATUS 422
+{"error": "cannot transfer to the same account"}
+STATUS 404
+{"error": "account not found"}
+STATUS 422
+{"error": "amount must be a positive integer"}
+STATUS 409
+{"error": "insufficient funds"}
+STATUS 201
+location: /transfers/21
+{"amount": 820, "from": 1, "id": 21, "to": 3}
+STATUS 200
+{"transfers": [{"amount": 820, "from": 1, "id": 21, "to": 3}]}
+STATUS 200
+{"accounts": 4, "total": 1820, "transfers": 21}
+STATUS 404
+"""
+
+[[request]]
+path = "/stats"
+
+[[request]]
+method = "POST"
+path = "/accounts"
+body = '{"owner": "  Ada ", "currency": "EUR"}'
+show_headers = ["Location"]
+
+[[request]]
+method = "POST"
+path = "/accounts"
+body = '{"owner": "Bo", "currency": "EUR"}'
+show_headers = ["Location"]
+
+[[request]]
+method = "POST"
+path = "/accounts"
+body = '{"owner": "Cy", "currency": "EUR"}'
+
+[[request]]
+method = "POST"
+path = "/accounts"
+body = '{"owner": "Di", "currency": "USD"}'
+
+[[request]]
+method = "POST"
+path = "/accounts"
+body = '{"owner": "   ", "currency": "EUR"}'
+
+[[request]]
+method = "POST"
+path = "/accounts"
+body = '{"owner": "Ed", "currency": "GBP"}'
+
+[[request]]
+method = "POST"
+path = "/accounts"
+body = '{"currency": "XXX"}'
+
+[[request]]
+path = "/accounts/9"
+
+[[request]]
+path = "/accounts/abc"
+
+[[request]]
+method = "POST"
+path = "/accounts/1/deposits"
+body = '{"amount": {i}}'
+concurrent = 40
+status_only = true
+
+[[request]]
+path = "/accounts/1"
+
+[[request]]
+method = "POST"
+path = "/accounts/2/deposits"
+body = '{"amount": 1000}'
+
+[[request]]
+method = "POST"
+path = "/accounts/2/deposits"
+body = '{"amount": 0}'
+
+[[request]]
+method = "POST"
+path = "/accounts/2/deposits"
+body = '{"amount": 2.5}'
+
+[[request]]
+method = "POST"
+path = "/accounts/2/deposits"
+body = '{"amount": "5"}'
+
+[[request]]
+method = "POST"
+path = "/accounts/77/deposits"
+body = '{"amount": 5}'
+
+[[request]]
+method = "POST"
+path = "/transfers"
+body = '{"from": 2, "to": 3, "amount": 50}'
+concurrent = 30
+status_only = true
+
+[[request]]
+path = "/accounts/2"
+
+[[request]]
+path = "/accounts/3"
+
+[[request]]
+method = "POST"
+path = "/transfers"
+body = '{"from": 1, "to": 4, "amount": 10}'
+
+[[request]]
+method = "POST"
+path = "/transfers"
+body = '{"from": 1, "to": 1, "amount": 10}'
+
+[[request]]
+method = "POST"
+path = "/transfers"
+body = '{"from": 1, "to": 99, "amount": 10}'
+
+[[request]]
+method = "POST"
+path = "/transfers"
+body = '{"from": 1, "to": 3, "amount": -5}'
+
+[[request]]
+method = "POST"
+path = "/transfers"
+body = '{"from": 1, "to": 3, "amount": 900}'
+
+[[request]]
+method = "POST"
+path = "/transfers"
+body = '{"from": 1, "to": 3, "amount": 820}'
+show_headers = ["Location"]
+
+[[request]]
+path = "/accounts/1/transfers"
+
+[[request]]
+path = "/stats"
+
+[[request]]
+path = "/nope"
+status_only = true

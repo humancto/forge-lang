@@ -112,7 +112,8 @@ pub enum OpCode {
     /// (`GetIndex` semantics) without copying the local's reference into
     /// another register, so a uniquely owned container stays owned. The
     /// compiler emits it only when evaluating the index cannot change the
-    /// local (`is_simple_operand`); the element read out is shared.
+    /// local (`index_runs_no_code`: no calls, no in-place updates); the
+    /// element read out is shared.
     GetIndexLocal,
     /// A=dst, B=local register, C=field name constant: `R(A) = local.field`
     /// (`GetField` semantics), like `GetIndexLocal`.
@@ -134,9 +135,15 @@ pub enum OpCode {
     /// A=local register, B=field name constant, C=value register: statement
     /// `local.field.push(R(C))`, like `PushIndexLocal`.
     PushFieldLocal,
-    /// A=dst, B=local register: `R(A) = local` *without* sharing it. Only
-    /// emitted for an argument of the `CallPure` that immediately follows
-    /// the call's arguments, so the copy never outlives the call.
+    /// A=dst, B=local register, C=mode: `R(A) = local` *without* sharing
+    /// it: a snapshot that never outlives the statement using it (an
+    /// argument of the `CallPure` that immediately follows the call's
+    /// arguments, the receiver operand of `UpdateMapLocal`, or the
+    /// container of a `local[index]` read whose index may run code, read
+    /// with `GetIndex` and then shared with `Move`). With mode
+    /// `PEEK_SHARE_IF_CAPTURED` the value is shared when the local is
+    /// captured: code run while the snapshot is held (a call in the index
+    /// or key) could otherwise update it in place through the cell.
     PeekLocal,
     /// A=callee register, B=argument count, C=dst: like `Call`, for a call
     /// whose arguments may include `PeekLocal` copies. When the callee is
@@ -145,15 +152,75 @@ pub enum OpCode {
     /// arguments and its result is shared; otherwise every argument is
     /// shared first and the call proceeds exactly as `Call`.
     CallPure,
+    /// A=local register, B=first operand register, C=operation
+    /// (`MAP_UPDATE_SET` / `MAP_UPDATE_REMOVE`): `local = local.set(k, v)`
+    /// / `local = local.remove(k)` on a mutable local.
+    ///
+    /// Set: `R(B)` = the local's value read (with `PeekLocal`, not shared)
+    /// *before* the key `R(B+1)` and value `R(B+2)` were evaluated, as the
+    /// generic call reads its receiver first. When the local still holds
+    /// that same map and owns it, the entry is updated in place; otherwise
+    /// the result of `R(B).set(k, v)` (`__forge_call_method`) is stored.
+    ///
+    /// Remove: `R(B)` = the key; the local is read afterwards, as the
+    /// generic `__forge_method_mut` lowering does. In place when the local
+    /// owns a map; otherwise exactly that lowering.
+    UpdateMapLocal,
+    /// A=dst, sBx=jump: right after a `__forge_call_method_at` call. When
+    /// the method it called was declared `mut it`, R(A) = the updated
+    /// receiver (to be stored back into the call's receiver place) and
+    /// execution falls through; otherwise jump by sBx (past that store).
+    TakeReceiver,
+    /// A=value register, B=type code, C=name constant (`vm::type_check`):
+    /// the fast path of an annotation check. When R(A) certainly fits the
+    /// type and the check would return it unchanged, execution continues
+    /// with the next instruction (the jump over the check's call);
+    /// otherwise that instruction is skipped and the call decides.
+    TypeCheck,
+    /// A=local register, B=upvalue index: make local `A` of this frame an
+    /// alias of the closure's captured variable `B`, by registering the
+    /// upvalue's cell as the local's open upvalue (as if this frame had
+    /// declared it). Every local access (`GetLocal`, `SetLocal` and the
+    /// in-place opcodes) then reads and writes the cell, so a function can
+    /// update a captured container in place (`vm::local_ops`). Emitted at
+    /// function entry, after the parameters, for the captured mutable
+    /// variables the body uses as containers.
+    BindUpvalue,
+    /// A=local register, B=first operand register, C=step count n (>= 1):
+    /// statement `local[k1]..[kn].push(v)` (fields as their names), with
+    /// the keys in `R(B)..R(B+n-1)` and the value in `R(B+n)`. Appends in
+    /// place when the local owns its container and every level is a plain
+    /// array or object (each intermediate level and the array become owned
+    /// by their container, `GcObject::slot_owned`, copied once if needed),
+    /// and writes true to `R(B+n+1)`. Otherwise changes nothing visible and
+    /// writes false: the compiler's generic lowering follows and runs.
+    PushPlaceLocal,
+    /// A=register, Bx=global name constant: `GetGlobal`'s check (an
+    /// undefined global is the same error), then make register `A` an alias
+    /// of the global slot instead of a copy of its value: `read_local` /
+    /// `write_local` (and so the in-place local opcodes) read and write the
+    /// slot. Emitted around one container operation on a mutable top-level
+    /// variable that is a global (`parent[x] = r` in a function above the
+    /// `let`), right before the operation, and ended by `CloseUpvalues A, A`
+    /// right after it (a caught error drops the alias too).
+    BindGlobal,
 }
 
 /// `UpdateSetLocal` operations (its C operand).
 pub const SET_UPDATE_ADD: u8 = 0;
 pub const SET_UPDATE_REMOVE: u8 = 1;
 
+/// `UpdateMapLocal` operations (its C operand).
+pub const MAP_UPDATE_SET: u8 = 0;
+pub const MAP_UPDATE_REMOVE: u8 = 1;
+
+/// `PeekLocal` modes (its C operand).
+pub const PEEK_PLAIN: u8 = 0;
+pub const PEEK_SHARE_IF_CAPTURED: u8 = 1;
+
 // Compile-time guard: if a new variant is added to OpCode, this assertion
 // will fail, reminding you to update the TryFrom impl below.
-const _: () = assert!(OpCode::CallPure as u8 + 1 == 78);
+const _: () = assert!(OpCode::BindGlobal as u8 + 1 == 84);
 
 impl TryFrom<u8> for OpCode {
     type Error = u8;
@@ -238,6 +305,12 @@ impl TryFrom<u8> for OpCode {
             75 => Ok(OpCode::PushFieldLocal),
             76 => Ok(OpCode::PeekLocal),
             77 => Ok(OpCode::CallPure),
+            78 => Ok(OpCode::UpdateMapLocal),
+            79 => Ok(OpCode::TakeReceiver),
+            80 => Ok(OpCode::TypeCheck),
+            81 => Ok(OpCode::BindUpvalue),
+            82 => Ok(OpCode::PushPlaceLocal),
+            83 => Ok(OpCode::BindGlobal),
             _ => Err(value),
         }
     }
@@ -297,6 +370,12 @@ pub struct Chunk {
     /// v1.4+; older files are edition 2026) so a compiled program keeps its
     /// meaning: the CLI and AOT binaries run it under this edition.
     pub edition: crate::semantics::edition::Edition,
+    /// `(type, variant)` when this chunk is the compiler-generated
+    /// constructor of an ADT variant (`type T = Item(Int)`): how a
+    /// namespaced pattern `ns.Item(..)` learns which type the namespace's
+    /// member builds (`semantics::namespaced_variant_matches`). Serialized
+    /// (format v1.10+).
+    pub adt_variant: Option<(String, String)>,
 }
 
 /// Allocate a fresh, process-unique `Chunk::proto_id`.
@@ -323,6 +402,7 @@ impl Chunk {
             global_hints: Vec::new(),
             global_ids: GlobalIdCache::default(),
             edition: crate::semantics::edition::Edition::DEFAULT,
+            adt_variant: None,
         }
     }
 
@@ -477,10 +557,16 @@ mod tests {
         assert_eq!(OpCode::try_from(70u8), Ok(OpCode::GetIndexLocal));
         assert_eq!(OpCode::try_from(75u8), Ok(OpCode::PushFieldLocal));
         assert_eq!(OpCode::try_from(77u8), Ok(OpCode::CallPure));
-        assert_eq!(OpCode::try_from(78u8), Err(78));
+        assert_eq!(OpCode::try_from(78u8), Ok(OpCode::UpdateMapLocal));
+        assert_eq!(OpCode::try_from(79u8), Ok(OpCode::TakeReceiver));
+        assert_eq!(OpCode::try_from(80u8), Ok(OpCode::TypeCheck));
+        assert_eq!(OpCode::try_from(81u8), Ok(OpCode::BindUpvalue));
+        assert_eq!(OpCode::try_from(82u8), Ok(OpCode::PushPlaceLocal));
+        assert_eq!(OpCode::try_from(83u8), Ok(OpCode::BindGlobal));
+        assert_eq!(OpCode::try_from(84u8), Err(84));
         // Every byte below the count decodes to the variant with that
         // discriminant.
-        for byte in 0..78u8 {
+        for byte in 0..82u8 {
             let op = OpCode::try_from(byte).expect("BUG: valid opcode byte");
             assert_eq!(op as u8, byte);
         }

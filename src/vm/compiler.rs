@@ -13,6 +13,9 @@ struct Local {
     /// that release a captured local emit `CloseUpvalues` so the next binding
     /// in the same register (e.g. the next loop iteration) gets a fresh cell.
     captured: bool,
+    /// An alias of a captured variable of an enclosing function, bound at
+    /// function entry with `BindUpvalue` (`bind_captured_containers`).
+    mirror: bool,
 }
 
 struct LoopContext {
@@ -79,6 +82,10 @@ pub struct Compiler {
     /// that names the importer did not ask for never leak into its globals.
     global_prefix: Option<String>,
     module_globals: HashSet<String>,
+    /// Names a module's top-level bare `import "path"`s bind, by resolved
+    /// path: read once when the module's global names are collected
+    /// ([`compile_module_with`]) and reused when the import is compiled.
+    wildcard_imports: HashMap<PathBuf, Vec<String>>,
     /// Source line currently being compiled. Top-level loops update this
     /// from `SpannedStmt` before each statement so any `emit` that passes
     /// `0` for the line picks up a real source span instead.
@@ -105,6 +112,10 @@ pub struct Compiler {
     /// it) accessed as globals. A top-level `let` of such a name, compiled
     /// afterwards, defines a global instead of a register local.
     toplevel_refs: HashSet<String>,
+    /// The register of `it` while compiling the body of a method declared
+    /// `mut it`: every return first hands its final value to
+    /// `__forge_receiver_out` (see [`emit_receiver_out`]).
+    mut_receiver: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +183,7 @@ impl Compiler {
             base_dir: None,
             global_prefix: None,
             module_globals: HashSet::new(),
+            wildcard_imports: HashMap::new(),
             current_line: 0,
             current_col: 0,
             branch_overflow: false,
@@ -180,6 +192,7 @@ impl Compiler {
             toplevel_mixed: Arc::new(HashSet::new()),
             toplevel_globals: HashMap::new(),
             toplevel_refs: HashSet::new(),
+            mut_receiver: None,
         }
     }
 
@@ -366,7 +379,7 @@ impl Compiler {
     fn redeclared_captured_local(&self, name: &str) -> Option<usize> {
         let index = self.locals.iter().rposition(|l| l.name == name)?;
         let local = &self.locals[index];
-        (local.depth == self.scope_depth && local.captured).then_some(index)
+        (local.depth == self.scope_depth && local.captured && !local.mirror).then_some(index)
     }
 
     /// The runtime global name for a user-visible top-level name.
@@ -564,6 +577,7 @@ impl Compiler {
             register: reg,
             mutable,
             captured: false,
+            mirror: false,
         });
         Ok(reg)
     }
@@ -667,7 +681,10 @@ impl Compiler {
     }
 }
 
-/// Names a module defines at top level (and therefore exports).
+/// The names an imported module keeps under its private global prefix:
+/// what its top level defines (functions, variables, destructured names,
+/// types and variants) and what its imports bind (re-exports). Structs and
+/// interfaces are registered under their own name instead.
 fn module_top_level_names(program: &Program) -> HashSet<String> {
     let mut names = HashSet::new();
     for spanned in &program.statements {
@@ -675,8 +692,20 @@ fn module_top_level_names(program: &Program) -> HashSet<String> {
             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
                 names.insert(name.clone());
             }
+            Stmt::Destructure { pattern, .. } => match pattern {
+                DestructurePattern::Object(fields) => {
+                    names.extend(fields.iter().map(|(_, name)| name.clone()));
+                }
+                DestructurePattern::Array { items, rest } => {
+                    names.extend(items.iter().chain(rest.iter()).cloned());
+                }
+                DestructurePattern::Tuple(items) => names.extend(items.iter().cloned()),
+            },
             Stmt::TypeDef { name, variants } => {
                 names.insert(format!("__type_{}__", name));
+                if crate::semantics::type_name_is_value(name, variants) {
+                    names.insert(name.clone());
+                }
                 for variant in variants {
                     names.insert(variant.name.clone());
                 }
@@ -684,6 +713,7 @@ fn module_top_level_names(program: &Program) -> HashSet<String> {
             _ => {}
         }
     }
+    names.extend(crate::semantics::import_bindings(program));
     names
 }
 
@@ -777,6 +807,26 @@ pub fn compile_module_with(
     if let Some(prefix) = global_prefix {
         c.global_prefix = Some(prefix.to_string());
         c.module_globals = module_top_level_names(program);
+        // A bare `import "path"` binds the other module's names here; they
+        // are this module's names too (it can re-export them), so they need
+        // the prefix before any function referring to them is compiled.
+        for spanned in &program.statements {
+            if let Stmt::Import { path, names: None } = &spanned.stmt {
+                if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
+                    continue;
+                }
+                // Errors are reported when the import itself is compiled.
+                let Ok(resolved) = resolve_import_path(&c, path) else {
+                    continue;
+                };
+                let Ok(imported) = parse_import_program(path, &resolved) else {
+                    continue;
+                };
+                let names = import_export_names(&imported);
+                c.module_globals.extend(names.iter().cloned());
+                c.wildcard_imports.insert(resolved, names);
+            }
+        }
     }
     compile_top_level(&mut c, program)?;
     c.check_branches()?;
@@ -1094,6 +1144,43 @@ fn emit_forward_definedness_check(c: &mut Compiler, name: &str) -> Result<(), Co
     Ok(())
 }
 
+/// Whether `object` names a mutable top-level variable that is a global
+/// here (a function compiled above its `let`, or code reading it before
+/// the `let`), whose container a statement may update through a
+/// `BindGlobal` alias (`bind_global_alias` .. `end_global_alias`).
+fn global_alias_root<'e>(c: &Compiler, object: &'e Expr) -> Option<&'e str> {
+    let Expr::Ident(name) = object else {
+        return None;
+    };
+    let global = c.resolve_local(name).is_none()
+        && c.resolve_upvalue(name).is_none()
+        && c.resolve_in_parent(name).is_none()
+        && c.resolve_parent_upvalue(name).is_none()
+        && !c.outer_names.contains(name.as_str())
+        && !c.toplevel_mixed.contains(name.as_str());
+    (global && c.toplevel_global_mutability(name) == Some(true)).then_some(name.as_str())
+}
+
+/// `BindGlobal` of `name` into a fresh register, with `GetGlobal`'s
+/// undefined-variable check and hint. The caller runs exactly one
+/// container operation on the register (no code that could leave the
+/// statement in between) and then `end_global_alias`.
+fn bind_global_alias(c: &mut Compiler, name: &str) -> Result<u8, CompileError> {
+    c.note_global_access(name);
+    let reg = c.alloc_reg()?;
+    let idx = c.const_str(&c.global_name(name));
+    let pc = c.chunk.code.len();
+    c.emit(encode_abx(OpCode::BindGlobal, reg, idx), 0);
+    if let Some(hint) = c.visible_name_hint(name) {
+        c.chunk.global_hints.push((pc, hint));
+    }
+    Ok(reg)
+}
+
+fn end_global_alias(c: &mut Compiler, reg: u8) {
+    c.emit(encode_abc(OpCode::CloseUpvalues, reg, reg, 0), 0);
+}
+
 /// Store `src` into an assignment target.
 ///
 /// Collections have value semantics (as in the interpreter): `SetIndex` and
@@ -1134,6 +1221,31 @@ fn compile_store(c: &mut Compiler, target: &Expr, src: u8) -> Result<(), Compile
             let idx_reg = c.alloc_reg()?;
             compile_expr(c, index, idx_reg)?;
             c.emit(encode_abc(OpCode::SetIndexLocal, reg, idx_reg, src), 0);
+            c.free_to(saved);
+            Ok(())
+        }
+        // The same on a global (a function above the `let`): through a
+        // `BindGlobal` alias, after the index (as for a local).
+        Expr::FieldAccess { object, field }
+            if global_alias_root(c, object).is_some() && field_operand(c, field).is_some() =>
+        {
+            let name = global_alias_root(c, object).expect("BUG: checked by the guard");
+            let k = field_operand(c, field).expect("BUG: checked by the guard");
+            let saved = c.next_register;
+            let reg = bind_global_alias(c, name)?;
+            c.emit(encode_abc(OpCode::SetFieldLocal, reg, k, src), 0);
+            end_global_alias(c, reg);
+            c.free_to(saved);
+            Ok(())
+        }
+        Expr::Index { object, index } if global_alias_root(c, object).is_some() => {
+            let name = global_alias_root(c, object).expect("BUG: checked by the guard");
+            let saved = c.next_register;
+            let idx_reg = c.alloc_reg()?;
+            compile_expr(c, index, idx_reg)?;
+            let reg = bind_global_alias(c, name)?;
+            c.emit(encode_abc(OpCode::SetIndexLocal, reg, idx_reg, src), 0);
+            end_global_alias(c, reg);
             c.free_to(saved);
             Ok(())
         }
@@ -1251,15 +1363,17 @@ pub(crate) fn import_export_names(program: &Program) -> Vec<String> {
         .iter()
         .filter_map(|spanned| match &spanned.stmt {
             Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => Some(vec![name.clone()]),
-            // Like the interpreter, `import "x"` brings in a module's ADT
-            // constructors and type metadata too.
+            // Like the interpreter, `import "x"` brings in a module's type
+            // names, ADT constructors and type metadata too.
             Stmt::TypeDef { name, variants } => Some(
-                variants
-                    .iter()
-                    .map(|variant| variant.name.clone())
+                crate::semantics::type_name_is_value(name, variants)
+                    .then(|| name.clone())
+                    .into_iter()
+                    .chain(variants.iter().map(|variant| variant.name.clone()))
                     .chain(std::iter::once(format!("__type_{}__", name)))
                     .collect(),
             ),
+            Stmt::InterfaceDef { name, .. } => Some(vec![name.clone()]),
             _ => None,
         })
         .flatten()
@@ -1431,12 +1545,18 @@ fn field_operand(c: &mut Compiler, field: &str) -> Option<u8> {
 ///   value stored back, level by level (`SetIndex` / `SetField` copies,
 ///   `SetIndexLocal` / `SetFieldLocal` on a local root);
 /// * on an immutable root a change is the immutable-assignment error.
+///
+/// With `statement` (the result is discarded), a `push` on a chain of two
+/// or more steps rooted at a mutable local first tries `PushPlaceLocal`
+/// (`r[k].lat.push(x)` in place); the generic code runs only when that
+/// reports it could not.
 fn try_compile_place_method(
     c: &mut Compiler,
     place: &Expr,
     method: &str,
     args: &[Expr],
     dst: u8,
+    statement: bool,
 ) -> Result<bool, CompileError> {
     if !matches!(place, Expr::FieldAccess { .. } | Expr::Index { .. })
         || !is_mutating_method(method, args.len())
@@ -1466,6 +1586,37 @@ fn try_compile_place_method(
         let r = c.alloc_reg()?;
         compile_expr(c, arg, r)?;
         call_regs.push(r);
+    }
+
+    // `local[k1]..[kn].push(v)` as a statement: try in place first.
+    let mut in_place_done = None;
+    if let (true, "push", [_], Some((reg, true))) = (
+        statement && keys.len() >= 2 && keys.len() <= 32,
+        method,
+        args,
+        c.resolve_local(root),
+    ) {
+        let n = keys.len();
+        let block = c.alloc_reg()?;
+        for _ in 0..=n {
+            c.alloc_reg()?;
+        }
+        for (i, key) in keys.iter().enumerate() {
+            let r = block + i as u8;
+            match key {
+                PlaceKey::Index(index) => c.emit(encode_abc(OpCode::Move, r, *index, 0), 0),
+                PlaceKey::Field(field) => {
+                    let k = c.const_str(field);
+                    c.emit(encode_abx(OpCode::LoadConst, r, k), 0);
+                }
+            }
+        }
+        c.emit(
+            encode_abc(OpCode::Move, block + n as u8, call_regs[2], 0),
+            0,
+        );
+        c.emit(encode_abc(OpCode::PushPlaceLocal, reg, block, n as u8), 0);
+        in_place_done = Some(c.emit_jump(OpCode::JumpIfTrue, block + n as u8 + 1, 0));
     }
 
     // Read the chain: `levels[i]` holds the container the step `keys[i]`
@@ -1549,6 +1700,10 @@ fn try_compile_place_method(
     let two = c.const_int(2);
     c.emit(encode_abx(OpCode::LoadConst, idx_reg, two), 0);
     c.emit(encode_abc(OpCode::GetIndex, dst, triple_reg, idx_reg), 0);
+    if let Some(jump) = in_place_done {
+        // The statement's value is discarded: `dst` is not written.
+        c.patch_jump(jump);
+    }
     c.free_to(saved);
     Ok(true)
 }
@@ -1580,13 +1735,21 @@ fn try_compile_pure_call(
     let Some(Expr::Ident(var)) = args.first() else {
         return Ok(false);
     };
-    let Some((reg, _)) = c.resolve_local(var) else {
-        return Ok(false);
-    };
-    if !args[1..].iter().all(is_simple_operand) {
+    if !args[1..].iter().all(index_runs_no_code) {
         return Ok(false);
     }
     let saved = c.next_register;
+    // A global (a function above the `let`) is read through an alias.
+    let (reg, alias) = match c.resolve_local(var) {
+        Some((reg, _)) => (reg, None),
+        None => match global_alias_root(c, &args[0]) {
+            Some(name) => {
+                let reg = bind_global_alias(c, name)?;
+                (reg, Some(reg))
+            }
+            None => return Ok(false),
+        },
+    };
     let fr = c.alloc_reg()?;
     compile_expr(c, function, fr)?;
     let first = c.alloc_reg()?;
@@ -1596,6 +1759,9 @@ fn try_compile_pure_call(
         compile_expr(c, arg, ar)?;
     }
     c.emit(encode_abc(OpCode::CallPure, fr, args.len() as u8, dst), 0);
+    if let Some(reg) = alias {
+        end_global_alias(c, reg);
+    }
     c.free_to(saved);
     Ok(true)
 }
@@ -1610,6 +1776,111 @@ fn mutable_local_reg(c: &Compiler, object: &Expr) -> Option<u8> {
         },
         _ => None,
     }
+}
+
+/// `__types.check(value, "<type>", "<context>")` / `__types.widen(value,
+/// "<type>")` (annotation checks, `typechecker::enforce`) of a type with a
+/// fast path: `TypeCheck` keeps the value when it certainly fits unchanged,
+/// and only otherwise runs the call, exactly as it would have been compiled
+/// (`vm/type_check.rs`). With `dst` the value goes there; without (a
+/// statement, like the argument checks at a function's entry) a local is
+/// checked in place. Returns `false` when the call is not of that shape and
+/// was not compiled.
+fn try_compile_type_check(
+    c: &mut Compiler,
+    object: &Expr,
+    field: &str,
+    args: &[Expr],
+    dst: Option<u8>,
+) -> Result<bool, CompileError> {
+    use super::type_check;
+    let Expr::Ident(module) = object else {
+        return Ok(false);
+    };
+    if module != crate::typechecker::enforce::MODULE || c.binding_mutability(module).is_some() {
+        return Ok(false);
+    }
+    let arity = match field {
+        "check" => 3,
+        "widen" => 2,
+        _ => return Ok(false),
+    };
+    let (true, Some(Expr::StringLit(ty))) = (args.len() == arity, args.get(1)) else {
+        return Ok(false);
+    };
+    let Ok(parsed) = crate::semantics::types::parse(ty) else {
+        return Ok(false);
+    };
+    let Some((code, name)) = type_check::encode(&parsed) else {
+        return Ok(false);
+    };
+    let name_idx = match name {
+        Some(n) => match u8::try_from(c.const_str(n)) {
+            Ok(idx) => idx,
+            Err(_) => return Ok(false),
+        },
+        None => 0,
+    };
+    let saved = c.next_register;
+    let local = match (&args[0], dst) {
+        (Expr::Ident(v), None) => c.resolve_local(v).map(|(reg, _)| reg),
+        _ => None,
+    };
+    // Where the value is checked, and where the call's result goes.
+    let (checked, result) = match (local, dst) {
+        (Some(reg), _) => (reg, c.alloc_reg()?),
+        (None, Some(d)) => (d, d),
+        (None, None) => {
+            let r = c.alloc_reg()?;
+            (r, r)
+        }
+    };
+    if local.is_none() {
+        compile_expr(c, &args[0], checked)?;
+    }
+    c.emit(encode_abc(OpCode::TypeCheck, checked, code, name_idx), 0);
+    let done = c.emit_jump(OpCode::Jump, 0, 0);
+    // The call `compile_hidden_call` would emit, its value read from
+    // `checked` (a local is read as a local).
+    let call_base = c.next_register;
+    let fn_reg = c.alloc_reg()?;
+    let fn_idx = c.const_str("__forge_call_method");
+    c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
+    let receiver = c.alloc_reg()?;
+    compile_expr(c, object, receiver)?;
+    let method = c.alloc_reg()?;
+    compile_expr(c, &Expr::StringLit(field.to_string()), method)?;
+    let value = c.alloc_reg()?;
+    if local.is_some() {
+        compile_expr(c, &args[0], value)?;
+    } else {
+        c.emit(encode_abc(OpCode::Move, value, checked, 0), 0);
+    }
+    for arg in &args[1..] {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+    }
+    c.emit(
+        encode_abc(OpCode::Call, fn_reg, (args.len() + 2) as u8, result),
+        0,
+    );
+    c.free_to(call_base);
+    c.patch_jump(done);
+    if dst.is_none() {
+        c.free_to(saved);
+    }
+    Ok(true)
+}
+
+/// A statement `__types.check(...)` (see [`try_compile_type_check`]).
+fn try_compile_type_check_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, CompileError> {
+    let Expr::Call { function, args } = expr else {
+        return Ok(false);
+    };
+    let Expr::FieldAccess { object, field } = function.as_ref() else {
+        return Ok(false);
+    };
+    try_compile_type_check(c, object, field, args, None)
 }
 
 /// Compile `receiver.method(args)` (or `method(receiver, args)`) where the
@@ -1676,23 +1947,6 @@ fn try_compile_mutating_call(
     Ok(true)
 }
 
-/// An operand whose evaluation has no side effects and runs no user code
-/// (literals, variable reads, arithmetic on those, array, tuple and object
-/// literals of those). Evaluating it before rather than after reading a
-/// local therefore cannot change the result, which lets `AddLocal` /
-/// `PushLocal` read the local last. (Object literals matter: without them
-/// `rows.push({id: i})` in a loop copied the whole array on every push.)
-fn is_simple_operand(expr: &Expr) -> bool {
-    match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
-        Expr::Array(items) | Expr::Tuple(items) => items.iter().all(is_simple_operand),
-        Expr::Object(fields) => fields.iter().all(|(_, value)| is_simple_operand(value)),
-        Expr::BinOp { left, right, .. } => is_simple_operand(left) && is_simple_operand(right),
-        Expr::UnaryOp { operand, .. } => is_simple_operand(operand),
-        _ => false,
-    }
-}
-
 /// `x = x + e` (and `x += e`) on a mutable local with a simple `e`:
 /// one `AddLocal`, which appends in place to a string or array the local
 /// owns (`s = s + "x"`, `xs = xs + [v]`).
@@ -1712,7 +1966,7 @@ fn try_compile_add_local(
     else {
         return Ok(false);
     };
-    if !matches!(left.as_ref(), Expr::Ident(l) if l == name) || !is_simple_operand(right) {
+    if !matches!(left.as_ref(), Expr::Ident(l) if l == name) || !index_runs_no_code(right) {
         return Ok(false);
     }
     let Some((reg, true)) = c.resolve_local(name) else {
@@ -1752,7 +2006,7 @@ fn try_compile_push_assign(
     if !is_builtin_push
         || args.len() != 2
         || !matches!(&args[0], Expr::Ident(v) if v == name)
-        || !is_simple_operand(&args[1])
+        || !index_runs_no_code(&args[1])
     {
         return Ok(false);
     }
@@ -1804,6 +2058,59 @@ fn try_compile_push_statement(c: &mut Compiler, expr: &Expr) -> Result<bool, Com
         expr,
         Expr::Call { function, .. } if matches!(function.as_ref(), Expr::Ident(_))
     );
+    // `local[k].f.push(v)` and deeper chains: `PushPlaceLocal`, then the
+    // generic place update when it cannot push in place.
+    if method_form
+        && matches!(receiver, Expr::Index { object, .. } | Expr::FieldAccess { object, .. }
+            if !matches!(object.as_ref(), Expr::Ident(_)))
+    {
+        let saved = c.next_register;
+        let dst = c.alloc_reg()?;
+        let done =
+            try_compile_place_method(c, receiver, "push", std::slice::from_ref(value), dst, true)?;
+        c.free_to(saved);
+        return Ok(done);
+    }
+    // `g.push(v)`, `g[k].push(v)`, `g.f.push(v)` on a global (a function
+    // above the `let`): the same opcodes on a `BindGlobal` alias, bound after
+    // the index and the value are evaluated (as a local is read last).
+    let alias_root = match receiver {
+        Expr::Ident(_) => global_alias_root(c, receiver),
+        Expr::Index { object, .. } | Expr::FieldAccess { object, .. } if method_form => {
+            global_alias_root(c, object)
+        }
+        _ => None,
+    };
+    if let Some(name) = alias_root {
+        let field = match receiver {
+            Expr::FieldAccess { field, .. } => match field_operand(c, field) {
+                Some(k) => Some(k),
+                None => return Ok(false),
+            },
+            _ => None,
+        };
+        let saved = c.next_register;
+        let index_reg = match receiver {
+            Expr::Index { index, .. } => {
+                let r = c.alloc_reg()?;
+                compile_expr(c, index, r)?;
+                Some(r)
+            }
+            _ => None,
+        };
+        let value_reg = c.alloc_reg()?;
+        compile_expr(c, value, value_reg)?;
+        let reg = bind_global_alias(c, name)?;
+        let inst = match (index_reg, field) {
+            (Some(i), _) => encode_abc(OpCode::PushIndexLocal, reg, i, value_reg),
+            (None, Some(k)) => encode_abc(OpCode::PushFieldLocal, reg, k, value_reg),
+            (None, None) => encode_abc(OpCode::PushLocal, reg, value_reg, 0),
+        };
+        c.emit(inst, 0);
+        end_global_alias(c, reg);
+        c.free_to(saved);
+        return Ok(true);
+    }
     match receiver {
         Expr::Ident(var) => {
             let Some((reg, true)) = c.resolve_local(var) else {
@@ -1879,7 +2186,7 @@ fn try_compile_set_update_statement(c: &mut Compiler, expr: &Expr) -> Result<boo
     let Expr::Ident(var) = receiver else {
         return Ok(false);
     };
-    if !is_simple_operand(value) {
+    if !index_runs_no_code(value) {
         return Ok(false);
     }
     let Some((reg, true)) = c.resolve_local(var) else {
@@ -1889,6 +2196,300 @@ fn try_compile_set_update_statement(c: &mut Compiler, expr: &Expr) -> Result<boo
     let value_reg = c.alloc_reg()?;
     compile_expr(c, value, value_reg)?;
     c.emit(encode_abc(OpCode::UpdateSetLocal, reg, value_reg, op), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// Whether compiling `expr` emits no statement-level code of its own
+/// frame: only operands, operators, field/index reads and calls that are
+/// not one of the mutating method forms (`push`/`pop`/`add`/`remove`,
+/// which may update a local in place). Calls may run any code, but other
+/// frames reach this frame's locals only through upvalue cells: so
+/// evaluating such an expression cannot update an owned container of an
+/// uncaptured local of this frame in place, and a snapshot of a captured
+/// one stays valid when it is taken with `PEEK_SHARE_IF_CAPTURED` (which
+/// makes a callee's update through the cell copy instead).
+fn has_no_inline_updates(expr: &Expr) -> bool {
+    let all = |items: &[Expr]| items.iter().all(has_no_inline_updates);
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
+        Expr::StringInterp(parts) => parts.iter().all(|part| match part {
+            StringPart::Literal(_) => true,
+            StringPart::Expr(e) => has_no_inline_updates(e),
+        }),
+        Expr::Array(items) | Expr::Tuple(items) => all(items),
+        Expr::Object(fields) => fields.iter().all(|(_, e)| has_no_inline_updates(e)),
+        Expr::BinOp { left, right, .. } => {
+            has_no_inline_updates(left) && has_no_inline_updates(right)
+        }
+        Expr::UnaryOp { operand, .. } => has_no_inline_updates(operand),
+        Expr::Spread(inner) | Expr::Freeze(inner) => has_no_inline_updates(inner),
+        Expr::FieldAccess { object, .. } => has_no_inline_updates(object),
+        Expr::Index { object, index } => {
+            has_no_inline_updates(object) && has_no_inline_updates(index)
+        }
+        Expr::Call { function, args } => {
+            let mutating = match function.as_ref() {
+                Expr::FieldAccess { field, .. } => is_mutating_method(field, args.len()),
+                Expr::Ident(name) => matches!(name.as_str(), "push" | "pop"),
+                _ => false,
+            };
+            !mutating && has_no_inline_updates(function) && all(args)
+        }
+        Expr::MethodCall {
+            object,
+            method,
+            args,
+        } => !is_mutating_method(method, args.len()) && has_no_inline_updates(object) && all(args),
+        _ => false,
+    }
+}
+
+/// Whether evaluating `expr` runs no code beyond its own operators and
+/// reads: literals, variables, operators, interpolation, field and index
+/// reads, and array, tuple and object literals of those (no calls,
+/// lambdas or blocks). Evaluating it cannot change any variable or update
+/// any container, so evaluating it before rather than after reading a
+/// local cannot change the result: `local[expr]` reads the local last
+/// (`GetIndexLocal`: `o[names[i]]`, `o[it.sku]`, `o["k" + s]`), and so do
+/// `AddLocal` / `PushLocal` / `UpdateSetLocal` and the `PeekLocal` +
+/// `CallPure` reads. (Object literals matter: without them
+/// `rows.push({id: i})` in a loop copied the whole array on every push.)
+fn index_runs_no_code(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Bool(_) | Expr::Ident(_) => true,
+        Expr::StringInterp(parts) => parts.iter().all(|part| match part {
+            StringPart::Literal(_) => true,
+            StringPart::Expr(e) => index_runs_no_code(e),
+        }),
+        Expr::Array(items) | Expr::Tuple(items) => items.iter().all(index_runs_no_code),
+        Expr::Object(fields) => fields.iter().all(|(_, e)| index_runs_no_code(e)),
+        Expr::BinOp { left, right, .. } => index_runs_no_code(left) && index_runs_no_code(right),
+        Expr::UnaryOp { operand, .. } => index_runs_no_code(operand),
+        Expr::FieldAccess { object, .. } => index_runs_no_code(object),
+        Expr::Index { object, index } => index_runs_no_code(object) && index_runs_no_code(index),
+        _ => false,
+    }
+}
+
+/// `m = m.set(k, v)` / `m = m.remove(k)` on a mutable local whose key and
+/// value expressions update no local in place (`has_no_inline_updates`):
+/// one `UpdateMapLocal`, which updates the map in place when the local
+/// owns it, so building a map in a loop is O(1) per entry instead of a
+/// copy per entry. Evaluation order is the generic lowering's: `set`
+/// reads its receiver first (the `PeekLocal` snapshot), `remove` (a
+/// mutating method name, lowered through `__forge_method_mut`) last.
+fn try_compile_map_update(
+    c: &mut Compiler,
+    target: &Expr,
+    value: &Expr,
+) -> Result<bool, CompileError> {
+    let Expr::Ident(name) = target else {
+        return Ok(false);
+    };
+    let (receiver, method, args) = match value {
+        Expr::MethodCall {
+            object,
+            method,
+            args,
+        } => (object.as_ref(), method.as_str(), args.as_slice()),
+        Expr::Call { function, args } => match function.as_ref() {
+            Expr::FieldAccess { object, field } => {
+                (object.as_ref(), field.as_str(), args.as_slice())
+            }
+            _ => return Ok(false),
+        },
+        _ => return Ok(false),
+    };
+    if !matches!(receiver, Expr::Ident(r) if r == name) {
+        return Ok(false);
+    }
+    let op = match (method, args.len()) {
+        ("set", 2) => MAP_UPDATE_SET,
+        ("remove", 1) => MAP_UPDATE_REMOVE,
+        _ => return Ok(false),
+    };
+    if !args.iter().all(has_no_inline_updates) {
+        return Ok(false);
+    }
+    let Some((reg, true)) = c.resolve_local(name) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let first = c.alloc_reg()?;
+    if op == MAP_UPDATE_SET {
+        // A call in the key or value could reach the local through its
+        // cell and update the map in place: share it first then.
+        let mode = if args.iter().all(index_runs_no_code) {
+            PEEK_PLAIN
+        } else {
+            PEEK_SHARE_IF_CAPTURED
+        };
+        c.emit(encode_abc(OpCode::PeekLocal, first, reg, mode), 0);
+        for arg in args {
+            let r = c.alloc_reg()?;
+            compile_expr(c, arg, r)?;
+        }
+    } else {
+        compile_expr(c, &args[0], first)?;
+    }
+    c.emit(encode_abc(OpCode::UpdateMapLocal, reg, first, op), 0);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// `m.get(k)`, `m.has(k)`, `m.len()` (and `s.has(x)`) on a local with
+/// simple arguments: the local is passed with `PeekLocal` (not shared) to
+/// a `CallPure` of `__forge_call_method`, so reading an owned map does not
+/// make the next in-place update copy it (`m = m.set(w, m.get(w) + 1)`).
+/// At run time `CallPure` keeps the borrow only when the receiver really
+/// is a map (or a set, for `has`); anything else gets the ordinary call.
+fn try_compile_method_peek(
+    c: &mut Compiler,
+    receiver: &Expr,
+    method: &str,
+    args: &[Expr],
+    dst: u8,
+) -> Result<bool, CompileError> {
+    let arity_ok = match method {
+        "get" | "has" => args.len() == 1,
+        "len" => args.is_empty(),
+        _ => false,
+    };
+    let Expr::Ident(var) = receiver else {
+        return Ok(false);
+    };
+    if !arity_ok || !args.iter().all(index_runs_no_code) {
+        return Ok(false);
+    }
+    let Some((reg, _)) = c.resolve_local(var) else {
+        return Ok(false);
+    };
+    let saved = c.next_register;
+    let fr = c.alloc_reg()?;
+    compile_expr(c, &Expr::Ident("__forge_call_method_at".to_string()), fr)?;
+    let recv = c.alloc_reg()?;
+    c.emit(encode_abc(OpCode::PeekLocal, recv, reg, 0), 0);
+    let method_reg = c.alloc_reg()?;
+    let method_idx = c.const_str(method);
+    c.emit(encode_abx(OpCode::LoadConst, method_reg, method_idx), 0);
+    for arg in args {
+        let ar = c.alloc_reg()?;
+        compile_expr(c, arg, ar)?;
+    }
+    c.emit(
+        encode_abc(OpCode::CallPure, fr, (args.len() + 2) as u8, dst),
+        0,
+    );
+    // A struct's own `get`/`has`/`len` declared `mut it`: store its
+    // updated receiver back into the local.
+    let updated = c.alloc_reg()?;
+    let skip = c.emit_jump(OpCode::TakeReceiver, updated, 0);
+    compile_store_variable(c, var, updated)?;
+    c.patch_jump(skip);
+    c.free_to(saved);
+    Ok(true)
+}
+
+/// Write the final value of `it` to `__forge_receiver_out` when compiling
+/// a method declared `mut it` (before each of its returns).
+fn emit_receiver_out(c: &mut Compiler) -> Result<(), CompileError> {
+    let Some(reg) = c.mut_receiver else {
+        return Ok(());
+    };
+    let saved = c.next_register;
+    let dst = c.alloc_reg()?;
+    compile_hidden_call_from_regs(c, "__forge_receiver_out", &[reg], dst)?;
+    c.free_to(saved);
+    Ok(())
+}
+
+/// `place.method(args)` where `place` is a variable or a field/index chain
+/// rooted at one (`c.inc()`, `xs[i].inc()`, `o.f.inc()`), for any method:
+/// the call goes through `__forge_call_method_at`, and when the method was
+/// declared `mut it` its updated receiver is stored back into the place
+/// (`TakeReceiver`), exactly like `place = updated`: on an immutable root
+/// that is the immutable-assignment error. The interpreter's rule is
+/// `Interpreter::call_method_at_place`.
+///
+/// Order: the index expressions, then the receiver is read, then the
+/// arguments (the generic receiver-first order); the store re-reads the
+/// containers along the place, so it only replaces the receiver itself.
+///
+/// The builtin modules (`math.sqrt(x)`) keep the plain call, which the JIT
+/// understands: their members never update a receiver.
+fn try_compile_receiver_place_call(
+    c: &mut Compiler,
+    object: &Expr,
+    method: &str,
+    args: &[Expr],
+    dst: u8,
+) -> Result<bool, CompileError> {
+    let Some((root, steps)) = place_path(object) else {
+        return Ok(false);
+    };
+    let is_builtin_module =
+        crate::semantics::BUILTIN_MODULES.contains(&root) && c.binding_mutability(root).is_none();
+    if is_builtin_module {
+        return Ok(false);
+    }
+    let saved = c.next_register;
+    let mut keys = Vec::with_capacity(steps.len());
+    for step in &steps {
+        keys.push(match step {
+            Ok(field) => PlaceKey::Field(field),
+            Err(index) => {
+                let r = c.alloc_reg()?;
+                compile_expr(c, index, r)?;
+                PlaceKey::Index(r)
+            }
+        });
+    }
+    let fn_reg = c.alloc_reg()?;
+    let fn_idx = c.const_str("__forge_call_method_at");
+    c.emit(encode_abx(OpCode::GetGlobal, fn_reg, fn_idx), 0);
+    let recv_reg = c.alloc_reg()?;
+    if keys.is_empty() {
+        compile_expr(c, object, recv_reg)?;
+    } else {
+        compile_expr(c, &Expr::Ident(root.to_string()), recv_reg)?;
+        for key in &keys {
+            emit_place_read(c, recv_reg, recv_reg, key)?;
+        }
+    }
+    let method_reg = c.alloc_reg()?;
+    let method_idx = c.const_str(method);
+    c.emit(encode_abx(OpCode::LoadConst, method_reg, method_idx), 0);
+    for arg in args {
+        let r = c.alloc_reg()?;
+        compile_expr(c, arg, r)?;
+    }
+    c.emit(
+        encode_abc(OpCode::Call, fn_reg, (args.len() + 2) as u8, dst),
+        0,
+    );
+    // Only after a `mut it` method: store the updated receiver.
+    let updated = c.alloc_reg()?;
+    let skip = c.emit_jump(OpCode::TakeReceiver, updated, 0);
+    if keys.is_empty() {
+        compile_store_variable(c, root, updated)?;
+    } else {
+        let mut levels = Vec::with_capacity(keys.len());
+        for _ in 0..keys.len() {
+            levels.push(c.alloc_reg()?);
+        }
+        compile_expr(c, &Expr::Ident(root.to_string()), levels[0])?;
+        for i in 1..keys.len() {
+            emit_place_read(c, levels[i], levels[i - 1], &keys[i - 1])?;
+        }
+        let last = keys.len() - 1;
+        emit_place_write(c, levels[last], &keys[last], updated)?;
+        for i in (0..last).rev() {
+            emit_place_write(c, levels[i], &keys[i], levels[i + 1])?;
+        }
+        compile_store_variable(c, root, levels[0])?;
+    }
+    c.patch_jump(skip);
     c.free_to(saved);
     Ok(true)
 }
@@ -2103,16 +2704,53 @@ fn compile_pattern(
             fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
             c.free_to(saved);
         }
-        Pattern::Constructor { name, fields } => {
+        Pattern::Constructor {
+            name,
+            fields,
+            namespace,
+        } => {
             let saved = c.next_register;
-            let variant_idx = c.const_str(name);
-            let vr = c.alloc_reg()?;
-            emit_get_field(c, vr, value, "__variant__")?;
-            let nr = c.alloc_reg()?;
-            c.emit(encode_abx(OpCode::LoadConst, nr, variant_idx), 0);
-            let cr = c.alloc_reg()?;
-            c.emit(encode_abc(OpCode::Eq, cr, vr, nr), 0);
-            fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
+            match namespace {
+                // `ns.Name(..)`: reading `ns.Name` raises the namespace's
+                // error for an unknown member; the intrinsic checks that the
+                // value is the variant that member builds
+                // (`semantics::namespaced_variant_matches`).
+                Some(ns) => {
+                    let member_reg = c.alloc_reg()?;
+                    compile_expr(
+                        c,
+                        &Expr::FieldAccess {
+                            object: Box::new(Expr::Ident(ns.clone())),
+                            field: name.clone(),
+                        },
+                        member_reg,
+                    )?;
+                    let ns_reg = c.alloc_reg()?;
+                    let ns_idx = c.const_str(ns);
+                    c.emit(encode_abx(OpCode::LoadConst, ns_reg, ns_idx), 0);
+                    let name_reg = c.alloc_reg()?;
+                    let name_idx = c.const_str(name);
+                    c.emit(encode_abx(OpCode::LoadConst, name_reg, name_idx), 0);
+                    let cr = c.alloc_reg()?;
+                    compile_hidden_call_from_regs(
+                        c,
+                        "__forge_variant_pattern",
+                        &[value, member_reg, ns_reg, name_reg],
+                        cr,
+                    )?;
+                    fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
+                }
+                None => {
+                    let variant_idx = c.const_str(name);
+                    let vr = c.alloc_reg()?;
+                    emit_get_field(c, vr, value, "__variant__")?;
+                    let nr = c.alloc_reg()?;
+                    c.emit(encode_abx(OpCode::LoadConst, nr, variant_idx), 0);
+                    let cr = c.alloc_reg()?;
+                    c.emit(encode_abc(OpCode::Eq, cr, vr, nr), 0);
+                    fails.push(c.emit_jump(OpCode::JumpIfFalse, cr, 0));
+                }
+            }
             c.free_to(saved);
             for (i, field) in fields.iter().enumerate() {
                 let index = u8::try_from(i).map_err(|_| {
@@ -2283,7 +2921,13 @@ fn compile_function_body(
     fc.begin_scope();
     let mut param_regs = Vec::with_capacity(params.len());
     for param in params {
-        param_regs.push(fc.add_local(&param.name, true)?);
+        // A method's plain receiver `it` is immutable (E0006); `mut it` is
+        // written back by the caller from `__forge_receiver_out`.
+        let reg = fc.add_local(&param.name, param.is_mutable())?;
+        if param.kind == ParamKind::MutReceiver {
+            fc.mut_receiver = Some(reg);
+        }
+        param_regs.push(reg);
     }
     // Default values: evaluated in the callee (so they can use earlier
     // parameters) only when the caller did not pass that argument, like the
@@ -2295,6 +2939,7 @@ fn compile_function_body(
             fc.patch_jump(skip);
         }
     }
+    bind_captured_containers(fc, params, body)?;
     let (init, last) = match body.split_last() {
         Some((last, init)) => (init, Some(last)),
         None => (body, None),
@@ -2309,6 +2954,7 @@ fn compile_function_body(
             if let Stmt::Expression(expr) = &s.stmt {
                 let dst = fc.alloc_reg()?;
                 compile_expr(fc, expr, dst)?;
+                emit_receiver_out(fc)?;
                 fc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
                 fc.free_to(dst);
             } else if crate::semantics::is_value_tail(&s.stmt) {
@@ -2316,18 +2962,86 @@ fn compile_function_body(
                 // of the branch taken (shared rule: semantics::is_value_tail).
                 let dst = fc.alloc_reg()?;
                 compile_stmt_value(fc, &s.stmt, dst)?;
+                emit_receiver_out(fc)?;
                 fc.emit(encode_abc(OpCode::Return, dst, 0, 0), 0);
                 fc.free_to(dst);
             } else {
                 compile_stmt(fc, &s.stmt)?;
+                emit_receiver_out(fc)?;
                 fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
             }
         }
-        None => fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0),
+        None => {
+            emit_receiver_out(fc)?;
+            fc.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0)
+        }
     }
     fc.chunk.arity = params.len() as u8;
     fc.chunk.min_arity =
         crate::semantics::required_params(params.iter().map(|p| p.default.is_some())) as u8;
+    Ok(())
+}
+
+/// Most captured variables one function binds with `BindUpvalue`.
+const MAX_BOUND_CAPTURES: usize = 16;
+
+/// At function entry: bind each captured *mutable* variable of an
+/// enclosing function that the body uses as a container
+/// (`semantics::hoist::container_roots`: `xs[i] = v`, `g[k].push(x)`,
+/// `len(xs)`, ...) to a local register that aliases its cell
+/// (`BindUpvalue`). The body then compiles those names as locals, so the
+/// in-place opcodes (`SetIndexLocal`, `PushIndexLocal`, `GetIndexLocal`,
+/// ...) update a captured container that the cell owns instead of copying
+/// it per write. Reads and writes of the alias go to the cell, exactly as
+/// `GetUpvalue` / `SetUpvalue` would, and a nested closure capturing it
+/// shares the same cell.
+///
+/// Skipped: parameters (they shadow), immutable captures (never updated),
+/// names that are globals here, top-level names declared both with and
+/// without `mut` (their writes are unsupported on the VM), and names
+/// beyond `MAX_BOUND_CAPTURES` or near the register limit.
+fn bind_captured_containers(
+    fc: &mut Compiler,
+    params: &[Param],
+    body: &[SpannedStmt],
+) -> Result<(), CompileError> {
+    if fc.is_top_level {
+        return Ok(());
+    }
+    let mut names: Vec<String> = crate::semantics::hoist::container_roots(params, body)
+        .into_iter()
+        .filter(|name| !params.iter().any(|p| &p.name == name))
+        .collect();
+    // Deterministic register assignment.
+    names.sort();
+    let mut bound = 0;
+    for name in names {
+        if bound == MAX_BOUND_CAPTURES || fc.next_register > 200 {
+            break;
+        }
+        if fc.resolve_local(&name).is_some() || fc.toplevel_mixed.contains(&name) {
+            continue;
+        }
+        let mutable = fc
+            .upvalues
+            .iter()
+            .find(|u| u.name == name)
+            .map(|u| u.mutable)
+            .or_else(|| fc.resolve_in_parent(&name).map(|(_, m)| m))
+            .or_else(|| fc.resolve_parent_upvalue(&name).map(|(_, m)| m));
+        if mutable != Some(true) {
+            continue;
+        }
+        let Some(uv) = fc.resolve_capture(&name) else {
+            continue;
+        };
+        let reg = fc.add_local(&name, true)?;
+        if let Some(local) = fc.locals.last_mut() {
+            local.mirror = true;
+        }
+        fc.emit(encode_abc(OpCode::BindUpvalue, reg, uv, 0), 0);
+        bound += 1;
+    }
     Ok(())
 }
 
@@ -2434,6 +3148,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::Assign { target, value } => {
             if try_compile_add_local(c, target, value)?
                 || try_compile_push_assign(c, target, value)?
+                || try_compile_map_update(c, target, value)?
             {
                 return Ok(());
             }
@@ -2467,9 +3182,11 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 let saved = c.next_register;
                 let reg = c.alloc_reg()?;
                 compile_expr(c, e, reg)?;
+                emit_receiver_out(c)?;
                 c.emit(encode_abc(OpCode::Return, reg, 0, 0), 0);
                 c.free_to(saved);
             } else {
+                emit_receiver_out(c)?;
                 c.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 0);
             }
             Ok(())
@@ -2686,7 +3403,10 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
         Stmt::Match { subject, arms } => compile_match(c, subject, arms, None),
 
         Stmt::Expression(expr) => {
-            if try_compile_push_statement(c, expr)? || try_compile_set_update_statement(c, expr)? {
+            if try_compile_push_statement(c, expr)?
+                || try_compile_set_update_statement(c, expr)?
+                || try_compile_type_check_statement(c, expr)?
+            {
                 return Ok(());
             }
             let saved = c.next_register;
@@ -2711,25 +3431,36 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     .fields
                     .iter()
                     .enumerate()
-                    .map(|(index, type_ann)| Param {
-                        name: format!("field{}", index),
-                        type_ann: Some(type_ann.clone()),
-                        default: None,
+                    .map(|(index, type_ann)| {
+                        Param::plain(format!("field{}", index), Some(type_ann.clone()), None)
                     })
                     .collect();
                 let param_names = params
                     .iter()
                     .map(|param| param.name.clone())
                     .collect::<Vec<_>>();
-                let constructor = Expr::Lambda {
-                    params,
-                    body: vec![SpannedStmt::unspanned(Stmt::Return(Some(
-                        variant_object_expr(name, &variant.name, &param_names),
-                    )))],
-                };
-                compile_set_global_expr(c, &variant.name, constructor)?;
+                let body = vec![SpannedStmt::unspanned(Stmt::Return(Some(
+                    variant_object_expr(name, &variant.name, &param_names),
+                )))];
+                // The constructor closure records which variant it builds
+                // (`Chunk::adt_variant`) for namespaced patterns.
+                let saved = c.next_register;
+                let reg = c.alloc_reg()?;
+                let mut lc = c.child("<lambda>");
+                compile_function_body(&mut lc, &params, &body)?;
+                lc.chunk.adt_variant = Some((name.clone(), variant.name.clone()));
+                let pi = c.finish_child(lc)?;
+                c.emit(encode_abx(OpCode::Closure, reg, pi), 0);
+                let name_idx = c.const_str(&c.global_name(&variant.name));
+                c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+                c.free_to(saved);
             }
 
+            // The type's name is a value too (its description), like a
+            // struct or interface name, so it can be imported.
+            if crate::semantics::type_name_is_value(name, variants) {
+                compile_set_global_expr(c, name, type_metadata_expr(name, variants))?;
+            }
             compile_set_global_expr(
                 c,
                 &format!("__type_{}__", name),
@@ -2863,14 +3594,26 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     Target::Global(_) | Target::Reused(_) => item_reg,
                 };
                 c.emit(encode_abc(OpCode::GetIndex, dst, parts_reg, idx_reg), 0);
+                // A module's top-level names are also its globals (what an
+                // importer reads), as for `let`.
+                let module_global = c.module_mode && c.scope_depth == 1;
                 match slot {
-                    Target::Fresh(_) => {}
+                    Target::Fresh(reg) => {
+                        if module_global {
+                            let name_idx = c.const_str(&c.global_name(targets[index]));
+                            c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+                        }
+                    }
                     Target::Global(name) => {
                         let name_idx = c.const_str(&c.global_name(&name));
                         c.emit(encode_abx(OpCode::SetGlobal, item_reg, name_idx), 0);
                     }
                     Target::Reused(reg) => {
                         c.emit(encode_abc(OpCode::SetLocal, reg, item_reg, 0), 0);
+                        if module_global {
+                            let name_idx = c.const_str(&c.global_name(targets[index]));
+                            c.emit(encode_abx(OpCode::SetGlobal, reg, name_idx), 0);
+                        }
                     }
                 }
             }
@@ -3179,6 +3922,7 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                 register: catch_reg,
                 mutable: false,
                 captured: false,
+                mirror: false,
             });
             for s in catch_body {
                 c.set_span(s);
@@ -3222,10 +3966,13 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     .iter()
                     .map(|n| (n.name.clone(), n.binding().to_string()))
                     .collect(),
-                None => import_export_names(&parse_import_program(path, &resolved)?)
-                    .into_iter()
-                    .map(|n| (n.clone(), n))
-                    .collect(),
+                None => match c.wildcard_imports.get(&resolved) {
+                    Some(names) => names.clone(),
+                    None => import_export_names(&parse_import_program(path, &resolved)?),
+                }
+                .into_iter()
+                .map(|n| (n.clone(), n))
+                .collect(),
             };
 
             // (resolved path, requested names or `false` for all, path as
@@ -3273,6 +4020,35 @@ fn compile_stmt(c: &mut Compiler, stmt: &Stmt) -> Result<(), CompileError> {
                     let name_idx = c.const_str(&c.global_name(&binding));
                     c.emit(encode_abx(OpCode::SetGlobal, local_reg, name_idx), 0);
                 }
+            }
+            Ok(())
+        }
+
+        Stmt::ImportNamespace { path, name } => {
+            // A built-in module is refused at run time (as in the
+            // interpreter); a file is resolved now, like every import.
+            let resolved = if crate::semantics::BUILTIN_MODULES.contains(&path.as_str()) {
+                String::new()
+            } else {
+                resolve_import_path(c, path)?.display().to_string()
+            };
+            let namespace_reg = c.alloc_reg()?;
+            compile_hidden_call(
+                c,
+                "__forge_import_namespace",
+                vec![
+                    Expr::StringLit(resolved),
+                    Expr::StringLit(path.clone()),
+                    Expr::StringLit(name.clone()),
+                ],
+                namespace_reg,
+            )?;
+            let local_reg = c.add_local(name, false)?;
+            c.emit(encode_abc(OpCode::Move, local_reg, namespace_reg, 0), 0);
+            if c.scope_depth == 1 {
+                // Top-level imports are also globals, as in the interpreter.
+                let name_idx = c.const_str(&c.global_name(name));
+                c.emit(encode_abx(OpCode::SetGlobal, local_reg, name_idx), 0);
             }
             Ok(())
         }
@@ -3441,8 +4217,11 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
         }
         Expr::Call { function, args } => {
             if let Expr::FieldAccess { object, field } = function.as_ref() {
-                if try_compile_mutating_call(c, object, field, args, dst)?
-                    || try_compile_place_method(c, object, field, args, dst)?
+                if try_compile_type_check(c, object, field, args, Some(dst))?
+                    || try_compile_mutating_call(c, object, field, args, dst)?
+                    || try_compile_place_method(c, object, field, args, dst, false)?
+                    || try_compile_method_peek(c, object, field, args, dst)?
+                    || try_compile_receiver_place_call(c, object, field, args, dst)?
                 {
                     return Ok(());
                 }
@@ -3504,6 +4283,16 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                     }
                 }
             }
+            if let Some(name) = global_alias_root(c, object) {
+                if let Some(k) = field_operand(c, field) {
+                    let saved = c.next_register;
+                    let reg = bind_global_alias(c, name)?;
+                    c.emit(encode_abc(OpCode::GetFieldLocal, dst, reg, k), 0);
+                    end_global_alias(c, reg);
+                    c.free_to(saved);
+                    return Ok(());
+                }
+            }
             let saved = c.next_register;
             let or = c.alloc_reg()?;
             compile_expr(c, object, or)?;
@@ -3515,7 +4304,7 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             // without sharing the local's container (`counts[w]`).
             if let Expr::Ident(name) = object.as_ref() {
                 if let Some((reg, _)) = c.resolve_local(name) {
-                    if is_simple_operand(index) {
+                    if index_runs_no_code(index) {
                         let saved = c.next_register;
                         let ir = c.alloc_reg()?;
                         compile_expr(c, index, ir)?;
@@ -3523,6 +4312,38 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
                         c.free_to(saved);
                         return Ok(());
                     }
+                    if has_no_inline_updates(index) {
+                        // `counts[str(x)]`: the index may call functions,
+                        // so the local is read first (a snapshot, as the
+                        // generic read does), without sharing it; the
+                        // element read out of it is then shared (`Move`).
+                        let saved = c.next_register;
+                        let snap = c.alloc_reg()?;
+                        c.emit(
+                            encode_abc(OpCode::PeekLocal, snap, reg, PEEK_SHARE_IF_CAPTURED),
+                            0,
+                        );
+                        let ir = c.alloc_reg()?;
+                        compile_expr(c, index, ir)?;
+                        c.emit(encode_abc(OpCode::GetIndex, dst, snap, ir), 0);
+                        c.emit(encode_abc(OpCode::Move, dst, dst, 0), 0);
+                        c.free_to(saved);
+                        return Ok(());
+                    }
+                }
+            }
+            // A global's element (`parent[x]` in a function above the
+            // `let`): read through an alias, so the global stays owned.
+            if let Some(name) = global_alias_root(c, object) {
+                if index_runs_no_code(index) {
+                    let saved = c.next_register;
+                    let reg = bind_global_alias(c, name)?;
+                    let ir = c.alloc_reg()?;
+                    compile_expr(c, index, ir)?;
+                    c.emit(encode_abc(OpCode::GetIndexLocal, dst, reg, ir), 0);
+                    end_global_alias(c, reg);
+                    c.free_to(saved);
+                    return Ok(());
                 }
             }
             let saved = c.next_register;
@@ -3614,6 +4435,9 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             let saved = c.next_register;
             let sr = c.alloc_reg()?;
             compile_expr(c, inner, sr)?;
+            // `?` may return from here: hand over the receiver first (a
+            // later return hands over its final value again).
+            emit_receiver_out(c)?;
             c.emit(encode_abc(OpCode::Try, dst, sr, 0), 0);
             c.free_to(saved);
         }
@@ -3623,14 +4447,24 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             let pi = c.finish_child(lc)?;
             c.emit(encode_abx(OpCode::Closure, dst, pi), 0);
         }
-        Expr::StructInit { name, fields } => {
+        Expr::StructInit {
+            name,
+            fields,
+            namespace,
+        } => {
             let provided_fields = Expr::Object(fields.clone());
-            compile_hidden_call(
-                c,
-                "__forge_new_struct",
-                vec![Expr::StringLit(name.clone()), provided_fields],
-                dst,
-            )?;
+            let mut args = vec![Expr::StringLit(name.clone()), provided_fields];
+            if let Some(ns) = namespace {
+                // `m.Point { ... }`: reading `m.Point` raises the
+                // namespace's error for an unknown member; the builtin
+                // checks that it is the struct.
+                args.push(Expr::FieldAccess {
+                    object: Box::new(Expr::Ident(ns.clone())),
+                    field: name.clone(),
+                });
+                args.push(Expr::StringLit(ns.clone()));
+            }
+            compile_hidden_call(c, "__forge_new_struct", args, dst)?;
         }
         Expr::Block(stmts) => compile_block_value(c, stmts, dst)?,
         Expr::Await(inner) => {
@@ -3746,7 +4580,9 @@ fn compile_expr(c: &mut Compiler, expr: &Expr, dst: u8) -> Result<(), CompileErr
             method,
             args,
         } => {
-            if try_compile_mutating_call(c, object, method, args, dst)? {
+            if try_compile_mutating_call(c, object, method, args, dst)?
+                || try_compile_method_peek(c, object, method, args, dst)?
+            {
                 return Ok(());
             }
             let mut lowered_args = Vec::with_capacity(args.len() + 2);

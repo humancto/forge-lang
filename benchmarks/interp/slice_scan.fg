@@ -1,0 +1,26 @@
+// A scanner over a top-level array of 20k characters: a function reads it
+// with `slice`, `len` and `index_of` through the captured variable (V3
+// finding 2: each call used to copy the whole array, so the scan was
+// quadratic).
+let mut chars = []
+let mut i = 0
+while i < 20000 {
+    chars.push(str(i % 10))
+    i = i + 1
+}
+
+fn token_at(pos) {
+    return join(slice(chars, pos, pos + 3), "")
+}
+
+let mut total = 0
+let mut p = 0
+while p < len(chars) - 3 {
+    total = total + int(token_at(p))
+    if chars.first() == "0" {
+        total = total + 1
+    }
+    p = p + 1
+}
+println(total)
+println(index_of(chars, "9"))

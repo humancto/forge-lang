@@ -699,11 +699,31 @@ mod tests {
 
     #[test]
     fn keeps_type_annotations_intact() {
-        let src = "let f: fn(Int, String) -> Bool = g\nlet o: Option<Option<Int>> = None\nlet t: (Int, String) = (1, \"a\")\n";
+        let src = "let f: fn(Int, String) -> Bool = g\nlet o: Option<Option<Int>> = None\nlet t: (Int, String) = (1, \"a\")\nlet c: Object<[Int]> = { a: [1] }\n";
         assert_eq!(format_source(src), src);
         assert_eq!(
             format_source("let f:fn(Int,String)->Bool=g\n"),
             "let f: fn(Int, String) -> Bool = g\n"
+        );
+    }
+
+    #[test]
+    fn keeps_namespace_imports_intact() {
+        let src = "import \"geo.fg\" as geo\nlet p = geo.Point { x: 1 }\nmatch s {\n    geo.Circle(r) => r,\n    geo.Dot => 0,\n}\n";
+        assert_eq!(format_source(src), src);
+        assert_eq!(
+            format_source("import \"geo.fg\"   as   geo\nlet p = geo.Point{x:1}\n"),
+            "import \"geo.fg\" as geo\nlet p = geo.Point { x: 1 }\n"
+        );
+    }
+
+    #[test]
+    fn keeps_namespaced_variant_patterns_intact() {
+        let src = "import \"a.fg\" as a\nimport \"b.fg\" as b\nlet k = match v {\n    a.Item(n) | b.Item(n) => n,\n    Ok(a.Pair(x, b.Dot)) => x,\n    a.Mark => 0,\n    _ => -1,\n}\n";
+        assert_eq!(format_source(src), src);
+        assert_eq!(
+            format_source("let k = match v {\na.Item( n )=>n,\nb.Mark=>0\n}\n"),
+            "let k = match v {\n    a.Item(n) => n,\n    b.Mark => 0\n}\n"
         );
     }
 
@@ -936,6 +956,14 @@ otherwise { z() }
     }
 
     #[test]
+    fn formats_mut_receivers() {
+        let src = "impl Counter {\nfn inc( mut it ,k){\nit.n+=k\n}\n}\n";
+        let want = "impl Counter {\n    fn inc(mut it, k) {\n        it.n += k\n    }\n}\n";
+        assert_eq!(fmt(src), want);
+        assert_eq!(fmt(want), want, "idempotent");
+    }
+
+    #[test]
     fn ambiguous_tokens_keep_their_original_spacing() {
         let src = "let m: Map<String, Int> = x\nlet t = a<b\nlet u = a < b\nlet v = f()?\n";
         assert_eq!(fmt(src), src);
@@ -945,6 +973,8 @@ otherwise { z() }
     fn string_contents_and_number_spellings_are_untouched() {
         let src = "let s = \"a  =b ,{x+1}  \"\nlet n = 1_000_000\nlet r = \"\"\"\n  raw  =  text   \n\"\"\"\n";
         assert_eq!(fmt(src), src);
+        // An exponent's sign is part of the literal, not a subtraction.
+        assert_eq!(fmt("let e = 1.5e-3*2E+10\n"), "let e = 1.5e-3 * 2E+10\n");
     }
 
     #[test]

@@ -1,0 +1,86 @@
+id = "error_code_report"
+category = "failures"
+title = "Report the runtime error code of each failing operation"
+prompt = """
+Write a program that performs operations on JSON values and reports, for each one, either
+its result or the stable runtime error code of the error it raises (the code your language
+attaches to a caught runtime error, such as `E0008` for a division by zero).
+
+Each non-blank line of standard input is `<op> <a>` or `<op> <a> | <b>`, where a and b are
+JSON values (the separator is space, `|`, space). Number the lines from 1 and perform the
+operation directly with the language's own operators and builtins, without checking the
+operands first, so that invalid operations raise their natural runtime error:
+
+| op           | operation                                             |
+|--------------|-------------------------------------------------------|
+| `div`        | a / b (integer division)                              |
+| `mod`        | a % b                                                 |
+| `index`      | a[b] (an array index or an object key)                |
+| `call`       | call a as a function with no arguments                |
+| `neg`        | -a                                                    |
+| `sub`        | a - b                                                 |
+| `len`        | the length of a                                       |
+| `unwrap_err` | unwrap an error value whose message is a (a string)   |
+| `assert`     | assert that false holds, with the message a (a string) |
+
+Catch the error of each operation and print `<n> <op>: ok <result as compact JSON>`
+(no spaces, e.g. `[1,2]`), or `<n> <op>: <code>`; for `unwrap_err` and `assert` print
+`<n> <op>: <code> <error message>`. Finally print `errors: ` followed by `<code>=<count>`
+for each code that occurred, sorted by code, separated by spaces.
+"""
+needs = []
+stdin = """
+div 17 | 5
+div -17 | 5
+div 1 | 0
+mod 7 | 0
+mod -7 | 3
+index [10, 20, 30] | 2
+index [10, 20, 30] | -1
+index [10, 20, 30] | 3
+index {"a": [1, 2]} | "a"
+index {"a": 1} | "b"
+index {"a": 1} | 0
+index null | "x"
+index "text" | 0
+call 5
+call {"f": 1}
+neg 4
+neg "four"
+sub [1] | 1
+sub 10 | 4
+len "héllo"
+len [1, [2, 3]]
+len 42
+len null
+unwrap_err "disk full"
+assert "balance must stay positive"
+"""
+expected_stdout = """
+1 div: ok 3
+2 div: ok -3
+3 div: E0008
+4 mod: E0008
+5 mod: ok -1
+6 index: ok 30
+7 index: ok 30
+8 index: E0009
+9 index: ok [1,2]
+10 index: E0010
+11 index: E0011
+12 index: E0011
+13 index: E0011
+14 call: E0004
+15 call: E0004
+16 neg: ok -4
+17 neg: E0007
+18 sub: E0007
+19 sub: ok 6
+20 len: ok 5
+21 len: ok 2
+22 len: E0015
+23 len: E0015
+24 unwrap_err: E0016 unwrap() on Err: disk full
+25 assert: E0021 assertion failed: balance must stay positive
+errors: E0004=2 E0007=2 E0008=2 E0009=1 E0010=1 E0011=3 E0015=2 E0016=1 E0021=1
+"""

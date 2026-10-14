@@ -4032,9 +4032,10 @@ fn select_single_channel() {
 }
 
 #[test]
-fn select_empty_array_errors() {
-    let result = try_run_forge("select([])");
-    assert!(result.is_err());
+fn select_empty_array_is_null_like_the_vm() {
+    // No channel can produce a value: every channel is finished.
+    let result = try_run_forge("assert_eq(select([]), null)");
+    assert!(result.is_ok(), "{:?}", result.err());
 }
 
 #[test]
@@ -7889,6 +7890,72 @@ fn equal_values_have_equal_set_hashes() {
     }
 }
 
+/// Map keys use the set rules (`container_eq`, `set_hash`): a hash-indexed
+/// map built from values that compare equal agrees with the linear
+/// definition (`get` finds the oldest equal key, `set` replaces its value
+/// and keeps its position, `remove` drops every equal key).
+#[test]
+fn map_lookups_agree_with_a_linear_scan() {
+    let Value::Array(values) = run_forge(&format!("let corpus = {}\ncorpus", SET_HASH_CORPUS))
+    else {
+        panic!("corpus is an array");
+    };
+    let mut map = MapEntries::new();
+    let mut linear: Vec<(Value, Value)> = Vec::new();
+    for (i, k) in values.iter().enumerate() {
+        let v = Value::Int(i as i64);
+        map.insert_value(k.clone(), v.clone());
+        match linear.iter_mut().find(|(x, _)| Value::container_eq(x, k)) {
+            Some(entry) => entry.1 = v,
+            None => linear.push((k.clone(), v)),
+        }
+    }
+    assert_eq!(map.len(), linear.len());
+    for ((mk, mv), (lk, lv)) in map.iter().zip(&linear) {
+        assert!(Value::container_eq(mk, lk), "{} vs {}", mk, lk);
+        assert_eq!(mv, lv);
+    }
+    for k in &values {
+        let expected = linear
+            .iter()
+            .find(|(x, _)| Value::container_eq(x, k))
+            .map(|e| &e.1);
+        assert_eq!(map.get_value(k), expected, "{}", k);
+        assert!(map.has_key_value(k));
+    }
+    // Equal maps compare equal whatever their order.
+    let reversed = MapEntries::from_pairs(map.iter().rev().cloned());
+    assert!(Value::Map(map.clone()) == Value::Map(reversed));
+    for k in &values {
+        map.remove_key(k);
+    }
+    assert!(map.is_empty());
+}
+
+#[test]
+fn map_set_on_a_variable_updates_in_place_with_value_semantics() {
+    let out = run_forge(
+        r#"
+        let mut m = map()
+        for i in range(0, 300) {
+            m = m.set(i % 100, i)
+            if m.has(i) { m = m.set(i, m.get(i) + 1) }
+        }
+        let a = m
+        m = m.set("new", 1)
+        m = m.remove(0)
+        let mut f = freeze(map([(1, 2)]))
+        let mut frozen = "no error"
+        try { f = f.set(1, 3) } catch e { frozen = e.message }
+        [a.len(), m.len(), a.get(0), m.get(0), m.get(99), a.has("new"), frozen]
+        "#,
+    );
+    assert_eq!(
+        format!("{}", out),
+        "[100, 100, 200, null, 299, false, cannot mutate a frozen map]"
+    );
+}
+
 /// The set representation must not make every `Value` bigger: it has to
 /// fit in the space the largest other variant (`Object`) already takes.
 #[test]
@@ -7900,4 +7967,50 @@ fn set_items_do_not_grow_value() {
         size_of::<SetItems>(),
         size_of::<IndexMap<String, Value>>()
     );
+}
+
+/// Read-only builtins borrow a variable (or a field/index chain of one)
+/// passed as their first argument (`places::read_only_builtin`): same
+/// results, errors, shadowing and method dispatch as the copying call.
+#[test]
+fn read_only_builtins_on_borrowed_arguments() {
+    let value = run_forge(
+        r#"
+        let mut chars = ["a", "b", "c", "d"]
+        let o = { items: [1, 2, 3], name: "forge", rows: [["x", "y"]] }
+        fn scan(i) {
+            return join(slice(chars, i, i + 2), "")
+        }
+        let s = "hello"
+        [
+            scan(1), slice(chars, -2), first(chars), last(o.items),
+            join(o.items, "-"), index_of(chars, "c"), index_of(o.name, "r"),
+            last_index_of(s, "l"), substring(o.name, 1, 3), starts_with(o.name, "fo"),
+            ends_with(s, "lo"), len(o.items), contains(o.rows[0], "y"),
+            chars.slice(0, 1), o.items.join(""), chars.first(), o.rows[0].last(),
+            s.slice(1, 3), len(o.rows[-1])
+        ]
+        "#,
+    );
+    assert_eq!(
+        value.to_string(),
+        "[bc, [c, d], a, 3, 1-2-3, 2, 2, 3, or, true, true, 3, true, [a], 123, a, y, el, 2]"
+    );
+    // Shadowing a builtin calls the user's function.
+    let shadowed = run_forge(
+        "let xs = [1, 2]\nfn slice(a, b, c) { return \"mine\" }\n[slice(xs, 0, 1), xs.slice(0, 1)]",
+    );
+    assert_eq!(shadowed.to_string(), "[mine, mine]");
+    // Errors come from the ordinary call, with the argument types.
+    let err = try_run_forge("let n = 5\nslice(n, 1, 2)").unwrap_err();
+    assert!(
+        err.message.contains("slice()") && err.message.contains("got Int"),
+        "{}",
+        err.message
+    );
+    let err = try_run_forge("let xs = [1]\nslice(xs)").unwrap_err();
+    assert!(err.message.contains("expects"), "{}", err.message);
+    // A frozen value takes the ordinary path (and its error).
+    let err = try_run_forge("let f = freeze([1, 2, 3])\nslice(f, 1)").unwrap_err();
+    assert!(err.message.contains("slice() requires"), "{}", err.message);
 }

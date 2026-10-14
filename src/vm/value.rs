@@ -3,29 +3,12 @@ use super::gc::Gc;
 use super::nanbox::NanBoxedValue;
 use indexmap::IndexMap;
 use std::fmt;
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::mpsc::{Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
-/// Escape a string for safe JSON embedding.
-fn escape_json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+/// Strings inside displayed collections: the interpreter's (and
+/// `json.stringify`'s) escapes.
+use crate::stdlib::json_module::escape_json_string;
 
 /// Sender half of a VM channel. Bounded uses SyncSender for backpressure.
 pub enum VmChannelSender {
@@ -37,7 +20,7 @@ pub enum VmChannelSender {
 /// Mutex<Option<...>> so `close()` can set sender to None.
 pub struct VmChannelInner {
     pub sender: Mutex<Option<VmChannelSender>>,
-    pub receiver: Mutex<Option<Receiver<SharedValue>>>,
+    pub receiver: Mutex<Option<crate::semantics::channel::Receiver<SharedValue>>>,
 }
 
 /// GC-free value representation for crossing thread boundaries.
@@ -256,7 +239,8 @@ fn from_shared(
                 .iter()
                 .map(|(k, v)| (from_shared(gc, k, closures), from_shared(gc, v, closures)))
                 .collect();
-            let r = gc.alloc(ObjKind::Map(vals));
+            let map = VmMap::collect_unchecked(vals, gc);
+            let r = gc.alloc(ObjKind::Map(map));
             Value::obj(r)
         }
         SharedValue::Closure {
@@ -530,9 +514,10 @@ impl fmt::Debug for Value {
 pub struct GcObject {
     pub kind: ObjKind,
     pub marked: bool,
-    /// Single-owner bit: set only on a string, array, set or object that the
-    /// VM created for, and stored into, exactly one local-variable register
-    /// (by `AddLocal` / `PushLocal` / `PopLocal` / `UpdateSetLocal` /
+    /// Single-owner bit: set only on a string, array, set, map or object
+    /// that the VM created for, and stored into, exactly one local-variable
+    /// register (by `AddLocal` / `PushLocal` / `PopLocal` /
+    /// `UpdateSetLocal` / `UpdateMapLocal` /
     /// `SetIndexLocal` / `SetFieldLocal` / `PushIndexLocal` /
     /// `PushFieldLocal`). While it is set, no other register, global,
     /// upvalue or heap object refers to the object, so those opcodes may
@@ -741,10 +726,13 @@ impl GcObject {
             (ObjKind::Map(a), ObjKind::Map(b)) => {
                 // Order-independent on entries. Keys compared with set_eq
                 // (NaN self-match, Int/Float promote). Values with equals.
+                // Every entry with an equal key hashes alike, so probing
+                // `b`'s index finds what a scan of `b` would.
                 a.len() == b.len()
                     && a.iter().all(|(ak, av)| {
-                        b.iter()
-                            .any(|(bk, bv)| ak.set_eq(bk, gc) && av.equals(bv, gc))
+                        b.contains(ak.set_hash(gc), |(bk, bv)| {
+                            ak.set_eq(bk, gc) && av.equals(bv, gc)
+                        })
                     })
             }
             (ObjKind::BoxedInt(a), ObjKind::BoxedInt(b)) => a == b,
@@ -955,6 +943,53 @@ impl VmSet {
     }
 }
 
+/// A VM map's `(key, value)` entries: insertion-ordered and hash-indexed by
+/// key (`semantics::ordered_set`). Keys are compared with
+/// [`Value::set_eq`] and hashed with [`Value::set_hash`], exactly like set
+/// items. As for [`VmSet`], hashing needs the heap, so the helpers take the
+/// `Gc` separately.
+pub type VmMap = crate::semantics::ordered_set::OrderedSet<(Value, Value)>;
+
+impl VmMap {
+    /// A map of `pairs` in order, kept as given (entries that already
+    /// formed a map, e.g. converted from another representation).
+    pub fn collect_unchecked(pairs: impl IntoIterator<Item = (Value, Value)>, gc: &Gc) -> Self {
+        let mut map = VmMap::new();
+        for (key, value) in pairs {
+            map.push_unchecked(key.set_hash(gc), (key, value));
+        }
+        map
+    }
+
+    /// The value of the first entry whose key is `set_eq` to `key`.
+    pub fn get_in(&self, key: &Value, gc: &Gc) -> Option<Value> {
+        self.find(key.set_hash(gc), |(k, _)| k.set_eq(key, gc))
+            .map(|(_, v)| *v)
+    }
+
+    /// Whether some entry's key is `set_eq` to `key`.
+    pub fn has_in(&self, key: &Value, gc: &Gc) -> bool {
+        self.contains(key.set_hash(gc), |(k, _)| k.set_eq(key, gc))
+    }
+
+    /// `m.set(key, value)` in place: replace the value of the first entry
+    /// whose key equals `key` (keeping its key and position), or append.
+    pub fn insert_in(&mut self, key: Value, value: Value, gc: &Gc) {
+        let hash = key.set_hash(gc);
+        if let Some(entry) = self.find_mut(hash, |(k, _)| k.set_eq(&key, gc)) {
+            entry.1 = value;
+            return;
+        }
+        self.push_unchecked(hash, (key, value));
+    }
+
+    /// `m.remove(key)` in place: remove every entry whose key equals `key`;
+    /// returns whether any was.
+    pub fn remove_in(&mut self, key: &Value, gc: &Gc) -> bool {
+        self.remove_matching(key.set_hash(gc), |(k, _)| k.set_eq(key, gc)) > 0
+    }
+}
+
 pub enum ObjKind {
     String(String),
     Array(Vec<Value>),
@@ -973,10 +1008,10 @@ pub enum ObjKind {
     /// Collection of unique elements, in insertion order; hash-indexed
     /// (see [`VmSet`]).
     Set(VmSet),
-    /// First-class Map with any-value keys. Ordered vec preserves insertion
-    /// order; keys compared via `Value::set_eq` so NaN self-matches and
-    /// Int/Float promote (e.g. `1` and `1.0` collide).
-    Map(Vec<(Value, Value)>),
+    /// First-class Map with any-value keys, in insertion order; hash-indexed
+    /// by key (see [`VmMap`]). Keys compare via `Value::set_eq`, so NaN
+    /// self-matches and Int/Float promote (`1` and `1.0` collide).
+    Map(VmMap),
     /// Lazy iterator. Single-use; terminal ops drain it. Upstream links are
     /// stored as `Value::obj(gc_ref)` pointing at another `ObjKind::Stream`.
     Stream(Box<StreamBox>),
@@ -1064,7 +1099,8 @@ impl ObjKind {
                 .iter()
                 .map(|(k, _)| k.capacity() + size_of::<String>() + value + 2 * size_of::<usize>())
                 .sum(),
-            ObjKind::Map(pairs) => pairs.capacity() * 2 * value,
+            ObjKind::Map(pairs) => pairs.heap_bytes(),
+
             ObjKind::Function(f) => f.name.capacity(),
             ObjKind::Closure(c) => c.function.name.capacity() + c.upvalues.capacity() * value,
             ObjKind::NativeFunction(f) => f.name.capacity(),

@@ -36,7 +36,7 @@ fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
     match arg {
         Value::Map(pairs) => Ok(Value::Map(pairs.clone())),
         Value::Array(items) | Value::Tuple(items) => {
-            let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+            let mut pairs = MapEntries::with_capacity(items.len());
             for item in items {
                 let (k, v) = match item {
                     Value::Tuple(t) if t.len() == 2 => (t[0].clone(), t[1].clone()),
@@ -49,17 +49,7 @@ fn build_map_from(arg: &Value) -> Result<Value, RuntimeError> {
                 };
                 // Preserve insertion-order-on-overwrite: if key already
                 // present, update the existing slot in place.
-                let mut replaced = false;
-                for entry in pairs.iter_mut() {
-                    if Value::container_eq(&entry.0, &k) {
-                        entry.1 = v.clone();
-                        replaced = true;
-                        break;
-                    }
-                }
-                if !replaced {
-                    pairs.push((k, v));
-                }
+                pairs.insert_value(k, v);
             }
             Ok(Value::Map(pairs))
         }
@@ -151,7 +141,7 @@ impl Interpreter {
                 Some(Value::String(s)) => s
                     .parse::<i64>()
                     .map(Value::Int)
-                    .map_err(|_| RuntimeError::new(&format!("cannot convert '{}' to Int", s))),
+                    .map_err(|_| RuntimeError::new(&crate::semantics::invalid_number(s, "Int"))),
                 _ => Err(RuntimeError::new("int() requires number, bool, or string")),
             },
             "float" => match args.first() {
@@ -160,18 +150,24 @@ impl Interpreter {
                 Some(Value::String(s)) => s
                     .parse::<f64>()
                     .map(Value::Float)
-                    .map_err(|_| RuntimeError::new(&format!("cannot convert '{}' to Float", s))),
-                _ => Err(RuntimeError::new("float() requires number or string")),
+                    .map_err(|_| RuntimeError::new(&crate::semantics::invalid_number(s, "Float"))),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("float"),
+                )),
             },
             "push" => {
                 if args.len() != 2 {
-                    return Err(RuntimeError::new("push() requires array and value"));
+                    return Err(RuntimeError::new(
+                        &crate::semantics::builtin_args::bad_args("push"),
+                    ));
                 }
                 if let Value::Array(mut items) = args[0].clone() {
                     items.push(args[1].clone());
                     Ok(Value::Array(items))
                 } else {
-                    Err(RuntimeError::new("push() first argument must be array"))
+                    Err(RuntimeError::new(
+                        &crate::semantics::builtin_args::bad_args("push"),
+                    ))
                 }
             }
             "pop" => match args.first() {
@@ -179,7 +175,9 @@ impl Interpreter {
                     // Returns the last element (the popped item), not the remaining array
                     Ok(items.last().cloned().unwrap_or(Value::Null))
                 }
-                _ => Err(RuntimeError::new("pop() requires array")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("pop"),
+                )),
             },
             "keys" => match args.first() {
                 Some(Value::Object(map)) => Ok(Value::Array(
@@ -188,18 +186,28 @@ impl Interpreter {
                 Some(Value::Map(pairs)) => {
                     Ok(Value::Array(pairs.iter().map(|(k, _)| k.clone()).collect()))
                 }
-                _ => Err(RuntimeError::new("keys() requires object or map")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("keys"),
+                )),
             },
             "values" => match args.first() {
                 Some(Value::Object(map)) => Ok(Value::Array(map.values().cloned().collect())),
                 Some(Value::Map(pairs)) => {
                     Ok(Value::Array(pairs.iter().map(|(_, v)| v.clone()).collect()))
                 }
-                _ => Err(RuntimeError::new("values() requires object or map")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("values"),
+                )),
             },
             "contains" => super::places::contains_of(args.first(), args.get(1)),
             "has_key" => super::places::has_key_of(args.first(), args.get(1)),
             "get" => super::places::get_of(args.first(), args.get(1), args.get(2)),
+            // Shared with the borrowed-argument form (`places`).
+            "slice" | "first" | "last" | "join" | "index_of" | "last_index_of" | "substring"
+            | "starts_with" | "ends_with" => {
+                super::places::read_only_builtin(name, args.first(), args.get(1..).unwrap_or(&[]))
+                    .unwrap_or_else(|| Err(RuntimeError::new("BUG: not a read-only builtin")))
+            }
             "pick" => match (args.first(), args.get(1)) {
                 (Some(Value::Object(map)), Some(Value::Array(field_list))) => {
                     let mut result = IndexMap::new();
@@ -212,7 +220,9 @@ impl Interpreter {
                     }
                     Ok(Value::Object(result))
                 }
-                _ => Err(RuntimeError::new("pick() requires (object, [field_names])")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("pick"),
+                )),
             },
             "omit" => match (args.first(), args.get(1)) {
                 (Some(Value::Object(map)), Some(Value::Array(field_list))) => {
@@ -233,7 +243,9 @@ impl Interpreter {
                         .collect();
                     Ok(Value::Object(result))
                 }
-                _ => Err(RuntimeError::new("omit() requires (object, [field_names])")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("omit"),
+                )),
             },
             "merge" => {
                 let mut result = IndexMap::new();
@@ -244,7 +256,7 @@ impl Interpreter {
                         }
                     } else {
                         return Err(RuntimeError::new(
-                            "merge() requires all arguments to be objects",
+                            &crate::semantics::builtin_args::bad_args("merge"),
                         ));
                     }
                 }
@@ -260,7 +272,9 @@ impl Interpreter {
                     }
                     Ok(Value::Null)
                 }
-                _ => Err(RuntimeError::new("find() requires (array, predicate_fn)")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("find"),
+                )),
             },
             "flat_map" => match (args.first(), args.get(1)) {
                 (Some(Value::Array(arr)), Some(func)) => {
@@ -274,7 +288,9 @@ impl Interpreter {
                     }
                     Ok(Value::Array(result))
                 }
-                _ => Err(RuntimeError::new("flat_map() requires (array, fn)")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("flat_map"),
+                )),
             },
             "entries" => match args.first() {
                 Some(Value::Object(map)) => {
@@ -284,7 +300,9 @@ impl Interpreter {
                         .collect();
                     Ok(Value::Array(pairs))
                 }
-                _ => Err(RuntimeError::new("entries() requires an object")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("entries"),
+                )),
             },
             "from_entries" => match args.first() {
                 Some(Value::Array(pairs)) => {
@@ -299,7 +317,7 @@ impl Interpreter {
                     Ok(Value::Object(result))
                 }
                 _ => Err(RuntimeError::new(
-                    "from_entries() requires an array of [key, value] pairs",
+                    &crate::semantics::builtin_args::bad_args("from_entries"),
                 )),
             },
             "range" => match (args.first(), args.get(1)) {
@@ -345,7 +363,9 @@ impl Interpreter {
                     }
                     Ok(Value::Array(pairs))
                 }
-                _ => Err(RuntimeError::new("enumerate() requires array")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("enumerate"),
+                )),
             },
             "map" => {
                 // Arity-based overload:
@@ -353,7 +373,7 @@ impl Interpreter {
                 //   map(arr_of_pairs | Map)  → Map constructor
                 //   map(arr, fn)             → functional map (existing)
                 if args.is_empty() {
-                    return Ok(Value::Map(Vec::new()));
+                    return Ok(Value::Map(MapEntries::new()));
                 }
                 if args.len() == 1 {
                     return build_map_from(&args[0]);
@@ -365,7 +385,11 @@ impl Interpreter {
                 }
                 let items = match &args[0] {
                     Value::Array(items) => items.clone(),
-                    _ => return Err(RuntimeError::new("map() first argument must be array")),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            &crate::semantics::builtin_args::bad_args("map"),
+                        ))
+                    }
                 };
                 let func = args[1].clone();
                 let mut out = Vec::with_capacity(items.len());
@@ -378,11 +402,17 @@ impl Interpreter {
             }
             "filter" => {
                 if args.len() != 2 {
-                    return Err(RuntimeError::new("filter() requires (array, function)"));
+                    return Err(RuntimeError::new(
+                        &crate::semantics::builtin_args::bad_args("filter"),
+                    ));
                 }
                 let items = match &args[0] {
                     Value::Array(items) => items.clone(),
-                    _ => return Err(RuntimeError::new("filter() first argument must be array")),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            &crate::semantics::builtin_args::bad_args("filter"),
+                        ))
+                    }
                 };
                 let func = args[1].clone();
                 let mut out = Vec::new();
@@ -487,10 +517,10 @@ impl Interpreter {
                 crate::stdlib::time::call("time.now", args).map_err(|e| RuntimeError::new(&e))
             }
             "json" => match args.first() {
-                Some(Value::String(s)) => match serde_json::from_str::<serde_json::Value>(s) {
-                    Ok(v) => Ok(json_to_value(v)),
-                    Err(e) => Err(RuntimeError::new(&format!("JSON parse error: {}", e))),
-                },
+                // Text is parsed (like `json.parse`), anything else shown.
+                Some(Value::String(s)) => crate::stdlib::json_module::parse_str(s).map_err(|e| {
+                    RuntimeError::new(&crate::stdlib::json_module::parse_error("", &e))
+                }),
                 Some(v) => Ok(Value::String(v.to_json_string())),
                 None => Err(RuntimeError::new("json() requires an argument")),
             },
@@ -510,42 +540,31 @@ impl Interpreter {
                 self.write_output(&text.join(" ").to_lowercase(), true);
                 Ok(Value::Null)
             }
-            "wait" => match args.first() {
-                Some(Value::Int(secs)) => {
-                    let total_ms = ((*secs).max(0) as u64).saturating_mul(1000);
-                    let mut elapsed = 0u64;
-                    while elapsed < total_ms {
-                        if self.is_cancelled() {
-                            return Err(RuntimeError::new("cancelled"));
-                        }
-                        let chunk = std::cmp::min(100, total_ms - elapsed);
-                        crate::clock::sleep(std::time::Duration::from_millis(chunk));
-                        elapsed += chunk;
+            "wait" => {
+                let duration = match args.first() {
+                    Some(Value::Int(secs)) => std::time::Duration::from_secs((*secs).max(0) as u64),
+                    Some(Value::Float(secs)) => crate::semantics::seconds_f64(*secs),
+                    _ => return Err(RuntimeError::new("wait() requires a number of seconds")),
+                };
+                // Cancellable, against one deadline (shared with the VM).
+                crate::clock::sleep_interruptible(duration, || {
+                    if self.is_cancelled() {
+                        Err(RuntimeError::new("cancelled"))
+                    } else {
+                        Ok(())
                     }
-                    Ok(Value::Null)
-                }
-                Some(Value::Float(secs)) => {
-                    let total_ms = (secs.max(0.0) * 1000.0) as u64;
-                    let mut elapsed = 0u64;
-                    while elapsed < total_ms {
-                        if self.is_cancelled() {
-                            return Err(RuntimeError::new("cancelled"));
-                        }
-                        let chunk = std::cmp::min(100, total_ms - elapsed);
-                        crate::clock::sleep(std::time::Duration::from_millis(chunk));
-                        elapsed += chunk;
-                    }
-                    Ok(Value::Null)
-                }
-                _ => Err(RuntimeError::new("wait() requires a number of seconds")),
-            },
+                })?;
+                Ok(Value::Null)
+            }
             "channel" => match args.first() {
                 Some(Value::Int(n)) => {
                     let cap = (*n).max(0) as usize;
                     let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(cap);
                     Ok(Value::Channel(Arc::new(ChannelInner {
                         tx: std::sync::Mutex::new(Some(ChannelSender::Bounded(tx))),
-                        rx: std::sync::Mutex::new(Some(rx)),
+                        rx: std::sync::Mutex::new(Some(crate::semantics::channel::Receiver::new(
+                            rx,
+                        ))),
                         capacity: Some(cap),
                     })))
                 }
@@ -553,7 +572,9 @@ impl Interpreter {
                     let (tx, rx) = std::sync::mpsc::channel::<Value>();
                     Ok(Value::Channel(Arc::new(ChannelInner {
                         tx: std::sync::Mutex::new(Some(ChannelSender::Unbounded(tx))),
-                        rx: std::sync::Mutex::new(Some(rx)),
+                        rx: std::sync::Mutex::new(Some(crate::semantics::channel::Receiver::new(
+                            rx,
+                        ))),
                         capacity: None,
                     })))
                 }
@@ -582,15 +603,13 @@ impl Interpreter {
                             None => Err(RuntimeError::new("channel closed")),
                         }
                     }
-                    _ => Err(RuntimeError::new(
-                        "send() requires a channel as first argument",
-                    )),
+                    _ => Err(RuntimeError::new("send() requires a channel")),
                 }
             }
             "receive" => {
                 let ch = match args.first() {
                     Some(v) => v,
-                    None => return Err(RuntimeError::new("receive(channel) requires 1 argument")),
+                    None => return Err(RuntimeError::new("receive() requires a channel")),
                 };
                 match ch {
                     Value::Channel(inner) => {
@@ -598,9 +617,8 @@ impl Interpreter {
                         // but stay cancellable (host deadline / squad).
                         let inner = inner.clone();
                         self.wait_cancellable(|slice| match inner.rx.lock() {
-                            Ok(guard) => match guard.as_ref() {
-                                Some(receiver) => match crate::clock::recv_timeout(receiver, slice)
-                                {
+                            Ok(mut guard) => match guard.as_mut() {
+                                Some(receiver) => match receiver.recv_timeout(slice) {
                                     Ok(val) => Some(val),
                                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -612,20 +630,22 @@ impl Interpreter {
                             Err(_) => Some(Value::Null),
                         })
                     }
-                    _ => Err(RuntimeError::new(
-                        "receive() requires a channel as first argument",
-                    )),
+                    _ => Err(RuntimeError::new("receive() requires a channel")),
                 }
             }
             "reduce" => {
                 if args.len() != 3 {
                     return Err(RuntimeError::new(
-                        "reduce() requires (array, initial, function)",
+                        &crate::semantics::builtin_args::bad_args("reduce"),
                     ));
                 }
                 let items = match &args[0] {
                     Value::Array(items) => items.clone(),
-                    _ => return Err(RuntimeError::new("reduce() first argument must be array")),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            &crate::semantics::builtin_args::bad_args("reduce"),
+                        ))
+                    }
                 };
                 let mut acc = args[1].clone();
                 let func = args[2].clone();
@@ -711,14 +731,6 @@ impl Interpreter {
                     "sort_by() requires (array, key_function)",
                 )),
             },
-            "first" => match args.first() {
-                Some(Value::Array(items)) => Ok(items.first().cloned().unwrap_or(Value::Null)),
-                _ => Err(RuntimeError::new("first() requires an array")),
-            },
-            "last" => match args.first() {
-                Some(Value::Array(items)) => Ok(items.last().cloned().unwrap_or(Value::Null)),
-                _ => Err(RuntimeError::new("last() requires an array")),
-            },
             "compact" => match args.first() {
                 Some(Value::Array(items)) => {
                     let filtered: Vec<Value> = items
@@ -788,20 +800,7 @@ impl Interpreter {
                     Ok(Value::Array(parts))
                 }
                 _ => Err(RuntimeError::new(
-                    "split() requires (string, delimiter_string)",
-                )),
-            },
-            "join" => match (args.first(), args.get(1)) {
-                (Some(Value::Array(items)), Some(Value::String(sep))) => {
-                    let parts: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
-                    Ok(Value::String(parts.join(sep)))
-                }
-                (Some(Value::Array(items)), None) => {
-                    let parts: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
-                    Ok(Value::String(parts.join("")))
-                }
-                _ => Err(RuntimeError::new(
-                    "join() requires (array[, separator_string])",
+                    &crate::semantics::builtin_args::bad_args("split"),
                 )),
             },
             "replace" => match (args.first(), args.get(1), args.get(2)) {
@@ -809,23 +808,7 @@ impl Interpreter {
                     Ok(Value::String(s.replace(from.as_str(), to.as_str())))
                 }
                 _ => Err(RuntimeError::new(
-                    "replace() requires (string, from_string, to_string)",
-                )),
-            },
-            "starts_with" => match (args.first(), args.get(1)) {
-                (Some(Value::String(s)), Some(Value::String(prefix))) => {
-                    Ok(Value::Bool(s.starts_with(prefix.as_str())))
-                }
-                _ => Err(RuntimeError::new(
-                    "starts_with() requires (string, prefix_string)",
-                )),
-            },
-            "ends_with" => match (args.first(), args.get(1)) {
-                (Some(Value::String(s)), Some(Value::String(suffix))) => {
-                    Ok(Value::Bool(s.ends_with(suffix.as_str())))
-                }
-                _ => Err(RuntimeError::new(
-                    "ends_with() requires (string, suffix_string)",
+                    &crate::semantics::builtin_args::bad_args("replace"),
                 )),
             },
             "is_some" => match args.first() {
@@ -971,59 +954,6 @@ impl Interpreter {
                 }
             }
             // ===== String Operations =====
-            "substring" => match args.first() {
-                Some(Value::String(s)) => {
-                    let start = match args.get(1) {
-                        Some(Value::Int(n)) => *n as usize,
-                        _ => {
-                            return Err(RuntimeError::new(
-                                "substring() requires (string, start, end?)",
-                            ))
-                        }
-                    };
-                    let chars: Vec<char> = s.chars().collect();
-                    let end = match args.get(2) {
-                        Some(Value::Int(n)) => (*n as usize).min(chars.len()),
-                        _ => chars.len(),
-                    };
-                    // `end` is clamped to the length, so this also covers a
-                    // start past the end (and `start > end`, which used to panic).
-                    if start >= end {
-                        return Ok(Value::String(String::new()));
-                    }
-                    Ok(Value::String(chars[start..end].iter().collect()))
-                }
-                _ => Err(RuntimeError::new(
-                    "substring() requires a string as first argument",
-                )),
-            },
-            "index_of" => match args.first() {
-                Some(Value::String(s)) => match args.get(1) {
-                    Some(Value::String(substr)) => Ok(Value::Int(
-                        s.find(substr.as_str()).map(|i| i as i64).unwrap_or(-1),
-                    )),
-                    _ => Err(RuntimeError::new("index_of() requires (string, substring)")),
-                },
-                Some(Value::Array(arr)) => {
-                    let needle = match args.get(1) {
-                        Some(v) => v,
-                        None => return Err(RuntimeError::new("index_of() requires 2 arguments")),
-                    };
-                    let idx = arr.iter().position(|v| v == needle);
-                    Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
-                }
-                _ => Err(RuntimeError::new(
-                    "index_of() requires a string or array as first argument",
-                )),
-            },
-            "last_index_of" => match (args.first(), args.get(1)) {
-                (Some(Value::String(s)), Some(Value::String(substr))) => Ok(Value::Int(
-                    s.rfind(substr.as_str()).map(|i| i as i64).unwrap_or(-1),
-                )),
-                _ => Err(RuntimeError::new(
-                    "last_index_of() requires (string, substring)",
-                )),
-            },
             "pad_start" => match (args.first(), args.get(1)) {
                 (Some(Value::String(s)), Some(Value::Int(target_len))) => {
                     let pad_char = match args.get(2) {
@@ -1049,7 +979,9 @@ impl Interpreter {
                         Ok(Value::String(format!("{}{}", padding, s)))
                     }
                 }
-                _ => Err(RuntimeError::new("pad_start() requires (string, length)")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("pad_start"),
+                )),
             },
             "pad_end" => match (args.first(), args.get(1)) {
                 (Some(Value::String(s)), Some(Value::Int(target_len))) => {
@@ -1076,7 +1008,25 @@ impl Interpreter {
                         Ok(Value::String(format!("{}{}", s, padding)))
                     }
                 }
-                _ => Err(RuntimeError::new("pad_end() requires (string, length)")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("pad_end"),
+                )),
+            },
+            "chr" => match args.first() {
+                Some(Value::Int(n)) => crate::semantics::text::chr(*n)
+                    .map(Value::String)
+                    .map_err(|m| RuntimeError::new(&m)),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::text::chr_requires_int(),
+                )),
+            },
+            "ord" => match args.first() {
+                Some(Value::String(s)) => crate::semantics::text::ord(s)
+                    .map(Value::Int)
+                    .map_err(|m| RuntimeError::new(&m)),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::text::ord_requires_string(),
+                )),
             },
             "capitalize" => match args.first() {
                 Some(Value::String(s)) => {
@@ -1126,7 +1076,9 @@ impl Interpreter {
                         .map(Value::String)
                         .map_err(|e| RuntimeError::new(&e))
                 }
-                _ => Err(RuntimeError::new("repeat_str() requires (string, count)")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("repeat_str"),
+                )),
             },
             "count" => match (args.first(), args.get(1)) {
                 (Some(Value::String(s)), Some(Value::String(substr))) => {
@@ -1135,7 +1087,9 @@ impl Interpreter {
                     }
                     Ok(Value::Int(s.matches(substr.as_str()).count() as i64))
                 }
-                _ => Err(RuntimeError::new("count() requires (string, substring)")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("count"),
+                )),
             },
             // ===== Numbers (shared rules: `stdlib::math::global_*`) =====
             "abs" => crate::stdlib::math::global_abs(num_arg(args.first()))
@@ -1248,11 +1202,17 @@ impl Interpreter {
             // ===== Collection Operations =====
             "any" => {
                 if args.len() < 2 {
-                    return Err(RuntimeError::new("any() requires (array, predicate)"));
+                    return Err(RuntimeError::new(
+                        &crate::semantics::builtin_args::bad_args("any"),
+                    ));
                 }
                 let arr = match &args[0] {
                     Value::Array(a) => a.clone(),
-                    _ => return Err(RuntimeError::new("any() first argument must be an array")),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            &crate::semantics::builtin_args::bad_args("any"),
+                        ))
+                    }
                 };
                 let func = args[1].clone();
                 for item in arr {
@@ -1265,11 +1225,17 @@ impl Interpreter {
             }
             "all" => {
                 if args.len() < 2 {
-                    return Err(RuntimeError::new("all() requires (array, predicate)"));
+                    return Err(RuntimeError::new(
+                        &crate::semantics::builtin_args::bad_args("all"),
+                    ));
                 }
                 let arr = match &args[0] {
                     Value::Array(a) => a.clone(),
-                    _ => return Err(RuntimeError::new("all() first argument must be an array")),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            &crate::semantics::builtin_args::bad_args("all"),
+                        ))
+                    }
                 };
                 let func = args[1].clone();
                 for item in arr {
@@ -1304,7 +1270,9 @@ impl Interpreter {
                         .collect();
                     Ok(Value::Array(pairs))
                 }
-                _ => Err(RuntimeError::new("zip() requires two arrays")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("zip"),
+                )),
             },
             "flatten" => match args.first() {
                 Some(Value::Array(arr)) => {
@@ -1321,13 +1289,15 @@ impl Interpreter {
             },
             "group_by" => {
                 if args.len() < 2 {
-                    return Err(RuntimeError::new("group_by() requires (array, function)"));
+                    return Err(RuntimeError::new(
+                        &crate::semantics::builtin_args::bad_args("group_by"),
+                    ));
                 }
                 let arr = match &args[0] {
                     Value::Array(a) => a.clone(),
                     _ => {
                         return Err(RuntimeError::new(
-                            "group_by() first argument must be an array",
+                            &crate::semantics::builtin_args::bad_args("group_by"),
                         ))
                     }
                 };
@@ -1355,68 +1325,8 @@ impl Interpreter {
                         .collect();
                     Ok(Value::Array(chunks))
                 }
-                _ => Err(RuntimeError::new("chunk() requires (array, size)")),
-            },
-            "slice" => match args.first() {
-                Some(Value::Array(arr)) => {
-                    let start = match args.get(1) {
-                        Some(Value::Int(n)) => {
-                            let s = *n;
-                            if s < 0 {
-                                (arr.len() as i64 + s).max(0) as usize
-                            } else {
-                                s as usize
-                            }
-                        }
-                        _ => 0,
-                    };
-                    let end = match args.get(2) {
-                        Some(Value::Int(n)) => {
-                            let e = *n;
-                            if e < 0 {
-                                (arr.len() as i64 + e).max(0) as usize
-                            } else {
-                                (e as usize).min(arr.len())
-                            }
-                        }
-                        _ => arr.len(),
-                    };
-                    if start >= end || start >= arr.len() {
-                        return Ok(Value::Array(vec![]));
-                    }
-                    Ok(Value::Array(arr[start..end].to_vec()))
-                }
-                Some(Value::String(s)) => {
-                    let chars: Vec<char> = s.chars().collect();
-                    let start = match args.get(1) {
-                        Some(Value::Int(n)) => {
-                            let st = *n;
-                            if st < 0 {
-                                (chars.len() as i64 + st).max(0) as usize
-                            } else {
-                                st as usize
-                            }
-                        }
-                        _ => 0,
-                    };
-                    let end = match args.get(2) {
-                        Some(Value::Int(n)) => {
-                            let e = *n;
-                            if e < 0 {
-                                (chars.len() as i64 + e).max(0) as usize
-                            } else {
-                                (e as usize).min(chars.len())
-                            }
-                        }
-                        _ => chars.len(),
-                    };
-                    if start >= end || start >= chars.len() {
-                        return Ok(Value::String(String::new()));
-                    }
-                    Ok(Value::String(chars[start..end].iter().collect()))
-                }
                 _ => Err(RuntimeError::new(
-                    "slice() requires an array or string as first argument",
+                    &crate::semantics::builtin_args::bad_args("chunk"),
                 )),
             },
             // ===== Channel Operations =====
@@ -1426,11 +1336,7 @@ impl Interpreter {
                 }
                 let ch = match &args[0] {
                     Value::Channel(c) => c.clone(),
-                    _ => {
-                        return Err(RuntimeError::new(
-                            "try_send() first argument must be a channel",
-                        ))
-                    }
+                    _ => return Err(RuntimeError::new("try_send() requires a channel")),
                 };
                 let val = args[1].clone();
                 let tx_guard = ch.tx.lock().expect("BUG: channel mutex poisoned");
@@ -1447,22 +1353,15 @@ impl Interpreter {
                 }
             }
             "try_receive" => {
-                if args.is_empty() {
-                    return Err(RuntimeError::new("try_receive() requires a channel"));
-                }
-                let ch = match &args[0] {
-                    Value::Channel(c) => c.clone(),
-                    _ => {
-                        return Err(RuntimeError::new(
-                            "try_receive() argument must be a channel",
-                        ))
-                    }
+                let ch = match args.first() {
+                    Some(Value::Channel(c)) => c.clone(),
+                    _ => return Err(RuntimeError::new("try_receive() requires a channel")),
                 };
-                let rx_guard = ch
+                let mut rx_guard = ch
                     .rx
                     .lock()
                     .map_err(|e| RuntimeError::new(&format!("channel lock error: {}", e)))?;
-                match rx_guard.as_ref() {
+                match rx_guard.as_mut() {
                     Some(rx) => match rx.try_recv() {
                         Ok(val) => Ok(Value::Some(Box::new(val))),
                         Err(_) => Ok(Value::None),
@@ -1470,19 +1369,25 @@ impl Interpreter {
                     None => Ok(Value::None),
                 }
             }
-            "select" => {
-                if args.is_empty() {
-                    return Err(RuntimeError::new("select() requires an array of channels"));
+            "is_closed" => match args.first() {
+                Some(Value::Channel(ch)) => {
+                    let mut rx_guard = ch.rx.lock().unwrap_or_else(|e| e.into_inner());
+                    Ok(Value::Bool(
+                        rx_guard.as_mut().is_none_or(|rx| rx.is_finished()),
+                    ))
                 }
-                let channels: Vec<Arc<ChannelInner>> = match &args[0] {
-                    Value::Array(items) => {
+                _ => Err(RuntimeError::new("is_closed() requires a channel")),
+            },
+            "select" => {
+                let channels: Vec<Arc<ChannelInner>> = match args.first() {
+                    Some(Value::Array(items)) => {
                         let mut chs = Vec::with_capacity(items.len());
                         for item in items {
                             match item {
                                 Value::Channel(c) => chs.push(c.clone()),
                                 _ => {
                                     return Err(RuntimeError::new(
-                                        "select() array must contain only channels",
+                                        "select() requires an array of channels",
                                     ))
                                 }
                             }
@@ -1491,9 +1396,6 @@ impl Interpreter {
                     }
                     _ => return Err(RuntimeError::new("select() requires an array of channels")),
                 };
-                if channels.is_empty() {
-                    return Err(RuntimeError::new("select() requires a non-empty array"));
-                }
                 let timeout_ms: Option<u128> = match args.get(1) {
                     Some(Value::Int(ms)) => Some((*ms).max(0) as u128),
                     Some(Value::Float(ms)) => Some(ms.max(0.0) as u128),
@@ -1502,22 +1404,25 @@ impl Interpreter {
                 let start = crate::clock::Instant::now();
                 let len = channels.len();
                 let mut offset = 0usize;
+                // `null` at once when every channel is finished (closed and
+                // drained, `semantics::channel`), else on timeout.
                 loop {
-                    let mut all_closed = true;
+                    let mut all_finished = true;
                     for i in 0..len {
                         let idx = (i + offset) % len;
-                        let rx_guard = channels[idx]
-                            .rx
-                            .lock()
-                            .expect("BUG: channel mutex poisoned");
-                        if let Some(ref rx) = *rx_guard {
-                            all_closed = false;
-                            if let Ok(val) = rx.try_recv() {
-                                return Ok(Value::Array(vec![Value::Int(idx as i64), val]));
+                        let mut rx_guard =
+                            channels[idx].rx.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(rx) = rx_guard.as_mut() {
+                            match rx.try_recv() {
+                                Ok(val) => {
+                                    return Ok(Value::Array(vec![Value::Int(idx as i64), val]))
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => all_finished = false,
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
                             }
                         }
                     }
-                    if all_closed {
+                    if all_finished {
                         return Ok(Value::Null);
                     }
                     if self.is_cancelled() {
@@ -1532,18 +1437,13 @@ impl Interpreter {
                     crate::clock::sleep(std::time::Duration::from_millis(1));
                 }
             }
-            "close" => {
-                if args.is_empty() {
-                    return Err(RuntimeError::new("close() requires a channel"));
+            "close" => match args.first() {
+                Some(Value::Channel(ch)) => {
+                    *ch.tx.lock().expect("BUG: channel mutex poisoned") = None;
+                    Ok(Value::Null)
                 }
-                match &args[0] {
-                    Value::Channel(ch) => {
-                        *ch.tx.lock().expect("BUG: channel mutex poisoned") = None;
-                        Ok(Value::Null)
-                    }
-                    _ => Err(RuntimeError::new("close() requires a channel")),
-                }
-            }
+                _ => Err(RuntimeError::new("close() requires a channel")),
+            },
             "await_all" => {
                 if args.is_empty() {
                     return Err(RuntimeError::new(
@@ -1739,8 +1639,9 @@ impl Interpreter {
                 let output = crate::runtime::shell::output(&cmd)
                     .map_err(|e| RuntimeError::new(&format!("sh_json error: {}", e)))?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                crate::stdlib::json_module::parse_str(stdout.trim())
-                    .map_err(|e| RuntimeError::new(&format!("sh_json parse error: {}", e)))
+                crate::stdlib::json_module::parse_str(stdout.trim()).map_err(|e| {
+                    RuntimeError::new(&crate::stdlib::json_module::parse_error("sh_json", &e))
+                })
             }
             "sh_ok" => {
                 let _subprocess =
@@ -2135,12 +2036,16 @@ impl Interpreter {
                 // partition(arr, fn) — split into [matching, non-matching]
                 if args.len() < 2 {
                     return Err(RuntimeError::new(
-                        "partition() requires an array and a function",
+                        &crate::semantics::builtin_args::bad_args("partition"),
                     ));
                 }
                 let items = match &args[0] {
                     Value::Array(items) => items.clone(),
-                    _ => return Err(RuntimeError::new("partition() first arg must be an array")),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            &crate::semantics::builtin_args::bad_args("partition"),
+                        ))
+                    }
                 };
                 let func = args[1].clone();
                 let mut matches = Vec::new();

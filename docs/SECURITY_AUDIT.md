@@ -79,7 +79,7 @@ outside the sandbox (see SEC-15); side channels (timing).
 | `exit`, `cd` | `process` | `builtins.rs` | `vm/builtins.rs` |
 | `input`, `io.prompt` | `process` (else empty stream) | `builtins.rs` / shared | `vm/builtins.rs` / shared |
 | **`term.confirm`, `term.menu`** | **`process`** (else `false` / `null`, no read) | shared | shared |
-| **`io.args`, `io.args_parse`, `io.args_get`, `io.args_has`** | **`process`** (else empty) | shared | shared |
+| **`io.args`, `io.args_parse`, `io.args_get`, `io.args_has`** | none: the program's own arguments (`runtime::program_args`), never the host's; a sandbox sees only `Sandbox::args` (default empty) | shared | shared |
 | `ask` | `ai` | `interpreter/mod.rs` | `vm/machine.rs` |
 | `import "file"` | import root or `fs.read`; **reads the checked path** | `interpreter/mod.rs` | `vm/builtins.rs` |
 | **`watch "path"`** | **`fs.read`** | `runtime/host.rs` | `vm/machine.rs` (same helper) |
@@ -87,7 +87,7 @@ outside the sandbox (see SEC-15); side channels (timing).
 | **`path.resolve`, `path.relative`** | **`fs.read`** (they canonicalise) | shared | shared |
 | `path.*` (others), `url.*`, `json.*`, `regex.*`, `crypto.*`, `jwt.*`, `math.*`, `npc.*`, `time.*` | none (pure) | — | — |
 | `os.platform`/`arch`/`cpus`/`pid`/`hostname`/`homedir`, `cwd()` | none (see SEC-18) | — | — |
-| `log.*`, `term.*` output | none; stderr, not captured (SEC-17) | — | — |
+| `eprint`/`eprintln`, `log.*`, `term.*` output | none; captured with stdout under one output budget (SEC-17) | shared (`runtime::stdio`, `stdlib/log.rs`) | shared |
 | `spawn`, `squad`, `timeout` threads | inherit policy (`permissions::spawn`) **and the run's cancellation/containment** | `interpreter/mod.rs` | `vm/machine.rs` (`scope_cancels`, `wait_cancellable`) |
 | JIT | pure functions only (verifier); no capability surface | — | `vm/jit` |
 
@@ -114,7 +114,7 @@ Severity is for the worst affected host (usually `forge mcp` or an embedder).
 | SEC-14 | Medium | Fixed | Output cap enforced only by polling; poisoned capture fell back to host stdout |
 | SEC-15 | Low | Fixed (partly) / Accepted | Check-then-open races (`cd` from another task; symlink swaps from outside) |
 | SEC-16 | Low | Fixed | VM: very deep nested values overflow the native stack in conversions |
-| SEC-17 | Info | Accepted | stderr output (`log`, `term`, progress lines) is neither captured nor capped |
+| SEC-17 | Info | Fixed | stderr output (`log`, `term`, progress lines) is neither captured nor capped |
 | SEC-18 | Info | Accepted | Host identity is readable (`os.*`, `cwd()`, `fs.temp_dir`) |
 | SEC-19 | Info | Accepted | The `env` capability is process-wide |
 | SEC-20 | Info | Accepted | Blocking native calls are not interruptible |
@@ -317,7 +317,12 @@ panic in embedders. Now an ordinary error.
 
 In an embedding host, `io.args()` returned the *host process's* argv
 (a Python program's arguments, which may hold tokens). It now requires
-`process` and is empty otherwise, like stdin.
+`process` and is empty otherwise, like stdin. Later (V3 finding 13) `io.args*`
+stopped reading the process's argv at all: they return the *program's*
+arguments (`runtime::program_args`), which the CLI sets from what follows the
+script path and a `Sandbox` sets to `Sandbox::args` (default empty) on its
+worker, whatever its capabilities. Test:
+`host_stdin_and_argv_are_not_readable_without_process`.
 
 ### SEC-14 Output cap enforced by polling (Medium, fixed)
 
@@ -362,11 +367,17 @@ deeply (more than 10000 levels)`; display prints `...` for the part beyond
 the limit and equality reports "not equal". Test:
 `deeply_nested_values_are_errors_not_stack_overflows`.
 
-### SEC-17 stderr is not captured or capped (Info, accepted)
+### SEC-17 stderr is not captured or capped (Info, fixed)
 
-`log.*`, `term.*` drawing helpers, download progress and warnings write to
-the process's stderr. Under `forge mcp` on Unix that is the server's
-stderr (never the protocol stream). Bounded by the time limit; documented.
+`eprint`/`eprintln`, `log.*`, `term.*` drawing helpers and download
+progress wrote to the process's stderr: under `forge mcp` the server's
+stderr, bounded only by the time limit. The sandbox's capture
+(`stdio::Sink::bounded`) now takes stderr too, under the same output budget
+as stdout, and inside a capture `log.*` writes a `[level] message` line
+into it instead of emitting a `tracing` event (which the process's
+subscriber would write to the host's stderr). Tests:
+`sandbox::tests::max_output_counts_stderr_and_logs`,
+`tests/mcp_stdio.rs::mcp_stderr_and_logs_are_returned_not_leaked`.
 
 ### SEC-18 Host identity is readable (Info, accepted)
 

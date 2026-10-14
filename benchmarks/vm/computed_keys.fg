@@ -1,0 +1,28 @@
+// Updates of a 5k-key object whose key is an index read, a field read or
+// a call: `o[names[i]] += 1`, `o[r.sku] += 1`, `o[str(i)] += 1` (V3
+// finding 3: each update used to copy the whole object).
+fn main() {
+    let names = map(range(0, 5000), fn(i) { return "k{i}" })
+    let mut o = {}
+    for k in names {
+        o[k] = 0
+    }
+    for i in range(0, 5000) {
+        o[str(i)] = 0
+    }
+    let recs = map(range(0, 5000), fn(i) { return { sku: names[(i * 7) % 5000] } })
+    for round in range(0, 20) {
+        for i in range(0, 5000) {
+            o[names[i]] += 1
+            o[recs[i].sku] += 1
+            o[str(i)] += 1
+        }
+    }
+    let mut total = 0
+    for k, v in o {
+        total = total + v
+    }
+    println(len(o))
+    println(total)
+}
+main()

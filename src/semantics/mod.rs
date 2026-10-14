@@ -16,11 +16,14 @@
 //! `interpreter/` or `vm/`.
 
 pub mod alloc;
+pub mod builtin_args;
+pub mod channel;
 pub mod edition;
 pub mod errors;
 pub mod hoist;
 pub mod net;
 pub mod ordered_set;
+pub mod text;
 pub mod types;
 
 use edition::Edition;
@@ -406,10 +409,42 @@ pub fn undefined_variable(name: &str, similar: Option<&str>) -> String {
 
 /// Assigning to a binding declared without `mut`. Raised at run time by both
 /// engines (so `try`/`catch` can observe it).
+///
+/// `it` (or `self`) is usually a method's receiver, which is immutable
+/// unless the method declares `mut it`; the error says so in a hint.
 pub fn immutable_reassign(name: &str) -> String {
-    format!(
+    let message = format!(
         "cannot reassign immutable variable '{}' (use 'let mut' to make it mutable)",
         name
+    );
+    if is_receiver_name(name) {
+        format!(
+            "{}\n  hint: a method's receiver is read-only; declare it `mut {}` (`fn name(mut {}, ...)`) to update the value the method is called on, or work on a copy (`let mut copy = {}`)",
+            message, name, name, name
+        )
+    } else {
+        message
+    }
+}
+
+/// Whether a method's first parameter with this name is its receiver
+/// (`fn area(it)`; `self` is accepted too).
+pub fn is_receiver_name(name: &str) -> bool {
+    name == "it" || name == "self"
+}
+
+/// Parse error for `mut` on a parameter other than a method's receiver.
+pub const MUT_PARAM_NOT_RECEIVER: &str =
+    "only a method's receiver can be declared `mut`: write `fn name(mut it, ...)` inside an `impl` block (other parameters are already mutable copies)";
+
+/// A method declared `mut it` called on a value that is not a variable or
+/// a field/index chain rooted at one (`make().inc()`): there is no place to
+/// write the updated receiver back to, so the call is refused instead of
+/// silently losing the update. Classified E0006.
+pub fn temporary_receiver(method: &str) -> String {
+    format!(
+        "cannot update a temporary value: method '{}' updates its receiver (`mut it`)\n  hint: store the value in a `let mut` variable and call the method on that variable",
+        method
     )
 }
 
@@ -424,8 +459,19 @@ pub fn is_mutating_method(method: &str, arg_count: usize) -> bool {
 }
 
 /// One of the [`is_mutating_method`] methods called on a frozen value.
-pub fn frozen_method(method: &str) -> String {
-    format!("cannot {} a frozen value", method)
+/// `kind` names the frozen value (`"array"`, `"set"`, `"map"`; anything
+/// else reads "value"): `cannot remove from a frozen map`. Both engines
+/// raise every such error through this helper.
+pub fn frozen_method(method: &str, kind: &str) -> String {
+    let kind = match kind {
+        "array" | "set" | "map" => kind,
+        _ => "value",
+    };
+    match method {
+        "push" | "add" => format!("cannot {} to a frozen {}", method, kind),
+        "pop" | "remove" => format!("cannot {} from a frozen {}", method, kind),
+        _ => format!("cannot mutate a frozen {}", kind),
+    }
 }
 
 pub fn check_failed(displayed_value: &str) -> String {
@@ -737,28 +783,74 @@ pub fn seconds_f64(secs: f64) -> std::time::Duration {
     std::time::Duration::try_from_secs_f64(secs.max(0.0)).unwrap_or(std::time::Duration::MAX)
 }
 
-/// `schedule every <n> <unit>` interval in seconds, saturating instead of
-/// overflowing for absurd `n`.
-pub fn schedule_interval_secs(n: u64, unit: &str) -> u64 {
-    match unit {
-        "minutes" => n.saturating_mul(60),
-        "hours" => n.saturating_mul(3600),
-        _ => n, // "seconds" or default
+/// The duration units `wait`, `timeout` and `schedule every` accept after
+/// their number, with how many seconds one of them is. Singular and plural
+/// spellings and `ms` all work; the parser normalises them to the first
+/// spelling of each row (the `unit` a `schedule` block stores).
+pub const DURATION_UNITS: &[(&[&str], f64)] = &[
+    (&["milliseconds", "millisecond", "ms"], 0.001),
+    (&["seconds", "second"], 1.0),
+    (&["minutes", "minute"], 60.0),
+    (&["hours", "hour"], 3600.0),
+];
+
+/// The canonical unit name (`"milliseconds"`, `"seconds"`, `"minutes"`,
+/// `"hours"`) a duration word spells, if it is one.
+pub fn duration_unit(word: &str) -> Option<&'static str> {
+    DURATION_UNITS
+        .iter()
+        .find(|(names, _)| names.contains(&word))
+        .map(|(names, _)| names[0])
+}
+
+/// Seconds in one `unit` (a canonical name from [`duration_unit`]; anything
+/// else counts as seconds).
+pub fn duration_unit_seconds(unit: &str) -> f64 {
+    DURATION_UNITS
+        .iter()
+        .find(|(names, _)| names.contains(&unit))
+        .map_or(1.0, |(_, secs)| *secs)
+}
+
+/// `schedule every <n> <unit>`: the interval between runs. `n` may be a
+/// fraction (`every 0.5 seconds`, `every 250 ms`); it must be positive, and
+/// absurd values saturate instead of panicking.
+pub fn schedule_interval(n: f64, unit: &str) -> Result<std::time::Duration, String> {
+    if n.is_nan() || n <= 0.0 {
+        return Err("schedule interval must be a positive number".to_string());
+    }
+    // A run more often than every millisecond would only spin.
+    Ok(seconds_f64((n * duration_unit_seconds(unit)).max(0.001)))
+}
+
+/// The time limit of `timeout <n> seconds { }` in seconds: negative and NaN
+/// mean zero (the block fails at once).
+pub fn timeout_seconds(n: f64) -> f64 {
+    if n.is_nan() {
+        0.0
+    } else {
+        n.max(0.0)
     }
 }
 
-/// Deadline `secs` seconds after `now` for a `timeout` block. Saturates at
-/// a century, which outlives any program, rather than overflowing
-/// `Instant` (a panic) for absurd durations.
-pub fn timeout_deadline(now: crate::clock::Instant, secs: u64) -> crate::clock::Instant {
+/// Deadline `secs` seconds after `now` for a `timeout` block (fractions are
+/// exact to the nanosecond). Saturates at a century, which outlives any
+/// program, rather than overflowing `Instant` (a panic) for absurd durations.
+pub fn timeout_deadline(now: crate::clock::Instant, secs: f64) -> crate::clock::Instant {
     const CENTURY_SECS: u64 = 100 * 365 * 24 * 60 * 60;
-    let capped = std::time::Duration::from_secs(secs.min(CENTURY_SECS));
+    let capped = seconds_f64(secs).min(std::time::Duration::from_secs(CENTURY_SECS));
     now.checked_add(capped).unwrap_or(now)
+}
+
+/// The error a `timeout` block raises when its limit passes (E0031); the
+/// limit is printed as a Forge number (`0.5`, `2`).
+pub fn timeout_exceeded(secs: f64) -> String {
+    format!("timeout: operation exceeded {} second limit", secs)
 }
 
 pub fn import_missing_name(path: &str, name: &str) -> String {
     format!(
-        "import '{}' does not export '{}'\n  hint: only top-level `fn`, `let`, `type` and `struct` definitions can be imported",
+        "import '{}' does not export '{}'\n  hint: a module exports its top-level `fn`, `let`, `struct`, `type`, variant and `interface` names and the names it imports",
         path, name
     )
 }
@@ -813,6 +905,222 @@ pub fn check_import_alias(
     }
 }
 
+/// The key of a module namespace object (`import "path" as m`) that holds
+/// the path as written. Internal (`__`) keys are not members.
+pub const NAMESPACE_MODULE_KEY: &str = "__module__";
+
+/// One member of a module namespace (`import "path" as m`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceMember {
+    /// A top-level function, variable, variant, `type` name, interface or
+    /// a name the module imported (a re-export): `m.name` is the value the
+    /// module's top level left in it (read when the import runs, like
+    /// `import { name }`).
+    Value(String),
+    /// A struct: `m.Name` is the struct marker
+    /// (`{__kind__: "struct", name: "Name"}`, the VM's value of a struct
+    /// name) and `m.Name { ... }` builds an instance.
+    Struct(String),
+}
+
+impl NamespaceMember {
+    pub fn name(&self) -> &str {
+        match self {
+            NamespaceMember::Value(n) | NamespaceMember::Struct(n) => n,
+        }
+    }
+}
+
+/// Whether `type name = ...` binds `name` as a value: its type description
+/// `{__kind__: "type", name, variants}` (the same object as the type's
+/// metadata), as a struct or interface name is a value. Not when a variant
+/// has the type's own name (`type Wrap = Wrap(Int)`): the name is that
+/// variant's constructor.
+pub fn type_name_is_value(name: &str, variants: &[crate::parser::ast::Variant]) -> bool {
+    !variants.iter().any(|v| v.name == name)
+}
+
+/// The names a module's top-level imports bind in it, in order: what it
+/// re-exports (`import { f } from "m.fg"` binds `f`, `as` binds the alias;
+/// `import "m.fg" as m` binds `m`; native imports bind their names). A
+/// bare `import "m.fg"` is not listed: its names depend on the other file.
+pub fn import_bindings(program: &crate::parser::ast::Program) -> Vec<String> {
+    use crate::parser::ast::{NativeBinding, Stmt};
+    let mut out = Vec::new();
+    for s in &program.statements {
+        match &s.stmt {
+            Stmt::Import {
+                names: Some(names), ..
+            } => out.extend(names.iter().map(|n| n.binding().to_string())),
+            Stmt::ImportNamespace { name, .. } => out.push(name.clone()),
+            Stmt::ImportNative { binding, .. } => match binding {
+                NativeBinding::Namespace(name) => out.push(name.clone()),
+                NativeBinding::Names(names) => out.extend(names.iter().cloned()),
+            },
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The members of `import "path" as m`, in definition order: the module's
+/// top-level `fn`s, `let`s (destructuring included), `type` names and
+/// their variants, interfaces, structs and the names its imports bind
+/// (re-exports, as `import { name }` can import them). Both engines build
+/// the namespace object from this list, so it prints and compares the
+/// same on both.
+pub fn namespace_members(program: &crate::parser::ast::Program) -> Vec<NamespaceMember> {
+    use crate::parser::ast::{DestructurePattern, NativeBinding, Stmt};
+    let mut out: Vec<NamespaceMember> = Vec::new();
+    let mut push = |m: NamespaceMember| {
+        if !out.iter().any(|o| o.name() == m.name()) {
+            out.push(m);
+        }
+    };
+    for s in &program.statements {
+        match &s.stmt {
+            Stmt::FnDef { name, .. } | Stmt::Let { name, .. } => {
+                push(NamespaceMember::Value(name.clone()))
+            }
+            Stmt::Destructure { pattern, .. } => {
+                let names: Vec<&String> = match pattern {
+                    DestructurePattern::Object(fields) => {
+                        fields.iter().map(|(_, name)| name).collect()
+                    }
+                    DestructurePattern::Array { items, rest } => {
+                        items.iter().chain(rest.iter()).collect()
+                    }
+                    DestructurePattern::Tuple(names) => names.iter().collect(),
+                };
+                for name in names {
+                    push(NamespaceMember::Value(name.clone()));
+                }
+            }
+            Stmt::TypeDef { name, variants } => {
+                if type_name_is_value(name, variants) {
+                    push(NamespaceMember::Value(name.clone()));
+                }
+                for v in variants {
+                    push(NamespaceMember::Value(v.name.clone()));
+                }
+            }
+            Stmt::InterfaceDef { name, .. } => push(NamespaceMember::Value(name.clone())),
+            Stmt::StructDef { name, .. } => push(NamespaceMember::Struct(name.clone())),
+            Stmt::Import {
+                names: Some(names), ..
+            } => {
+                for n in names {
+                    push(NamespaceMember::Value(n.binding().to_string()));
+                }
+            }
+            Stmt::ImportNamespace { name, .. } => push(NamespaceMember::Value(name.clone())),
+            Stmt::ImportNative { binding, .. } => match binding {
+                NativeBinding::Namespace(name) => push(NamespaceMember::Value(name.clone())),
+                NativeBinding::Names(names) => {
+                    for n in names {
+                        push(NamespaceMember::Value(n.clone()));
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `import "math" as m`: built-in modules are always in scope under their
+/// own name; a namespace import of one is an E0019 error on both engines.
+pub fn namespace_of_builtin_module(path: &str, name: &str) -> String {
+    format!(
+        "cannot import '{}' as '{}': '{}' is a built-in module and is always available as `{}`\n  hint: call its functions directly ({}.<name>), or import some of them: import {{ name }} from \"{}\"",
+        path, name, path, path, path, path
+    )
+}
+
+/// Reading `m.field` where `m` is a module namespace without that member.
+/// `keys` are the namespace's keys (internal `__` keys are ignored).
+pub fn no_module_member<'a>(
+    module: &str,
+    field: &str,
+    keys: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let mut keys: Vec<&str> = keys.into_iter().filter(|k| !k.starts_with("__")).collect();
+    keys.sort_unstable();
+    let hint = match errors::suggest_name(field, [keys.iter().copied()]) {
+        Some(similar) => format!("did you mean '{}'?", similar),
+        None if keys.is_empty() => format!("module '{}' defines no top-level names", module),
+        None => {
+            let more = if keys.len() > 8 { ", ..." } else { "" };
+            let shown: Vec<&str> = keys.iter().copied().take(8).collect();
+            format!("its members are: {}{}", shown.join(", "), more)
+        }
+    };
+    format!(
+        "module '{}' has no member '{}'\n  hint: {}",
+        module, field, hint
+    )
+}
+
+/// The error for reading a missing field of an object: the namespace form
+/// ([`no_module_member`]) when the object is a module namespace (its
+/// `__module__` key is `module`), [`no_field`] otherwise.
+pub fn missing_member<'a>(
+    module: Option<&str>,
+    field: &str,
+    keys: impl IntoIterator<Item = &'a str>,
+) -> String {
+    match module {
+        Some(module) => no_module_member(module, field, keys),
+        None => no_field(field, keys),
+    }
+}
+
+/// `ns.Name { ... }` where `ns.Name` is not a struct of a module namespace.
+pub fn not_a_namespace_struct(namespace: &str, name: &str) -> String {
+    format!(
+        "'{}.{}' is not a struct\n  hint: `{}.{} {{ ... }}` builds a struct defined in the module imported with `import \"...\" as {}`",
+        namespace, name, namespace, name, namespace
+    )
+}
+
+/// `ns.Name(..)` in a pattern where `ns.Name` is not a variant of a module
+/// namespace (E0013, like an unknown member).
+pub fn not_a_namespace_variant(namespace: &str, name: &str) -> String {
+    format!(
+        "'{}.{}' is not a variant\n  hint: `{}.{}(...)` in a pattern matches a variant of a type defined in the module imported with `import \"...\" as {}`",
+        namespace, name, namespace, name, namespace
+    )
+}
+
+/// The type and variant of an ADT constructor builtin's name
+/// (`adt:Type:Variant:field_count`, the interpreter's constructor values).
+pub fn adt_constructor_parts(name: &str) -> Option<(&str, &str)> {
+    let mut parts = name.strip_prefix("adt:")?.splitn(3, ':');
+    let type_name = parts.next()?;
+    let variant = parts.next()?;
+    parts.next()?;
+    Some((type_name, variant))
+}
+
+/// The test of a namespaced constructor pattern `ns.Name(..)` (both
+/// engines). `member` is the `(type, variant)` that the namespace's member
+/// `ns.Name` constructs (`None` when it is not a variant constructor or a
+/// unit variant: an error); the value matches only when it is that variant
+/// *of that type*, so `b.Item(n)` never selects a value built by `a.Item`
+/// when the two modules define different types with an `Item` variant.
+/// An unknown member is reported earlier, by reading `ns.Name`
+/// ([`no_module_member`]).
+pub fn namespaced_variant_matches(
+    namespace: &str,
+    name: &str,
+    member: Option<(&str, &str)>,
+    value_type: Option<&str>,
+    value_variant: Option<&str>,
+) -> Result<bool, String> {
+    let (type_name, variant) = member.ok_or_else(|| not_a_namespace_variant(namespace, name))?;
+    Ok(value_type == Some(type_name) && value_variant == Some(variant))
+}
+
 pub fn import_not_found(path: &str) -> String {
     format!(
         "cannot import '{}': file not found (checked relative to the importing file, {0}, {0}.fg, forge_modules/{0}/main.fg)",
@@ -820,10 +1128,80 @@ pub fn import_not_found(path: &str) -> String {
     )
 }
 
+/// `int(text)` / `float(text)` on text that is not such a number (E0038).
+/// `target` is `Int` or `Float`.
+pub fn invalid_number(text: &str, target: &str) -> String {
+    format!("cannot convert '{}' to {}", text, target)
+}
+
+/// Headline of JSON text that does not parse (E0039); see
+/// `stdlib::json_module::parse_error`.
+pub const JSON_PARSE_ERROR: &str = "JSON parse error";
+
+/// A `regex.*` pattern that does not compile (E0040): `invalid regex '(':
+/// unclosed group`. The regex crate's multi-line report is reduced to its
+/// final `error: ...` line.
+pub fn invalid_regex(pattern: &str, error: &dyn std::fmt::Display) -> String {
+    let report = error.to_string();
+    let reason = report
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("error: "))
+        .unwrap_or_else(|| report.lines().next().unwrap_or("").trim());
+    format!("invalid regex '{}': {}", pattern, reason)
+}
+
+/// Start of the error a `retry n times { }` block raises when every
+/// attempt failed (E0041).
+pub const RETRY_EXHAUSTED_PREFIX: &str = "retry failed after ";
+
+/// How many times `retry <count> times { }` runs its block: an Int count
+/// as given (0 or less: no attempt, the block fails at once), anything else
+/// 3.
+pub fn retry_attempts(count: Option<i64>) -> i64 {
+    count.map_or(3, |n| n.max(0))
+}
+
+/// The error of an exhausted `retry` block: `retry failed after 3 attempts:
+/// <the last attempt's error>` (its headline only; a hint is not repeated).
+pub fn retry_exhausted(attempts: i64, last_error: &str) -> String {
+    let noun = if attempts == 1 { "attempt" } else { "attempts" };
+    let last = errors::headline(last_error);
+    if last.is_empty() {
+        return format!("{}{} {}", RETRY_EXHAUSTED_PREFIX, attempts, noun);
+    }
+    format!("{}{} {}: {}", RETRY_EXHAUSTED_PREFIX, attempts, noun, last)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use Operand::*;
+
+    fn parse(source: &str) -> crate::parser::ast::Program {
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lexes");
+        crate::parser::Parser::new(tokens)
+            .parse_program()
+            .expect("parses")
+    }
+
+    #[test]
+    fn namespace_members_list_every_export_in_order() {
+        let program = parse(
+            "import { a, b as c } from \"x.fg\"\nimport \"y.fg\" as y\nimport \"z.fg\"\n\
+             fn f() { return 1 }\nlet {lo, hi: top} = {lo: 1, hi: 2}\n\
+             struct P { x: Int }\ninterface I { fn n() -> Int }\n\
+             type T = A(Int) | B\ntype W = W(Int)\n",
+        );
+        let members = namespace_members(&program);
+        let names: Vec<&str> = members.iter().map(NamespaceMember::name).collect();
+        assert_eq!(
+            names,
+            ["a", "c", "y", "f", "lo", "top", "P", "I", "T", "A", "B", "W"]
+        );
+        assert!(members.contains(&NamespaceMember::Struct("P".into())));
+        assert_eq!(import_bindings(&program), ["a", "c", "y"]);
+    }
 
     #[test]
     fn builtin_module_imports_check_members() {
@@ -854,13 +1232,66 @@ mod tests {
         assert_eq!(seconds_f64(f64::NAN), Duration::ZERO);
         assert_eq!(seconds_f64(f64::INFINITY), Duration::MAX);
         assert_eq!(seconds_f64(1e300), Duration::MAX);
-        assert_eq!(schedule_interval_secs(2, "minutes"), 120);
-        assert_eq!(schedule_interval_secs(2, "hours"), 7200);
-        assert_eq!(schedule_interval_secs(u64::MAX, "hours"), u64::MAX);
-        assert_eq!(schedule_interval_secs(7, "seconds"), 7);
+        assert_eq!(
+            schedule_interval(2.0, "minutes"),
+            Ok(Duration::from_secs(120))
+        );
+        assert_eq!(
+            schedule_interval(2.0, "hours"),
+            Ok(Duration::from_secs(7200))
+        );
+        assert_eq!(schedule_interval(f64::MAX, "hours"), Ok(Duration::MAX));
+        assert_eq!(
+            schedule_interval(7.0, "seconds"),
+            Ok(Duration::from_secs(7))
+        );
+        assert_eq!(
+            schedule_interval(0.5, "seconds"),
+            Ok(Duration::from_millis(500))
+        );
+        assert_eq!(
+            schedule_interval(250.0, "milliseconds"),
+            Ok(Duration::from_millis(250))
+        );
+        assert!(schedule_interval(0.0, "seconds").is_err());
+        assert!(schedule_interval(-1.0, "seconds").is_err());
+        assert!(schedule_interval(f64::NAN, "seconds").is_err());
         let now = Instant::now();
-        assert_eq!(timeout_deadline(now, 2), now + Duration::from_secs(2));
-        assert!(timeout_deadline(now, u64::MAX) > now + Duration::from_secs(1 << 30));
+        assert_eq!(timeout_deadline(now, 2.0), now + Duration::from_secs(2));
+        assert_eq!(
+            timeout_deadline(now, 0.25),
+            now + Duration::from_millis(250)
+        );
+        assert!(timeout_deadline(now, f64::MAX) > now + Duration::from_secs(1 << 30));
+        assert!(timeout_deadline(now, f64::INFINITY) > now + Duration::from_secs(1 << 30));
+        assert_eq!(timeout_seconds(f64::NAN), 0.0);
+        assert_eq!(timeout_seconds(-2.0), 0.0);
+        assert_eq!(
+            timeout_exceeded(0.5),
+            "timeout: operation exceeded 0.5 second limit"
+        );
+        assert_eq!(
+            timeout_exceeded(2.0),
+            "timeout: operation exceeded 2 second limit"
+        );
+    }
+
+    #[test]
+    fn duration_units() {
+        for (word, unit) in [
+            ("ms", "milliseconds"),
+            ("millisecond", "milliseconds"),
+            ("milliseconds", "milliseconds"),
+            ("second", "seconds"),
+            ("seconds", "seconds"),
+            ("minute", "minutes"),
+            ("hours", "hours"),
+        ] {
+            assert_eq!(duration_unit(word), Some(unit), "{word}");
+        }
+        assert_eq!(duration_unit("days"), None);
+        assert_eq!(duration_unit_seconds("milliseconds"), 0.001);
+        assert_eq!(duration_unit_seconds("hours"), 3600.0);
     }
 
     #[test]

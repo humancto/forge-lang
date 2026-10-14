@@ -62,24 +62,30 @@ retry 3 times {
 }
 ```
 
-If all retries fail, the error from the last attempt is raised.
+`retry` is a statement (not an expression): pass a value out through a variable declared before it, or `return` from inside it in a function. `return`, `break` and `continue` leave the block without retrying. Between attempts it waits 100 ms, 200 ms, ...; a count of 0 or less makes no attempt. If every attempt fails, it raises E0041 `retry failed after N attempts: <the last error>` (`e.type` is `RuntimeError`).
 
 ## timeout N seconds { }
 
-Limits execution time for a block. If the block does not complete within the time limit, it is interrupted.
+Limits execution time for a block. If the block does not complete within the time limit, it is interrupted (waits, `receive`, loops and calls inside it included) and E0031 `timeout: operation exceeded N second limit` is raised (N in seconds, as a Forge number: `0.5`, `2`; `e.type` is `TimeoutError`), which `try`/`catch` can handle.
 
 ```forge
 timeout 5 seconds {
     let result = http.get("https://slow-api.example.com")
     say result.json
 }
+
+timeout 250 ms {
+    wait 0.1 seconds
+}
 ```
+
+Duration units (for `wait`, `timeout` and `schedule every`): `milliseconds` / `millisecond` / `ms`, `seconds` / `second`, `minutes` / `minute`, `hours` / `hour`. The number may be any expression and a fraction is exact (`timeout 0.5 seconds`, `wait 1.5 ms`); without a unit it counts seconds. The unit words are not reserved: they are only units right after the number, on the same line.
 
 > **Note:** This feature is experimental and may not interrupt all operations cleanly.
 
 ## schedule every N units { }
 
-Runs a block repeatedly on a schedule (cron-like).
+Runs a block repeatedly in the background, first after one interval, while the program continues (in an `@server` program: after the top level, next to the server). It stops when the program ends. The block works on its own copy of the variables (kept between runs, invisible to the rest of the program), so it reports through channels, files or databases; an error in one run is ignored and the next run still happens.
 
 ```forge
 schedule every 5 minutes {
@@ -90,7 +96,7 @@ schedule every 5 minutes {
 }
 ```
 
-Supported units: `seconds`, `minutes`, `hours`.
+Supported units: those of `timeout` (`ms`, `seconds`, `minutes`, `hours`, singular or plural); the interval may be a fraction (`schedule every 0.5 seconds`) and must be positive.
 
 ## watch "path" { }
 
@@ -147,9 +153,10 @@ Pauses execution for the specified duration.
 ```forge
 wait 2 seconds
 wait 500 milliseconds
+wait 0.25 seconds
 ```
 
-Supported units: `seconds`, `milliseconds`, `minutes`.
+Supported units: those of `timeout` (`ms`/`milliseconds`, `seconds`, `minutes`, `hours`, singular or plural). `wait(n)` (the builtin) takes seconds.
 
 ## grab ... from "url"
 

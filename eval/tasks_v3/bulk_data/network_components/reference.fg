@@ -1,0 +1,87 @@
+// Union-find over 120,000 nodes and 100,000 links, path compression and
+// union by size; the arrays are top-level `let mut` bindings that the
+// functions update in place.
+
+let lines = fs.lines("/dev/stdin")
+let n = int(split(lines[0], " ")[1])
+let mut parent = range(0, n)
+let mut size = map(range(0, n), fn(i) { return 1 })
+
+fn find(start: Int) -> Int {
+    let mut root = start
+    while parent[root] != root {
+        root = parent[root]
+    }
+    let mut x = start
+    while parent[x] != root {
+        let next = parent[x]
+        parent[x] = root
+        x = next
+    }
+    return root
+}
+
+let mut links = 0
+let mut merges = 0
+let mut asks = 0
+let mut yes = 0
+for line in slice(lines, 1, len(lines)) {
+    if line.trim() == "" {
+        continue
+    }
+    let f = split(line, " ")
+    let a = int(f[1])
+    let b = int(f[2])
+    if f[0] == "link" {
+        links += 1
+        let mut ra = find(a)
+        let mut rb = find(b)
+        if ra != rb {
+            if size[ra] < size[rb] || (size[ra] == size[rb] && ra > rb) {
+                let t = ra
+                ra = rb
+                rb = t
+            }
+            parent[rb] = ra
+            size[ra] += size[rb]
+            merges += 1
+        }
+    } else {
+        asks += 1
+        if find(a) == find(b) {
+            yes += 1
+        }
+    }
+}
+
+let mut comp = {}
+let mut smallest = {}
+for x in range(0, n) {
+    let r = str(find(x))
+    if !has_key(comp, r) {
+        comp[r] = 0
+        smallest[r] = x
+    }
+    comp[r] += 1
+}
+let sizes = sort(values(comp), fn(a, b) { return b - a })
+let mut singletons = 0
+for s in sizes {
+    if s == 1 {
+        singletons += 1
+    }
+}
+println("links: {links} merges: {merges}")
+println("components: {len(sizes)}")
+println("singletons: {singletons}")
+println("largest: {join(map(slice(sizes, 0, 5), fn(s) { return str(s) }), " ")}")
+println("connected asks: {yes}/{asks}")
+let top = sort(keys(comp), fn(a, b) {
+    if comp[a] != comp[b] {
+        return comp[b] - comp[a]
+    }
+    return smallest[a] - smallest[b]
+})
+for r in slice(top, 0, 3) {
+    println("component of {smallest[r]}: {comp[r]} nodes")
+}

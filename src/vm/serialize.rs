@@ -6,7 +6,12 @@ use std::io::{self, Write};
 const MAGIC: &[u8; 4] = b"FGC\0";
 const VERSION_MAJOR: u8 = 1;
 /// 5: in-place local opcodes (`UpdateSetLocal`, `GetIndexLocal` .. `CallPure`).
-const VERSION_MINOR: u8 = 5;
+/// 6: `UpdateMapLocal`.
+/// 7: `TakeReceiver` (methods declared `mut it`).
+/// 8: `TypeCheck` (fast path of annotation checks).
+/// 9: `BindUpvalue`, `BindGlobal`, `PushPlaceLocal`, `PeekLocal` modes.
+/// 10: `Chunk::adt_variant` (ADT constructors, for namespaced patterns).
+const VERSION_MINOR: u8 = 10;
 
 #[derive(Debug)]
 pub struct SerializeError {
@@ -128,6 +133,16 @@ fn write_chunk_inner(w: &mut Vec<u8>, chunk: &Chunk) -> Result<(), SerializeErro
                 w.push(0x02);
                 w.push(idx);
             }
+        }
+    }
+
+    // v1.10+: the variant an ADT constructor chunk builds.
+    match &chunk.adt_variant {
+        None => w.push(0x00),
+        Some((type_name, variant)) => {
+            w.push(0x01);
+            write_string(w, type_name)?;
+            write_string(w, variant)?;
         }
     }
 
@@ -422,6 +437,21 @@ fn read_chunk_inner(
         upvalue_sources.push(upvalue_source);
     }
 
+    let adt_variant = if minor_version >= 10 {
+        match r.u8()? {
+            0x00 => None,
+            0x01 => Some((read_string(r)?, read_string(r)?)),
+            other => {
+                return Err(SerializeError::new(&format!(
+                    "unknown ADT constructor tag: 0x{:02x}",
+                    other
+                )));
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(Chunk {
         code,
         constants,
@@ -438,6 +468,7 @@ fn read_chunk_inner(
         global_hints: Vec::new(),
         global_ids: Default::default(),
         edition: Edition::DEFAULT,
+        adt_variant,
     })
 }
 
@@ -696,7 +727,8 @@ mod tests {
             - (4 * chunk.code.len()) // code
             - 4 // code count
             - 2 // proto count
-            - 2; // upvalue count
+            - 2 // upvalue count
+            - 1; // ADT constructor tag (v1.10+)
         assert_eq!(
             u32::from_le_bytes(bytes[code_at..code_at + 4].try_into().unwrap()) as usize,
             chunk.code.len()
@@ -888,6 +920,48 @@ mod tests {
         let old = deserialize_chunk(&serialize_chunk_v1_1(&chunk)).unwrap();
         assert_eq!(old.arity, 3);
         assert_eq!(old.min_arity, 0);
+    }
+
+    #[test]
+    fn adt_constructors_roundtrip_and_default_for_old_bytecode() {
+        let mut chunk = make_simple_chunk();
+        let mut proto = Chunk::new("<lambda>");
+        proto.emit(encode_abc(OpCode::ReturnNull, 0, 0, 0), 1);
+        proto.adt_variant = Some(("Shape".into(), "Circle".into()));
+        chunk.prototypes.push(proto);
+        let restored = deserialize_chunk(&serialize_chunk(&chunk).unwrap()).unwrap();
+        assert_eq!(restored.adt_variant, None);
+        assert_eq!(
+            restored.prototypes[0].adt_variant,
+            Some(("Shape".to_string(), "Circle".to_string()))
+        );
+        // Bytecode from before v1.10 records no constructors.
+        let old = deserialize_chunk(&serialize_chunk_v1_1(&chunk)).unwrap();
+        assert_eq!(old.prototypes[0].adt_variant, None);
+        // An unknown tag is refused.
+        let mut bytes = serialize_chunk(&chunk).unwrap();
+        let tag_at = bytes.len() - 2; // root's tag, then the edition byte
+        bytes[tag_at] = 0x07;
+        let err = deserialize_chunk(&bytes).unwrap_err();
+        assert!(err.message.contains("ADT constructor tag"), "{}", err);
+    }
+
+    #[test]
+    fn compiled_variant_constructors_record_their_variant() {
+        let program = crate::parser::Parser::new(
+            crate::lexer::Lexer::new("type T = Item(Int) | Dot\n")
+                .tokenize()
+                .unwrap(),
+        )
+        .parse_program()
+        .unwrap();
+        let chunk = crate::vm::compiler::compile(&program).unwrap();
+        let variants: Vec<_> = chunk
+            .prototypes
+            .iter()
+            .filter_map(|p| p.adt_variant.clone())
+            .collect();
+        assert_eq!(variants, [("T".to_string(), "Item".to_string())]);
     }
 
     #[test]

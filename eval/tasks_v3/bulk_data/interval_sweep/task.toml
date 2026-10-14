@@ -1,0 +1,47 @@
+id = "interval_sweep"
+category = "bulk_data"
+title = "Overlap and union of 150,000 room bookings"
+prompt = """
+Each line of standard input is a room booking `<room> <start> <end>` (single spaces; start
+and end are minutes, non-negative integers written with digits only). A booking covers the
+half-open interval [start, end): it includes `start` but not `end`, so a booking ending at
+100 and one starting at 100 do not overlap. There are about 150,000 lines. Skip empty
+lines; a line without exactly three fields, with a start or end that is not all digits, or
+with end <= start is skipped and counted.
+
+Print:
+
+1. `intervals: <valid bookings>`
+2. `skipped: <skipped lines>`
+3. `rooms: <number of distinct rooms>`
+4. `max overlap: <k> at <t>`: the largest number of bookings (of all rooms together)
+   covering one moment, and the earliest moment t where that many overlap.
+5. `top rooms:` then the 5 rooms with the largest busy time (the total length of the
+   union of the room's bookings), ties by room name ascending, each as
+   `<room> busy=<busy time> blocks=<number of disjoint blocks in the union> longest=<length of the longest block>`.
+   Bookings that touch (one ends where the next starts) join into one block.
+6. `union: <length> in <n> blocks`: the same for the union of all bookings of all rooms.
+
+The program must finish within a few seconds.
+"""
+stdin_file = "input.txt"
+generator = "gen_input.py"
+generated_sha256 = { "input.txt" = "cf531626b3c0e0f2796dbeea81ddf5b49e65541ba226fa760c51849f3c16d88d" }
+needs = []
+timeout = 45
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
+expected_stdout = """
+intervals: 149521
+skipped: 479
+rooms: 150
+max overlap: 96 at 8523438
+top rooms:
+room-q68 busy=4116010 blocks=595 longest=104473
+room-m90 busy=4102142 blocks=606 longest=95376
+room-z129 busy=4063356 blocks=602 longest=119569
+room-p41 busy=4036587 blocks=643 longest=118957
+room-h33 busy=4029459 blocks=644 longest=138222
+union: 9999899 in 1 blocks
+"""

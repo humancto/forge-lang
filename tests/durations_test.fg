@@ -1,0 +1,84 @@
+// durations_test.fg — `timeout` and `wait` take fractional durations and
+// the units milliseconds/ms, seconds, minutes and hours (singular too).
+
+fn elapsed_ms(start) {
+    return time.now().unix_ms - start
+}
+
+@test
+fn test_fractional_timeout_is_exact() {
+    let start = time.now().unix_ms
+    let mut code = ""
+    let mut message = ""
+    try {
+        timeout 0.2 seconds {
+            wait(3)
+        }
+    } catch e {
+        code = e.code
+        message = e.message
+    }
+    assert_eq(code, "E0031")
+    assert_eq(message, "timeout: operation exceeded 0.2 second limit")
+    let took = elapsed_ms(start)
+    assert(took >= 150, "fired too early: {took} ms")
+    assert(took < 2500, "fired too late: {took} ms")
+}
+
+@test
+fn test_fractional_timeout_lets_fast_work_finish() {
+    let mut done = false
+    timeout 0.5 seconds {
+        wait(0.01)
+        done = true
+    }
+    assert(done)
+}
+
+@test
+fn test_millisecond_units() {
+    let mut steps = 0
+    timeout 400 ms {
+        wait 10 ms
+        steps += 1
+        wait 10 milliseconds
+        steps += 1
+        wait 1 millisecond
+        steps += 1
+    }
+    assert_eq(steps, 3)
+    let mut message = ""
+    try {
+        timeout 50 milliseconds {
+            wait 1 second
+        }
+    } catch e {
+        message = e.message
+    }
+    assert_eq(message, "timeout: operation exceeded 0.05 second limit")
+}
+
+@test
+fn test_other_units() {
+    let mut ran = false
+    timeout 1 minute {
+        wait 0.01 seconds
+        ran = true
+    }
+    assert(ran)
+    timeout 1 hour {
+        wait 0 seconds
+    }
+    let limit = 2
+    timeout limit seconds {
+        wait(0.001)
+    }
+}
+
+@test
+fn test_unit_words_are_still_names() {
+    let ms = 3
+    let second = ms + 1
+    let minutes = [second]
+    assert_eq(minutes, [4])
+}

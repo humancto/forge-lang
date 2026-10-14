@@ -1,0 +1,43 @@
+// builtin_arg_errors_test.fg — the V3 finding 12 repro: wrong argument
+// kinds fail the same way on both engines (the full table is the parity
+// fixture tests/parity/supported/builtin_arg_errors.fg).
+
+fn message_of(f) {
+    try {
+        f()
+    } catch e {
+        return "{e.code} {e.message}"
+    }
+    return "no error"
+}
+
+@test
+fn test_finding_repro() {
+    assert_eq(message_of(fn() { return join([1, 2], 5) }), "E0015 join() requires (array[, separator_string]) (got Array, Int)")
+    assert_eq(message_of(fn() { return split(5, ",") }), "E0015 split() requires (string, delimiter_string) (got Int, String)")
+    assert_eq(message_of(fn() { return keys(5) }), "E0015 keys() requires an object or map (got Int)")
+    assert_eq(message_of(fn() { return push(5, 1) }), "E0015 push() requires (array, value) (got Int, Int)")
+    assert_eq(message_of(fn() { return len(json.parse("5")) }), "E0015 len() requires string, array, tuple, set, map, or object (got Int)")
+}
+
+@test
+fn test_lenient_vm_builtins_now_reject() {
+    assert_eq(message_of(fn() { return starts_with(5, "a") }), "E0015 starts_with() requires (string, prefix_string) (got Int, String)")
+    assert_eq(message_of(fn() { return replace("a", 5, "b") }), "E0015 replace() requires (string, from_string, to_string) (got String, Int, String)")
+    assert_eq(message_of(fn() { return has_key(5, "a") }), "E0015 has_key() requires (object, key_string) (got Int, String)")
+    assert_eq(message_of(fn() { return merge({ a: 1 }, 5) }), "E0015 merge() requires objects (got Object, Int)")
+    assert_eq(message_of(fn() { return from_entries(5) }), "E0015 from_entries() requires an array of [key, value] pairs (got Int)")
+    assert_eq(message_of(fn() { return entries([1]) }), "E0015 entries() requires an object (got Array)")
+}
+
+@test
+fn test_valid_calls_still_work() {
+    assert_eq(join([1, 2]), "12")
+    assert_eq(join([1, 2], "-"), "1-2")
+    assert_eq(get([10, 20], 1), 20)
+    assert_eq(get([10, 20], 5, "none"), "none")
+    assert_eq(get({ a: [1, { b: 2 }] }, "a.1.b"), 2)
+    assert_eq(pick({ a: 1, b: 2 }, ["b"]), { b: 2 })
+    assert_eq(omit({ a: 1, b: 2 }, ["b"]), { a: 1 })
+    assert_eq(from_entries([["a", 1]]), { a: 1 })
+}

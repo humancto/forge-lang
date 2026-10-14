@@ -1,0 +1,61 @@
+// Normalize a messy CSV export (byte-order mark, CRLF, quoted fields with
+// commas, quotes and line breaks) into canonical CSV with integer cents.
+
+fn field(v) -> String {
+    let s = str(v)
+    if regex.test(s, "[,\"\\r\\n]") || s != s.trim() {
+        return "\"" + replace(s, "\"", "\"\"") + "\""
+    }
+    return s
+}
+
+// The byte-order mark U+FEFF.
+let bom = "\u{feff}"
+let mut text = fs.read("/dev/stdin")
+if starts_with(text, bom) {
+    text = substring(text, 1, len(text))
+}
+let rows = filter(csv.parse(text, { header: false, types: false }), fn(r) { return len(r) > 1 || (len(r) == 1 && r[0] != "") })
+let header = map(rows[0], fn(h) { return h.trim() })
+let ci = index_of(header, "id")
+let cn = index_of(header, "name")
+let ca = index_of(header, "amount")
+let cnotes = index_of(header, "notes")
+let mut out = []
+let mut bad = []
+for e in enumerate(slice(rows, 1, len(rows))) {
+    let r = e.value
+    let amount = r[ca].trim()
+    let mut cents = 0
+    if amount != "" {
+        let m = regex.captures(amount, "^(-?)([0-9]+)(?:\\.([0-9]{1,2}))?$")
+        if m == null {
+            bad.push(str(e.index + 1))
+            continue
+        }
+        let frac = if m[3] == null { "00" } else if len(m[3]) == 1 { m[3] + "0" } else { m[3] }
+        cents = int(m[2]) * 100 + int(frac)
+        if m[1] == "-" {
+            cents = 0 - cents
+        }
+    }
+    let notes = replace(replace(r[cnotes], "\r\n", "\n"), "\n", " / ")
+    out.push({ id: r[ci], name: r[cn].trim(), cents: cents, notes: notes })
+}
+let sorted_rows = sort(out, fn(a, b) {
+    if a.cents != b.cents {
+        return b.cents - a.cents
+    }
+    if a.id < b.id {
+        return -1
+    }
+    return 1
+})
+println("id,name,amount_cents,notes")
+let mut total = 0
+for r in sorted_rows {
+    println(join([field(r.id), field(r.name), field(r.cents), field(r.notes)], ","))
+    total += r.cents
+}
+let bad_text = if len(bad) == 0 { "none" } else { join(bad, " ") }
+println("# {len(sorted_rows)} rows, total {total}, bad rows: {bad_text}")

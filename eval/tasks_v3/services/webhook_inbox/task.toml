@@ -1,0 +1,148 @@
+id = "webhook_inbox"
+category = "services"
+title = "Webhook inbox: signed JSON, form posts and plain text"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18524 that receives webhooks and stores them as
+events in the SQLite database file `inbox.db` in the working directory (create it when
+missing). An event has a `source`, an `event` name and a `summary`. JSON responses unless
+stated otherwise.
+
+- `POST /hooks/github`: the header `X-Delivery` (a delivery id) is required, else 400
+  `{"error": "missing delivery id"}`. The header `X-Signature` must equal `sha256=`
+  followed by the lower-case hex SHA-256 of the text `whsec-42` immediately followed by
+  the request body exactly as received, else 401 `{"error": "bad signature"}`. If an event
+  with this delivery id was already stored, answer 200
+  `{"duplicate": true, "delivery": <id>}` and store nothing. The body must be a JSON object
+  with a string `event`, else 422 `{"error": "event is required"}` (also when the body is
+  not JSON at all). Store source `github`, the event name, and the summary
+  `<event> by <sender.login>` (`unknown` when there is no string `sender.login`); answer
+  202 `{"accepted": <delivery id>}`. Check in this order: delivery id, signature,
+  duplicate, body.
+- `POST /hooks/form`: the request must have
+  `Content-Type: application/x-www-form-urlencoded`, else 415 `{"error": "expected a form"}`.
+  Fields `name` and `email` (trimmed); name must be non-empty and email must contain `@`,
+  else 422 `{"error": "name and email are required"}`. Store source `form`, event `form`,
+  summary `<name> <<email>>` (the email in angle brackets); answer 202
+  `{"accepted": "form-<n>"}` where n is the stored event's number (events are numbered
+  1, 2, ... across all sources, in the order stored).
+- `POST /hooks/text`: the body is plain text; store one event (source `text`, event
+  `line`, summary = the trimmed line) per non-blank line, in order, and answer 202 with
+  the plain-text body `accepted <k> lines` and `Content-Type: text/plain; charset=utf-8`.
+- `GET /events` (optional `?source=<source>`): `{"events": [{"source", "event",
+  "summary"}, ...], "count": <n>}` in the order stored.
+
+The server runs until it is stopped.
+"""
+needs = ["net", "read", "write", "db"]
+timeout = 30
+mode = "server"
+port = 18524
+expected_stdout = """
+STATUS 400
+{"error": "missing delivery id"}
+STATUS 401
+{"error": "bad signature"}
+STATUS 202
+{"accepted": "d-1"}
+STATUS 200
+{"delivery": "d-1", "duplicate": true}
+STATUS 202
+{"accepted": "d-2"}
+STATUS 422
+{"error": "event is required"}
+STATUS 422
+{"error": "event is required"}
+STATUS 202
+{"accepted": "form-3"}
+STATUS 422
+{"error": "name and email are required"}
+STATUS 422
+{"error": "name and email are required"}
+STATUS 415
+{"error": "expected a form"}
+STATUS 202
+content-type: text/plain; charset=utf-8
+accepted 3 lines
+STATUS 200
+{"count": 6, "events": [{"event": "push", "source": "github", "summary": "push by ada"}, {"event": "issues", "source": "github", "summary": "issues by unknown"}, {"event": "form", "source": "form", "summary": "Ada Lovelace <ada@example.com>"}, {"event": "line", "source": "text", "summary": "first line"}, {"event": "line", "source": "text", "summary": "second line"}, {"event": "line", "source": "text", "summary": "third \\u2713"}]}
+STATUS 200
+{"count": 3, "events": [{"event": "line", "source": "text", "summary": "first line"}, {"event": "line", "source": "text", "summary": "second line"}, {"event": "line", "source": "text", "summary": "third \\u2713"}]}
+"""
+
+[[request]]
+method = "POST"
+path = "/hooks/github"
+body = '{"event": "push", "sender": {"login": "ada"}}'
+headers = { "X-Signature" = "sha256=bd241032f848c79161c7f354194ae811618378fdd39e2491af16dfeec2f96802" }
+
+[[request]]
+method = "POST"
+path = "/hooks/github"
+body = '{"event": "push", "sender": {"login": "ada"}}'
+headers = { "X-Delivery" = "d-1", "X-Signature" = "sha256=0000" }
+
+[[request]]
+method = "POST"
+path = "/hooks/github"
+body = '{"event": "push", "sender": {"login": "ada"}}'
+headers = { "X-Delivery" = "d-1", "X-Signature" = "sha256=bd241032f848c79161c7f354194ae811618378fdd39e2491af16dfeec2f96802" }
+
+[[request]]
+method = "POST"
+path = "/hooks/github"
+body = '{"event": "push", "sender": {"login": "ada"}}'
+headers = { "X-Delivery" = "d-1", "X-Signature" = "sha256=bd241032f848c79161c7f354194ae811618378fdd39e2491af16dfeec2f96802" }
+
+[[request]]
+method = "POST"
+path = "/hooks/github"
+body = '{"event": "issues"}'
+headers = { "X-Delivery" = "d-2", "X-Signature" = "sha256=a2a6261bebfee0d0c97f5751685a5f8762cb08d51bfba748ab0ab4747713057d" }
+
+[[request]]
+method = "POST"
+path = "/hooks/github"
+body = '{"action": "opened"}'
+headers = { "X-Delivery" = "d-3", "X-Signature" = "sha256=bc4727d96385d0e2b7ff38edd7f534ed95b9dc219ca574cf8e02d84e05464369" }
+
+[[request]]
+method = "POST"
+path = "/hooks/github"
+body = 'event=push'
+headers = { "Content-Type" = "text/plain", "X-Delivery" = "d-4", "X-Signature" = "sha256=6ce2314d47388b497c6d4998aa5bc2eec4b6e5176f016c9001b620564f535157" }
+
+[[request]]
+method = "POST"
+path = "/hooks/form"
+body = 'name=Ada+Lovelace&email=ada%40example.com&message=hi%21'
+headers = { "Content-Type" = "application/x-www-form-urlencoded" }
+
+[[request]]
+method = "POST"
+path = "/hooks/form"
+body = 'name=%20%20&email=x%40y'
+headers = { "Content-Type" = "application/x-www-form-urlencoded" }
+
+[[request]]
+method = "POST"
+path = "/hooks/form"
+body = 'name=Bo&email=nope'
+headers = { "Content-Type" = "application/x-www-form-urlencoded" }
+
+[[request]]
+method = "POST"
+path = "/hooks/form"
+body = '{"name": "Bo", "email": "bo@example.com"}'
+
+[[request]]
+method = "POST"
+path = "/hooks/text"
+body = "first line\n\n  second line  \r\nthird ✓\n"
+headers = { "Content-Type" = "text/plain" }
+show_headers = ["Content-Type"]
+
+[[request]]
+path = "/events"
+
+[[request]]
+path = "/events?source=text"

@@ -1,0 +1,67 @@
+// captured_containers_test.fg — containers updated in place by the engines'
+// fast paths keep value semantics: top-level arrays/objects written by
+// functions, keys that are index/field reads or calls, pushes through
+// deeper places, and read-only builtins on captured arrays.
+
+let mut parent = [0, 1, 2, 3]
+let mut groups = {}
+
+fn set_root(x, r) {
+    parent[x] = r
+    return null
+}
+
+fn add_to(k, v) {
+    if !has_key(groups, k) {
+        groups[k] = { items: [], n: 0 }
+    }
+    groups[k].items.push(v)
+    groups[k].n += 1
+    return null
+}
+
+fn window(i) {
+    return join(slice(parent, i, i + 2), ",")
+}
+
+@test
+fn test_function_writes_are_invisible_to_copies() {
+    let before = parent
+    set_root(0, 3)
+    let mid = parent
+    set_root(1, 3)
+    assert_eq(before[0], 0)
+    assert_eq(mid[1], 1)
+    assert_eq(parent[0], 3)
+    assert_eq(parent[1], 3)
+    assert_eq(window(0), "3,3")
+}
+
+@test
+fn test_deep_pushes_from_a_function() {
+    add_to("a", 1)
+    let snap = groups.a.items
+    add_to("a", 2)
+    add_to("b", 3)
+    assert_eq(snap, [1])
+    assert_eq(groups.a.items, [1, 2])
+    assert_eq(groups.a.n, 2)
+    assert_eq(groups.b.items, [3])
+}
+
+@test
+fn test_computed_keys() {
+    let names = ["x", "y", "x"]
+    let rec = { sku: "y" }
+    let mut counts = {}
+    let alias = counts
+    for i in range(0, 3) {
+        counts[names[i]] = get(counts, names[i], 0) + 1
+        counts[rec.sku] = get(counts, rec.sku, 0) + 10
+        counts["k" + str(i)] = i
+    }
+    assert_eq(alias, {})
+    assert_eq(counts.x, 2)
+    assert_eq(counts.y, 31)
+    assert_eq(counts.k2, 2)
+}

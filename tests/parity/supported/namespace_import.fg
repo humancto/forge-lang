@@ -1,0 +1,12 @@
+// expect: [5, 6.28, 3, 12, square, 1, 2]
+// `import "path" as m`: functions, variables, structs, variants and
+// patterns through the namespace; the module runs once (shared state).
+import "tests/parity/modules/namespace_geo.fg" as geo
+import { next_id } from "tests/parity/modules/namespace_geo.fg"
+let p = geo.Point { x: 3 }
+let kind = match geo.Square(2.0) {
+    geo.Circle(_) => "circle",
+    geo.Square(_) => "square",
+    geo.Dot => "dot",
+}
+[geo.add(2, 3), geo.TAU, p.sum(), geo.area(geo.Circle(2.0)), kind, geo.next_id(), next_id()]

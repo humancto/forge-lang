@@ -98,6 +98,8 @@ const SIGNATURES: &[&str] = &[
     "slugify(String) -> String",
     "snake_case(String) -> String",
     "camel_case(String) -> String",
+    "chr(Int) -> String",
+    "ord(String) -> Int",
     // Results and options
     "is_ok(Any) -> Bool",
     "is_err(Any) -> Bool",
@@ -124,6 +126,10 @@ const SIGNATURES: &[&str] = &[
     "uuid() -> String",
     "wait(Any) -> Null",
     "fetch(Any, Any?) -> Object",
+    // Concurrency
+    "close(Any) -> Null",
+    "is_closed(Any) -> Bool",
+    "try_send(Any, Any) -> Bool",
 ];
 
 /// Members of stdlib modules with a known result type
@@ -339,6 +345,7 @@ pub fn builtin_generic(name: &str, args: &[Ty]) -> Option<Ty> {
         ("array" | "list", 1) => Ty::array(arg(0)),
         ("set", 1) => Ty::Set(Box::new(arg(0))),
         ("map", 2) => Ty::Map(Box::new(arg(0)), Box::new(arg(1))),
+        ("object", 1) => Ty::ObjectOf(Box::new(arg(0))),
         _ => return None,
     })
 }

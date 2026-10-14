@@ -26,7 +26,7 @@ Engine flags go BEFORE the subcommand: `forge --interp run x.fg`, not `forge run
 
 ## Reading input
 
-Programs read piped standard input with `fs.lines("/dev/stdin")` (an array of lines, without the newlines) or `fs.read("/dev/stdin")` (all of it as one string). `input()` also returns all of stdin, with trailing whitespace trimmed. Command-line arguments after the file name are not passed to the program: take input from stdin.
+Programs read piped standard input with `fs.lines("/dev/stdin")` (an array of lines, without the newlines) or `fs.read("/dev/stdin")` (all of it as one string). `input()` also returns all of stdin, with trailing whitespace trimmed. Command-line arguments: `forge run main.fg --top 3 data.txt` passes everything after the file name to the program (flags included; forge's own flags go before the file). `io.args()` is the script path followed by those arguments (`["main.fg", "--top", "3", "data.txt"]`), so the arguments are `slice(io.args(), 1, len(io.args()))`. `io.args_get("--top")` is the value after a flag (`"3"`, a String; `true` for a flag followed by another flag or nothing; `null` if absent), `io.args_has("--verbose")` tests a flag, `io.args_parse()` returns `{"--top": "3", ...}`; all three ignore the arguments after a `--`. Under `--sandbox` the program still gets its arguments.
 
 ```forge
 let lines = fs.lines("/dev/stdin")
@@ -72,13 +72,13 @@ let [first, ...rest] = nums
 println("{who} {age} {first} {rest}")
 ```
 
-Numbers: a whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max`, `round`, `floor` and `ceil` keep Ints as Ints (`floor`/`ceil` of a Float is an Int).
+Numbers: literals are `42`, `1_000_000` (underscores ignored), `3.14`, and with an exponent `1e9`, `2.5e-3`, `6E+23` (an exponent always makes a Float: `1e2` is `100.0`). A whole Float prints without decimals (`println(3.0)` prints `3`), so format money and averages with `to_fixed(x, digits)` (also `x.to_fixed(2)`, `"{to_fixed(x, 2)}"`); it rounds half away from zero on the exact value. `round(x)` returns an Int, `round(x, digits)` a Float. `abs`, `min`, `max`, `round`, `floor` and `ceil` keep Ints as Ints (`floor`/`ceil` of a Float is an Int).
 
-Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. `typeof(x)` returns one of `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object` (also for struct and algebraic values), `Tuple`, `Set`, `Map`, `Result`, `Option`, `Function` (a named `fn`), `Lambda` (an anonymous `fn`), `BuiltIn`, `Channel`. Strings cannot be indexed (`s[0]` is an error): use `substring(s, start, end)`. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` and Unicode classes such as `\\p{L}` are literal.
+Types: `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object`, `Tuple`, plus `Set`, `Map`, `Result`, `Option`, structs and algebraic types. `typeof(x)` returns one of `Int`, `Float`, `String`, `Bool`, `Null`, `Array`, `Object` (also for struct and algebraic values), `Tuple`, `Set`, `Map`, `Result`, `Option`, `Function` (a named `fn`), `Lambda` (an anonymous `fn`), `BuiltIn`, `Channel`. Strings cannot be indexed (`s[0]` is an error): use `substring(s, start, end)`. Annotations are optional: `let t: Int = 42`, `fn f(x: Int) -> String`. Comments are `//`. Escapes in `"..."` strings: `\n` `\t` `\r` `\\` `\"`, `\{` and `\}` (a literal brace, never an interpolation), and Unicode escapes `\u{e9}` / `\u{1F600}` (1 to 6 hex digits) or `\u00e9` (exactly 4; a surrogate pair `\uD83D\uDE00` is one character); anything else (`\0`, `\x41`) is a syntax error. `chr(n)` is the one-character string for code point `n` (`chr(233) == "é"`), `ord(s)` the code point of a one-character string (`ord("A") == 65`). Triple-quoted `"""..."""` strings span lines and are raw: no escapes, no interpolation (use them for regexes with `{`). In `"..."` strings, digit-only braces such as `\\d{4}` or `{2,}` and Unicode classes such as `\\p{L}` are literal.
 
 ## Type annotations and checking
 
-Annotation syntax: `Int`, `[Int]`, `?String` (or `Option<String>`), `Result<Int, String>`, `Map<String, Int>`, `Set<Int>`, `(Int, String)`, `fn(Int, Int) -> Bool`, `Any`, user structs/types, generics `fn first<T>(xs: [T]) -> T`, `struct Box<T> { value: T }`.
+Annotation syntax: `Int`, `[Int]`, `?String` (or `Option<String>`), `Result<Int, String>`, `Object` (any object), `Object<Int>` (an object whose values are all Int: a typed dictionary, e.g. `let ages: Object<Int> = { ada: 36 }` or a parsed JSON object), `Map<String, Int>` (a `Map` value from `map()`; an object literal is not a Map), `Set<Int>`, `(Int, String)`, `fn(Int, Int) -> Bool`, `Any`, user structs/types, generics `fn first<T>(xs: [T]) -> T`, `struct Box<T> { value: T }`.
 
 ```forge
 fn apply(f: fn(Int) -> Int, x: Int) -> Int { return f(x) }
@@ -198,6 +198,48 @@ println(u.describe())
 println(satisfies(u, Describable))
 ```
 
+Values are copied (structs, arrays, objects), and a method's receiver `it` is
+read-only. A method that updates its receiver declares it `mut it`; when it
+returns, the updated `it` is written back to the variable (or field/index of
+one) the method was called on:
+
+```forge
+struct Stack {
+    items: [Int]
+}
+
+impl Stack {
+    fn push(mut it, x: Int) {      // `mut it`: updates the receiver
+        it.items.push(x)
+    }
+    fn pop(mut it) {
+        return it.items.pop()
+    }
+    fn peek(it) {                  // plain `it`: read-only
+        return it.items[len(it.items) - 1]
+    }
+}
+
+let mut s = Stack { items: [] }    // the receiver must be `let mut`
+s.push(1)
+s.push(2)
+println(s.pop())                   // 2
+println(s.items)                   // [1]
+let mut stacks = { a: Stack { items: [] } }
+stacks.a.push(7)                   // fields and elements update in place too
+```
+
+- Assigning to a plain `it` (`it.n += 1`, `it.items.push(x)`, `it = ...`) is
+  an error (E0006 / T0017); copy it first (`let mut c = it`) to return a
+  modified value instead.
+- A `mut it` method on a `let` (immutable) binding is E0006; on a temporary
+  (`make().inc()`, `a.b().inc()`) it is E0006 "cannot update a temporary
+  value". Works the same for `type` (algebraic) methods and through interfaces.
+- The update is written back only when the method returns normally; an error
+  inside it leaves the receiver unchanged.
+
+A parameter declared with an interface (`fn show(d: Describable)`) accepts any struct that has the interface's methods, and passes on to another parameter of that interface, or of an interface whose methods it has (`fn report(d: Describable) { show(d) }`).
+
 ## Algebraic types and match
 
 ```forge
@@ -302,9 +344,42 @@ try {
 }
 ```
 
+The type checker narrows an optional value after a null test: in `if x != null { ... }`, after `if x == null { return ... }`, and on the right of `x != null && x > 0` / `x == null || v < x`, `x` is not null (no T0014 warning).
+
 There is no `throw`. Return `Err(...)` and propagate with `?`, or raise with `assert(cond, msg)` / `unwrap(expr)` (both are catchable). `?` only works on `Result` values; `?` at the top level of a program stops it with `unhandled error: ...`. To ignore a block's errors, use `try { ... } catch e { }`.
 
-Error codes: every runtime error has a stable code, the same on both engines (`E0003` undefined name, `E0004` calling a non-function, `E0005` wrong argument count, `E0007` operator on unsupported types, `E0008` division by zero, `E0009` index out of bounds, `E0010` missing key, `E0012` field access on null, `E0013` unknown field, `E0015` bad builtin argument, `E0020` permission denied, `E0036` HTTP request timed out, `E0037` HTTP connection failed, ...); type-checker diagnostics are `T0001`–`T0021`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error `e` has `e.message` (without the hint), `e.type`, `e.code` and `e.hint` (the error's suggestion, or `null`). For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
+Error codes: every runtime error has a stable code, the same on both engines; type-checker diagnostics are `T0001`–`T0021`. `forge explain E0009` prints an explanation, example and fix; `forge explain` lists all codes. A caught error `e` has `e.message` (without the hint), `e.code`, `e.hint` (the error's suggestion, or `null`) and `e.type`, a category that is the same for every error of a code (shown in the table). Branch on `e.code`, not on message text. The runtime codes:
+
+| code | `e.type` | raised by |
+|---|---|---|
+| `E0000` | RuntimeError | anything without a more specific code (e.g. `toml.parse` of bad text) |
+| `E0003` | ReferenceError | undefined name |
+| `E0004` / `E0005` | TypeError | calling a non-function / wrong argument count |
+| `E0006` | TypeError | assigning to an immutable binding |
+| `E0007` | TypeError | operator on unsupported types (`[1] * 2`) |
+| `E0008` | ArithmeticError | division or modulo by zero |
+| `E0009` | IndexError | index out of bounds (`xs[5]`) |
+| `E0010` | ReferenceError | missing key (`m["nope"]`) |
+| `E0011` | TypeError | value cannot be indexed that way (`null["x"]`, `5[0]`, `"abc"[0]`: use `substring`) |
+| `E0012` / `E0014` | TypeError | field access on `null` / on a non-object |
+| `E0013` | ReferenceError | unknown field or method |
+| `E0015` | TypeError | bad builtin argument (`len(5)`, `join([1], 5)`) |
+| `E0016` | RuntimeError | stdlib operation failed (`fs.read` of a missing file, a failed command) |
+| `E0017` | TypeError | value does not match its annotation (edition 2027, `--strict`) |
+| `E0019` / `E0020` | ReferenceError / RuntimeError | import failed / permission denied |
+| `E0021` | AssertionError | `assert`, `assert_eq`, ... failed |
+| `E0023` / `E0024` | RuntimeError | `unwrap` of `None`/`Err` / `?` on an `Err` at the top level |
+| `E0026` | RuntimeError | no `match` arm matched |
+| `E0030` | RuntimeError | `send` on a closed channel |
+| `E0031` | TimeoutError | `timeout` block expired, `--max-time`, cancelled |
+| `E0034` | TypeError | edition 2027: `"a" + 1` |
+| `E0036` / `E0037` | TimeoutError / ConnectionError | HTTP request timed out / could not connect |
+| `E0038` | ValueError | `int("12x")`, `float("abc")`: text is not a number |
+| `E0039` | ValueError | invalid JSON (`json.parse`, `fs.read_json`, `sh_json`) |
+| `E0040` | ValueError | invalid regex pattern |
+| `E0041` | RuntimeError | `retry n times` exhausted (the message ends with the last attempt's error) |
+
+For tools: `forge check file.fg` type-checks without running, and `--error-format json` (or `forge check --format json`) prints one `{code, severity, message, file, line, col, hint, phase}` object per diagnostic.
 
 ```forge
 try {
@@ -323,13 +398,21 @@ println(double(21))
 import { name as user_name } from "lib/user.fg"   // renamed: binds user_name
 import { sqrt, pi } from "math"            // members of a built-in module
 println(sqrt(16))                          // math.* stays available too
+import "lib/geo.fg" as geo                 // namespace: geo.<name>
+println(geo.area(geo.Circle(2.0)))         // functions, variables, variants
+let p = geo.Point { x: 1, y: 2 }           // structs: geo.Point { ... }, geo.Point.origin()
+match shape { geo.Circle(r) => r, geo.Dot => 0.0 }   // variants in patterns
 ```
 
-`as` renames functions and variables (use it when two modules export the same name); a struct, `type`, variant or interface keeps its own name (renaming one is an import error). A module runs once per program: importing it again — from another module, or with `import "m.fg"` after `import { f } from "m.fg"` — reuses it, so its top-level code runs once and every importer shares its state (`let mut` counters, caches). Import modules at the top level: a `spawn` task works on a copy of the program's state, so a module imported first inside a task is not shared with the rest of the program. Import cycles are an error (`circular import: a.fg -> b.fg -> a.fg`).
+A module exports every name its top level binds: functions, `let` variables (destructured ones too), structs, interfaces, `type` names and their variants, and the names it imports itself (re-exports: a package's `main.fg` can `import { parse } from "src/parser.fg"` and its users `import { parse } from "pkg"`). Import a type with its variants, `import { Shape, Circle, Dot } from "shapes.fg"`, to write `fn area(s: Shape)` (the type name alone does not bring its variants; as a value it is its description, `Shape.variants == ["Circle", "Dot"]`). Interfaces import the same way: `import { Plugin } from "api.fg"` then `impl Plugin for Upper { ... }`.
+
+`import "m.fg" as m` binds `m` to a read-only namespace object: its members are the module's exports (plus `m.__module__`, the path). It is the same module run as every other import of the file (shared state); a variable member is the value when the import ran, like `import { x }` — read changing state through a function. `m.nope` is error E0013 `module 'm.fg' has no member 'nope'` with a did-you-mean (T0008 statically, and `m.f(x)` is checked against `f`'s signature); `m.x = 1` is the immutable-assignment error. In a pattern, `m.V(x)` matches only values built by `m.V` (that variant of that type, never a same-named variant of another module's type); an unknown member there is E0013 too, and a member that is not a variant is E0013 `'m.V' is not a variant`. `m` can be passed around (`typeof(m)` is `Object`). Built-in modules cannot be renamed (`import "math" as m` is E0019).
+
+`as` renames functions and variables (use it when two modules export the same name); a struct, `type`, variant or interface keeps its own name (renaming one is an import error). A module runs once per program: importing it again — from another module, or with `import "m.fg"` after `import { f } from "m.fg"` — reuses it, so its top-level code runs once and every importer shares its state (`let mut` counters, caches). This holds across `spawn` tasks too: a module first imported inside a task is not run again when the program or another task imports it (a task importing a module another task is still running waits for it). But a task works on a copy of the program's state, so what a task writes to a module's variables is not seen outside it: return results with `await` or channels. Import cycles are an error (`circular import: a.fg -> b.fg -> a.fg`).
 
 Native plugins (Rust/C shared libraries built with `crates/forge-plugin`): `import native "target/release/libfoo" as foo` then `foo.add(1, 2)`, or `import { add } from native "path/libfoo"`. The platform suffix is added; paths resolve like `.fg` imports. Needs `--allow-ffi` (full trust; denied under `--sandbox` and `forge mcp`). Plugin errors are catchable runtime errors.
 
-`import "utils.fg"` brings every top-level name into scope. A path resolves relative to the importing file first, then the current working directory, then the installed packages (`forge_modules/<name>/main.fg`, `forge_modules/<name>.fg`, `forge_modules/<name>/src/main.fg`); the `.fg` suffix is optional. Stdlib modules (`math`, `fs`, `http`, ...) are always in scope; never import them. Packages are declared in `forge.toml` (`forge add <pkg>`).
+`import "utils.fg"` brings every top-level definition into scope (not the names `utils.fg` itself imports). A path resolves relative to the importing file first, then the current working directory, then the installed packages (`forge_modules/<name>/main.fg`, `forge_modules/<name>.fg`, `forge_modules/<name>/src/main.fg`); the `.fg` suffix is optional. Stdlib modules (`math`, `fs`, `http`, ...) are always in scope; never import them. Packages are declared in `forge.toml` (`forge add <pkg>`).
 
 ## Collections and builtins
 
@@ -376,9 +459,9 @@ println(m.get("k"))
 println([1, 2, 3, 4].stream().filter(fn(x) { return x > 1 }).take(2).collect())
 ```
 
-Maps: `m.set(k, v)` and `m.remove(k)` return a new Map (a bare `m.set(k, v)` statement changes nothing), `m.get(k)` (`null` if absent), `m.has(k)`, `m.keys()`, `m.values()`, `m.len()`, `m.to_array()` (an array of `(key, value)` tuples), `for k, v in m`; `m[k]` is an error. Keys may be any value; for String keys an object (`obj[k] = v`) is simpler.
+Maps: `m.set(k, v)` and `m.remove(k)` return a new Map (a bare `m.set(k, v)` statement changes nothing), `m.get(k)` (`null` if absent), `m.has(k)`, `m.keys()`, `m.values()`, `m.len()`, `m.to_array()` (an array of `(key, value)` tuples), `for k, v in m`; `m[k]` is an error. Keys may be any value (`1` and `1.0` are one key, NaN finds NaN, arrays/objects/sets compare by content); for String keys an object (`obj[k] = v`) is simpler. Maps and sets are hash-indexed: `get`/`has`/`set`/`remove` (and set `has`/`add`/`remove`) take constant time on average, and `m = m.set(k, v)` / `m = m.remove(k)` on a `let mut` variable update it without copying the map, so building a map in a loop is linear.
 
-Other builtins: `exit(code)` (ends the program at once with that exit status; output already printed is kept), `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stderr: warnings and errors of CLI programs), `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)`, `assert`, `assert_eq`.
+Other builtins: `exit(code)` (ends the program at once with that exit status; output already printed is kept), `eprintln(...)` / `eprint(...)` (like `println`/`print`, to stderr: warnings and errors of CLI programs), `abs(x)`, `min(a, b, ...)` / `min(array)`, `max`, `round(x, digits?)`, `floor(x)`, `ceil(x)`, `to_fixed(x, digits)`, `len`, `range`, `reverse`, `sum`, `any`, `all`, `unique`, `zip(a, b)`, `chunk(arr, n)`, `slice(arr, start, end)`, `has_key`, `flatten`, `min_of`, `max_of`, `values`, `omit`, `entries`, `ends_with`, `index_of`, `slugify`, `chr(n)`, `ord(s)`, `uuid()`, `typeof`, `str`, `int`, `float`, `wait(seconds)` (fractions allowed: `wait(0.25)`), `assert`, `assert_eq`.
 
 ## Standard library (always in scope)
 
@@ -386,7 +469,7 @@ Other builtins: `exit(code)` (ends the program at once with that exit status; ou
 | ------ | -------------------------------------------- |
 | `math` | `sqrt(x)`, `pow(b, e)`, `abs`, `max(a, b)`, `min`, `floor`, `ceil`, `round`, `random_int(lo, hi)`, `pi`, `e` |
 | `fs` | `read(path)`, `write(path, text)`, `append`, `exists`, `list(dir)`, `remove`, `mkdir`, `copy(src, dst)`, `rename` |
-| `json` | `parse(text)` (keeps the document's key order), `stringify(value)` → `{"a": 1, "b": [1, 2]}`, `compact(value)` → `{"a":1,"b":[1,2]}` (no whitespace), `pretty(value, indent?)` |
+| `json` | `parse(text)` (keeps the document's key order), `stringify(value)` → `{"a": 1, "b": [1, 2]}`, `compact(value)` → `{"a":1,"b":[1,2]}` (no whitespace), `pretty(value, indent?)`; numbers keep their kind: integer syntax parses as Int (`-0` is `0`; beyond 64 bits a Float), `1.0`/`1e2` as Float, and a Float is written with a fraction (`json.compact(1.0)` is `1.0`, NaN/infinity `null`); strings use `\b \f \n \r \t \" \\` and `\u00XX` |
 | `regex` | `test(text, pattern)`, `find(text, pattern)` (first match or `null`), `find_all(text, pattern)`, `captures(text, pattern)` (first match's groups `[whole, g1, g2, ...]`, an unmatched group `null`; `null` when nothing matches), `captures_all(text, pattern)` (one such array per match), `replace(text, pattern, repl)` (`repl` may use `$1`, `$0`, `$$`, and `${name}` for `(?<name>...)` in a `"""..."""` string), `split(text, pattern)` — text FIRST |
 | `crypto` | `sha256(s)`, `md5(s)`, `base64_encode`, `base64_decode`, `hex_encode`, `hex_decode` |
 | `http` | `get(url, opts?)`, `post(url, opts?)`, `put`, `delete`, `patch`, `head`; opts: `{ body, headers, params, timeout, auth }` (a String `body` is sent as is, any other value as JSON; `timeout` is in seconds, default 30, `0.5` allowed); response: `{ status, ok, body, json, headers }` (`body` is the text, `json` the parsed body); a 4xx/5xx answer is a normal response with `ok == false`; no answer raises `E0036` (timed out) or `E0037` (refused, unknown host, TLS) |
@@ -399,7 +482,7 @@ Other builtins: `exit(code)` (ends the program at once with that exit status; ou
 | `term` | `red`, `green`, `bold`, `table(rows)`, `bar`, `sparkline`, `banner`, `box` |
 | `time` | `now()` → `{ iso, unix, unix_ms, year, month, day, hour, minute, second, weekday, weekday_short, day_of_year, timezone }` (UTC); `unix()` (Int seconds); `parse(s)` (`2024-03-05`, `2024-03-05 10:20:30`, `2024-03-05T10:20:30Z` or with an offset, converted to UTC) → the same object; `format(t, "%Y-%m-%d")` (`t` an object or Unix seconds, strftime pattern, default `%Y-%m-%d %H:%M:%S`, always UTC); `add(t, secs)` / `add(t, { days: 1, hours: 2 })`, `sub` → object; `diff(a, b)` (a − b) → `{ seconds, minutes, hours, days, weeks, human }`; `sleep(seconds)` |
 | `os`, `path` | `os.platform()`, `os.cpus()`; `path.join(a, b)`, `path.extname(p)`, `path.basename(p)` |
-| `io` | `prompt`, `args_parse`, `args_get`, `args_has` |
+| `io` | `args()` (script path, then the program's arguments), `args_get(flag)`, `args_has(flag)`, `args_parse()`, `prompt` |
 
 `fetch(url)` is shorthand for `http.get`. Shell builtins: `sh(cmd)`, `sh_lines`, `sh_ok`, `sh_json`, `run_command`, `pipe_to(data, cmd)` (need `--allow-run`).
 
@@ -451,9 +534,82 @@ let t = spawn {
 println(await_timeout(t, 10))  // null on timeout (milliseconds)
 ```
 
-Also: `try_send(ch, v)` (true when sent), `try_receive(ch)` (`Some(v)`, or `None` when nothing is waiting), `select(channels, timeout_ms?)` (`[index, value]` from the first channel with a value; `null` on timeout and also when the channels are closed), `close(ch)` (then `receive` returns `null` once the channel is drained). A program ends when its top level ends: detached `spawn` tasks still running are abandoned (`await` them to wait).
+Also: `try_send(ch, v)` (true when sent), `try_receive(ch)` (`Some(v)`, or `None` when nothing is waiting), `close(ch)` (later `send`s fail with E0030; values sent before stay receivable, then `receive` returns `null`), `is_closed(ch)` (true once the channel is closed *and* drained: nothing more can arrive), `select(channels, timeout_ms?)` (`[index, value]` from the first channel with a value; skips finished channels; `null` on timeout, and at once when every channel is closed and drained). After `select` returns `null`, `all(chs, fn(c) { return is_closed(c) })` tells "all producers finished" from "timed out":
+
+```forge
+let a = channel()
+spawn {
+    send(a, 1)
+    close(a)
+}
+let mut got = []
+while true {
+    let r = select([a], 1000)
+    if r == null {
+        if is_closed(a) {
+            break       // finished, not slow
+        }
+        continue
+    }
+    got.push(r[1])
+}
+println(got)   // [1]
+```
+
+A program ends when its top level ends: detached `spawn` tasks still running are abandoned (`await` them to wait).
 
 Tasks communicate through return values (`squad` results, `await`) and channels. Do not mutate captured variables from inside `spawn` and expect the parent to see it: the default VM gives each task its own copy (the `--interp` engine shares closure state).
+
+## Retry, timeout, schedule
+
+Three statement blocks (all editions). They are statements, not expressions: `let r = retry 3 times { ... }` does not parse. To get a value out, assign to a `let mut` declared before the block, or `return` from inside it in a function (a `return`, `break` or `continue` inside the block leaves it at once, without retrying).
+
+```forge
+let mut calls = 0
+fn flaky() {
+    calls += 1
+    if calls < 3 {
+        let empty = []
+        return empty[0]     // fails twice: index out of bounds
+    }
+    return "ok on attempt {calls}"
+}
+
+fn fetch_with_retry() {
+    retry 5 times {
+        return flaky()      // the first attempt that does not fail returns
+    }
+}
+println(fetch_with_retry())    // ok on attempt 3
+
+try {
+    retry 2 times {
+        assert(false, "still down")
+    }
+} catch e {
+    println("{e.code}: {e.message}")   // E0041: retry failed after 2 attempts: assertion failed: still down
+}
+
+try {
+    timeout 1 seconds {
+        wait(3)
+    }
+} catch e {
+    println("{e.code}: {e.message}")   // E0031: timeout: operation exceeded 1 second limit
+}
+```
+
+- `retry n times { body }` runs `body` until it finishes without an error, at most `n` times, waiting 100 ms, 200 ms, ... between attempts. Any runtime error is retried (resource limits are not). When every attempt fails it raises E0041 `retry failed after n attempts: <the last error>`. `n` is an Int (0 or less: the block never runs and the error is raised at once).
+- `timeout n seconds { body }` stops `body` (including waits, `receive`, loops and calls inside it) after `n` whole seconds and raises E0031 `timeout: operation exceeded n second limit`; catch it with `try`/`catch`.
+- `schedule every n seconds { body }` (or `minutes`, `hours`) runs `body` repeatedly in the background, first after one interval, while the rest of the program continues; it stops when the program ends (a script's top level returns, or never for an HTTP server). It works on its own copy of the program's variables (kept from one run to the next, never seen by the rest of the program), so report results through a channel, a file or a database, not by assigning variables. An error in one run is ignored; the next run still happens. In an `@server` program schedules start after the top level, next to the server.
+
+```forge
+let ticks = channel()
+schedule every 1 seconds {
+    send(ticks, "tick")
+}
+println(receive(ticks))   // after about a second: tick
+```
 
 ## HTTP server
 
@@ -522,7 +678,7 @@ Put `@test fn test_name() { assert_eq(1 + 1, 2) }` functions in `tests/*.fg` and
 
 ## MCP tools (forge mcp serve)
 
-`forge mcp serve tools.fg` serves the file's `@tool` functions to AI agents over the Model Context Protocol. Parameter types become the JSON Schema (`Int` integer, `Float` number, `String`, `Bool`, `[T]` array, `Object`/`Map<String, T>` object, a struct object, `?T`/`Option<T>` or a default make it optional); the return type becomes the output schema (`Result<T, E>` describes `T`).
+`forge mcp serve tools.fg` serves the file's `@tool` functions to AI agents over the Model Context Protocol. Parameter types become the JSON Schema (`Int` integer, `Float` number, `String`, `Bool`, `[T]` array, `Object` object, `Object<T>` object whose values are `T` (`additionalProperties`), a struct object, `?T`/`Option<T>` or a default make it optional; the arguments arrive as Forge values of those types, so declare a JSON object parameter `Object<T>`, not `Map<String, T>`); the return type becomes the output schema (`Result<T, E>` describes `T`).
 
 ```
 struct Report { city: String, temp_c: Float }
@@ -538,7 +694,7 @@ fn weather(city: String, unit: String = "C") -> Result<Report, String> {
 fn cities() { return ["Oslo"] }
 ```
 
-`@tool` needs a description (`@tool("...")` also works); optional `name`, `title`, `timeout` (seconds), `read_only`, `destructive`, `idempotent`, `open_world`. `@param(name: "doc", ...)` documents parameters. Decorator arguments must be constants. Return `Err(msg)` for a tool error. The top level runs once at start-up; each call runs in a fresh sandboxed fork of it (deny-all plus the server's `--allow-*` grants, `--max-time`), so calls never share state. With plain `forge mcp`, `run_forge` takes an optional `session_id` that keeps top-level variables between calls; `reset_session` clears it.
+`@tool` needs a description (`@tool("...")` also works); optional `name`, `title`, `timeout` (seconds), `read_only`, `destructive`, `idempotent`, `open_world`. `@param(name: "doc", ...)` documents parameters. Decorator arguments must be constants. Return `Err(msg)` for a tool error. The top level runs once at start-up; each call runs in a fresh sandboxed fork of it (deny-all plus the server's `--allow-*` grants, `--max-time`), so calls never share state. With plain `forge mcp`, `run_forge` takes an optional `session_id` that keeps top-level variables between calls; `reset_session` clears it. `run_forge` returns what the program printed as `stdout` and what it wrote to stderr (`eprintln`, and `log.info/warn/error/debug` as `[level] message` lines) as `stderr`; both count against one output limit.
 
 ## Common mistakes
 
@@ -554,7 +710,8 @@ fn cities() { return ["Oslo"] }
 - Put non-String values into text with interpolation (`"total: {n}"`) or `str(n)`, never `"total: " + n`: edition 2027 rejects `+` between a String and a non-String (E0034; edition 2026 converts silently).
 - No format specs such as `{x:.2f}` or `%.2f`: write `"{to_fixed(x, 2)}"`.
 - Mutating a field or index requires a `let mut` binding.
-- `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds.
+- A method that changes its receiver must be declared `fn name(mut it, ...)` and called on a `let mut` variable (or a field/index of one); a plain `fn name(it)` cannot assign to `it`.
+- `trim`/`upper`/`lower` are methods (`s.trim()`). `wait(n)` takes seconds; `await_timeout`/`select` take milliseconds. Statement forms take a unit after the number: `wait 250 ms`, `timeout 0.5 seconds { ... }`, `schedule every 2 minutes { ... }` (units `ms`/`millisecond(s)`, `second(s)`, `minute(s)`, `hour(s)`; fractions are exact; no unit means seconds); a `timeout` that expires raises E0031 `timeout: operation exceeded 0.5 second limit`.
 - Shell builtins need `forge --allow-run run`. The HTTP client refuses private/loopback hosts unless `FORGE_HTTP_ALLOW_PRIVATE=1`.
 - Always pass user input to SQL as a params array: `db.query("... WHERE id = ?", [id])`.
 

@@ -1,0 +1,130 @@
+id = "order_validation_api"
+category = "services"
+title = "Order API that reports every validation error with its path"
+prompt = """
+Write an HTTP server on 127.0.0.1 port 18526 that accepts orders. Store orders in the
+SQLite database file `orders.db` in the working directory (create it when missing). All
+bodies are JSON.
+
+`POST /orders` with a JSON body. Validate it and collect every error, in this order:
+
+1. The body is not an object: the only error is `body must be an object`.
+2. `customer` is not an object: `customer must be an object`. Otherwise: `customer.name`
+   not a string that is non-empty after trimming: `customer.name is required`;
+   `customer.email` not a string of the form `<local>@<domain>.<tld>` (local and domain
+   without `@` or whitespace, tld at least two lower-case letters a-z):
+   `customer.email is invalid`.
+3. `items` not a non-empty array: `items must be a non-empty array`. Otherwise, for each
+   item i (from 0): not an object: `items[<i>] must be an object` (skip its fields);
+   else `sku` not three upper-case letters, `-`, two digits: `items[<i>].sku is invalid`;
+   `qty` not an integer from 1 to 99: `items[<i>].qty must be an integer from 1 to 99`;
+   `price` not a number greater than 0: `items[<i>].price must be a positive number`.
+4. `coupon` present but not a string: `coupon must be a string`.
+
+If there are errors, answer 422 `{"errors": [<messages in that order>]}`. Otherwise store
+the order and answer 201 `{"id": <id from 1>, "items": <number of items>,
+"total_cents": <total>}`, where the total is the sum over items of qty times the price in
+cents (price times 100, rounded to the nearest integer); with the coupon `"HALF"` the total
+is halved, rounding up.
+
+`GET /orders/<id>`: 200 `{"id", "customer": <trimmed name>, "items", "total_cents"}`, or
+404 `{"error": "no such order"}`.
+
+A body that is not valid JSON is answered 400. Other methods on these paths (PUT,
+DELETE, PATCH) are answered 405. The server runs until it is stopped.
+"""
+needs = ["net", "read", "write", "db"]
+timeout = 30
+mode = "server"
+port = 18526
+expected_stdout = """
+STATUS 201
+{"id": 1, "items": 2, "total_cents": 2298}
+STATUS 201
+{"id": 2, "items": 1, "total_cents": 53}
+STATUS 422
+{"errors": ["body must be an object"]}
+STATUS 422
+{"errors": ["customer.name is required", "customer.email is invalid", "items[0].sku is invalid", "items[0].qty must be an integer from 1 to 99", "items[0].price must be a positive number", "items[1] must be an object", "items[2].qty must be an integer from 1 to 99", "items[2].price must be a positive number", "items[3].sku is invalid", "items[3].qty must be an integer from 1 to 99", "coupon must be a string"]}
+STATUS 422
+{"errors": ["customer must be an object", "items must be a non-empty array"]}
+STATUS 422
+{"errors": ["customer.email is invalid", "items must be a non-empty array"]}
+STATUS 422
+{"errors": ["items[0].qty must be an integer from 1 to 99"]}
+STATUS 400
+STATUS 200
+{"customer": "Ada", "id": 1, "items": 2, "total_cents": 2298}
+STATUS 200
+{"customer": "Bo", "id": 2, "items": 1, "total_cents": 53}
+STATUS 404
+{"error": "no such order"}
+STATUS 404
+{"error": "no such order"}
+STATUS 405
+STATUS 405
+"""
+
+[[request]]
+method = "POST"
+path = "/orders"
+body = '{"customer": {"name": " Ada ", "email": "ada@example.com"}, "items": [{"sku": "ABC-12", "qty": 2, "price": 9.99}, {"sku": "XYZ-01", "qty": 1, "price": 3}]}'
+
+[[request]]
+method = "POST"
+path = "/orders"
+body = '{"customer": {"name": "Bo", "email": "bo@shop.io"}, "items": [{"sku": "AAA-00", "qty": 3, "price": 0.35}], "coupon": "HALF"}'
+
+[[request]]
+method = "POST"
+path = "/orders"
+body = '[1, 2]'
+
+[[request]]
+method = "POST"
+path = "/orders"
+body = '{"customer": {"name": "  ", "email": "ada@@x.com"}, "items": [{"sku": "abc-12", "qty": 0, "price": -1}, 7, {"sku": "QQQ-99", "qty": 5.5, "price": "2"}, {"sku": "OK", "qty": 100, "price": 1}], "coupon": 10}'
+
+[[request]]
+method = "POST"
+path = "/orders"
+body = '{"customer": "Ada", "items": []}'
+
+[[request]]
+method = "POST"
+path = "/orders"
+body = '{"customer": {"name": "Cy", "email": "cy@mail"}, "items": {"sku": "ABC-12"}}'
+
+[[request]]
+method = "POST"
+path = "/orders"
+body = '{"customer": {"name": "Cy", "email": "cy@mail.org"}, "items": [{"sku": "ABC-12", "qty": true, "price": 1}]}'
+
+[[request]]
+method = "POST"
+path = "/orders"
+body = '{"customer": {"name": "Cy",'
+status_only = true
+
+[[request]]
+path = "/orders/1"
+
+[[request]]
+path = "/orders/2"
+
+[[request]]
+path = "/orders/3"
+
+[[request]]
+path = "/orders/x"
+
+[[request]]
+method = "DELETE"
+path = "/orders/1"
+status_only = true
+
+[[request]]
+method = "PUT"
+path = "/orders"
+body = '{}'
+status_only = true

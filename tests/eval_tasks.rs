@@ -55,14 +55,22 @@ fn harness(args: &[&str]) {
 
 #[test]
 fn eval_references_pass_on_both_engines() {
-    // On macOS CI the `staged_pipeline` reference runs far slower on the VM
-    // than on Linux (eval/V2_FINDINGS.md, finding 27): it is checked on
-    // Linux only until that is explained.
-    if cfg!(target_os = "macos") {
-        harness(&["validate", "--quick", "--exclude", "staged_pipeline"]);
-    } else {
-        harness(&["validate", "--quick"]);
+    harness(&["validate", "--quick", "--tier", "v1"]);
+    harness(&["validate", "--quick", "--tier", "v2"]);
+}
+
+/// Tier v3 (eval/README.md, "Tier v3"): about 2.5 minutes on 4 cores, most
+/// of it the large generated inputs, which run one at a time. Known-failing
+/// tasks (eval/V3_FINDINGS.md) are reported, not failed. Linux only: the
+/// time limits of the large-input and concurrency tasks are calibrated
+/// there, and the macOS and Windows runners are much slower.
+#[test]
+fn eval_v3_references_pass() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping tier v3 off Linux");
+        return;
     }
+    harness(&["validate", "--quick", "--tier", "v3"]);
 }
 
 #[test]

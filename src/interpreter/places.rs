@@ -103,9 +103,7 @@ pub(super) fn contains_of(
         (Some(Value::Object(map)), Some(Value::String(key))) => {
             Ok(Value::Bool(map.contains_key(key)))
         }
-        (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(
-            pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
-        )),
+        (Some(Value::Map(pairs)), Some(key)) => Ok(Value::Bool(pairs.has_key_value(key))),
         _ => Err(RuntimeError::new(crate::semantics::CONTAINS_USAGE)),
     }
 }
@@ -116,7 +114,9 @@ pub(super) fn has_key_of(obj: Option<&Value>, key: Option<&Value>) -> Result<Val
         (Some(Value::Object(map)), Some(Value::String(key))) => {
             Ok(Value::Bool(map.contains_key(key)))
         }
-        _ => Err(RuntimeError::new("has_key() requires (object, key_string)")),
+        _ => Err(RuntimeError::new(
+            &crate::semantics::builtin_args::bad_args("has_key"),
+        )),
     }
 }
 
@@ -157,23 +157,249 @@ pub(super) fn get_of(
             Ok(arr.get(*idx as usize).cloned().unwrap_or_else(default))
         }
         _ => Err(RuntimeError::new(
-            "get() requires (object, key) or (array, index)",
+            &crate::semantics::builtin_args::bad_args("get"),
         )),
     }
 }
 
+/// Builtins that only read their first argument and copy at most a part of
+/// it into their result. A call `name(place, args...)` whose first argument
+/// is a variable (or a field/index chain of one) borrows that value under
+/// the scope lock instead of copying the whole of it for the call
+/// ([`Interpreter::try_read_in_place`]); `len`, `contains`, `get` and
+/// `has_key` have their own forms there. Each one is implemented once, in
+/// [`read_only_builtin`], for the builtin and the borrowed form alike.
+pub(super) const BORROWING_BUILTINS: &[&str] = &[
+    "slice",
+    "first",
+    "last",
+    "join",
+    "index_of",
+    "last_index_of",
+    "substring",
+    "starts_with",
+    "ends_with",
+];
+
+/// The array methods that are these builtins (`xs.slice(1, 3)`, ...):
+/// `known_methods` dispatch calls the global of the same name with the
+/// receiver first.
+const BORROWING_ARRAY_METHODS: &[&str] = &[
+    "slice", "first", "last", "join", "index_of", "len", "contains",
+];
+
+/// `slice(v, start?, end?)` on an array or string; negative bounds count
+/// from the end.
+fn slice_of(
+    value: Option<&Value>,
+    start: Option<&Value>,
+    end: Option<&Value>,
+) -> Result<Value, RuntimeError> {
+    fn bounds(len: usize, start: Option<&Value>, end: Option<&Value>) -> (usize, usize) {
+        let start = match start {
+            Some(Value::Int(s)) if *s < 0 => (len as i64 + s).max(0) as usize,
+            Some(Value::Int(s)) => *s as usize,
+            _ => 0,
+        };
+        let end = match end {
+            Some(Value::Int(e)) if *e < 0 => (len as i64 + e).max(0) as usize,
+            Some(Value::Int(e)) => (*e as usize).min(len),
+            _ => len,
+        };
+        (start, end)
+    }
+    match value {
+        Some(Value::Array(arr)) => {
+            let (start, end) = bounds(arr.len(), start, end);
+            if start >= end || start >= arr.len() {
+                return Ok(Value::Array(vec![]));
+            }
+            Ok(Value::Array(arr[start..end].to_vec()))
+        }
+        Some(Value::String(s)) => {
+            let chars: Vec<char> = s.chars().collect();
+            let (start, end) = bounds(chars.len(), start, end);
+            if start >= end || start >= chars.len() {
+                return Ok(Value::String(String::new()));
+            }
+            Ok(Value::String(chars[start..end].iter().collect()))
+        }
+        _ => Err(RuntimeError::new(
+            "slice() requires an array or string as first argument",
+        )),
+    }
+}
+
+/// `substring(s, start, end?)`.
+fn substring_of(
+    value: Option<&Value>,
+    start: Option<&Value>,
+    end: Option<&Value>,
+) -> Result<Value, RuntimeError> {
+    match value {
+        Some(Value::String(s)) => {
+            let start = match start {
+                Some(Value::Int(n)) => *n as usize,
+                _ => {
+                    return Err(RuntimeError::new(
+                        "substring() requires (string, start, end?)",
+                    ))
+                }
+            };
+            let chars: Vec<char> = s.chars().collect();
+            let end = match end {
+                Some(Value::Int(n)) => (*n as usize).min(chars.len()),
+                _ => chars.len(),
+            };
+            // `end` is clamped to the length, so this also covers a
+            // start past the end (and `start > end`, which used to panic).
+            if start >= end {
+                return Ok(Value::String(String::new()));
+            }
+            Ok(Value::String(chars[start..end].iter().collect()))
+        }
+        _ => Err(RuntimeError::new(
+            "substring() requires a string as first argument",
+        )),
+    }
+}
+
+/// `index_of(haystack, needle)` on a string or array.
+fn index_of_of(value: Option<&Value>, needle: Option<&Value>) -> Result<Value, RuntimeError> {
+    match value {
+        Some(Value::String(s)) => match needle {
+            Some(Value::String(substr)) => Ok(Value::Int(
+                s.find(substr.as_str()).map(|i| i as i64).unwrap_or(-1),
+            )),
+            _ => Err(RuntimeError::new("index_of() requires (string, substring)")),
+        },
+        Some(Value::Array(arr)) => {
+            let Some(needle) = needle else {
+                return Err(RuntimeError::new("index_of() requires 2 arguments"));
+            };
+            let idx = arr.iter().position(|v| v == needle);
+            Ok(Value::Int(idx.map(|i| i as i64).unwrap_or(-1)))
+        }
+        _ => Err(RuntimeError::new(
+            "index_of() requires a string or array as first argument",
+        )),
+    }
+}
+
+/// The builtins in [`BORROWING_BUILTINS`] on a borrowed first argument
+/// (`rest` are the other arguments). `None` for any other name.
+pub(super) fn read_only_builtin(
+    name: &str,
+    first: Option<&Value>,
+    rest: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    let (a, b) = (rest.first(), rest.get(1));
+    let result = match name {
+        "slice" => slice_of(first, a, b),
+        "substring" => substring_of(first, a, b),
+        "index_of" => index_of_of(first, a),
+        "first" => match first {
+            Some(Value::Array(items)) => Ok(items.first().cloned().unwrap_or(Value::Null)),
+            _ => Err(RuntimeError::new("first() requires an array")),
+        },
+        "last" => match first {
+            Some(Value::Array(items)) => Ok(items.last().cloned().unwrap_or(Value::Null)),
+            _ => Err(RuntimeError::new("last() requires an array")),
+        },
+        "join" => match (first, a) {
+            (Some(Value::Array(items)), Some(Value::String(sep))) => {
+                let parts: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
+                Ok(Value::String(parts.join(sep)))
+            }
+            (Some(Value::Array(items)), None) => {
+                let parts: Vec<String> = items.iter().map(|v| format!("{}", v)).collect();
+                Ok(Value::String(parts.join("")))
+            }
+            _ => Err(RuntimeError::new(
+                "join() requires (array[, separator_string])",
+            )),
+        },
+        "last_index_of" => match (first, a) {
+            (Some(Value::String(s)), Some(Value::String(substr))) => Ok(Value::Int(
+                s.rfind(substr.as_str()).map(|i| i as i64).unwrap_or(-1),
+            )),
+            _ => Err(RuntimeError::new(
+                "last_index_of() requires (string, substring)",
+            )),
+        },
+        "starts_with" => match (first, a) {
+            (Some(Value::String(s)), Some(Value::String(prefix))) => {
+                Ok(Value::Bool(s.starts_with(prefix.as_str())))
+            }
+            _ => Err(RuntimeError::new(
+                "starts_with() requires (string, prefix_string)",
+            )),
+        },
+        "ends_with" => match (first, a) {
+            (Some(Value::String(s)), Some(Value::String(suffix))) => {
+                Ok(Value::Bool(s.ends_with(suffix.as_str())))
+            }
+            _ => Err(RuntimeError::new(
+                "ends_with() requires (string, suffix_string)",
+            )),
+        },
+        "len" => len_of(first),
+        "contains" => contains_of(first, a),
+        _ => return None,
+    };
+    // Argument errors read the same on both engines
+    // (`semantics::builtin_args`).
+    Some(match crate::semantics::builtin_args::expected(name) {
+        Some(_) => {
+            result.map_err(|_| RuntimeError::new(&crate::semantics::builtin_args::bad_args(name)))
+        }
+        None => result,
+    })
+}
+
+/// The value a field/index chain names inside a variable's value, for a
+/// borrowed read: plain objects and arrays only (a frozen container on the
+/// way is left to the ordinary path, which wraps what it reads).
+fn borrowed_leaf<'v>(value: &'v Value, steps: &[PlaceStep<'_>]) -> Option<&'v Value> {
+    let mut cur = value;
+    for step in steps {
+        cur = match (cur, step) {
+            (Value::Object(map), PlaceStep::Field(field)) => map.get(*field)?,
+            (Value::Object(map), PlaceStep::Index(Value::String(key))) => map.get(key.as_str())?,
+            (Value::Array(items), PlaceStep::Index(Value::Int(i))) => {
+                &items[crate::semantics::normalize_index(*i, items.len())?]
+            }
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
 /// One step of a nested assignment target below its root variable:
 /// `.field` or `[index]` (index already evaluated).
-enum PlaceStep<'a> {
+pub(super) enum PlaceStep<'a> {
     Field(&'a str),
     Index(Value),
 }
 
-/// What a mutable variable currently holds, for choosing a set fast path.
-enum SetReceiver {
-    Set,
-    Frozen,
+/// What the receiver of a mutating method (`push`/`pop`/`add`/`remove`)
+/// holds: a collection the method updates in place, a frozen value (the
+/// frozen error, named after what it holds), or anything else (an ordinary
+/// method call).
+enum ReceiverShape {
+    InPlace,
+    Frozen(String),
     Other,
+}
+
+fn receiver_shape(value: &Value, method: &str) -> ReceiverShape {
+    match (value, method) {
+        (Value::Array(_), "push" | "pop") | (Value::Set(_), "add" | "remove") => {
+            ReceiverShape::InPlace
+        }
+        (Value::Frozen(inner), _) => ReceiverShape::Frozen(inner.type_name().to_ascii_lowercase()),
+        _ => ReceiverShape::Other,
+    }
 }
 
 impl Interpreter {
@@ -206,6 +432,30 @@ impl Interpreter {
             Expr::Call { function, args } => match function.as_ref() {
                 Expr::Ident(name) if PURE_BUILTINS.contains(&name.as_str()) => {
                     self.resolves_to_builtin(name) && args.iter().all(|a| self.is_effect_free(a))
+                }
+                // The intrinsic reads of a map or set held by a variable
+                // (`m.get(k)`, `m.has(k)`, `m.len()`, `s.has(x)`) run no
+                // user code.
+                Expr::FieldAccess { object, field } => {
+                    let Expr::Ident(var) = object.as_ref() else {
+                        return false;
+                    };
+                    let method = field.as_str();
+                    let arity_ok = match method {
+                        "get" | "has" => args.len() == 1,
+                        "len" => args.is_empty(),
+                        _ => false,
+                    };
+                    arity_ok
+                        && args.iter().all(|a| self.is_effect_free(a))
+                        && self
+                            .env
+                            .with_value(var, |v| match peel_frozen(v) {
+                                Value::Map(_) => true,
+                                Value::Set(_) => method == "has",
+                                _ => false,
+                            })
+                            .unwrap_or(false)
                 }
                 _ => false,
             },
@@ -288,6 +538,20 @@ impl Interpreter {
         if self.env.is_mutable(var) != Some(true) {
             return None;
         }
+        if matches!(function.as_ref(), Expr::FieldAccess { .. }) {
+            if !crate::semantics::is_mutating_method(method, rest.len()) {
+                return None;
+            }
+            return Some(self.mutate_var_method(var, method, rest, want_result));
+        }
+        // The free forms `push(v, x)` (edition 2026) and `pop(v)`.
+        // In place only on an array: anything else takes the ordinary path
+        // (the builtin's argument error annotated with the argument types).
+        if matches!(method, "push" | "pop")
+            && !self.env.with_value(var, |v| matches!(v, Value::Array(_)))?
+        {
+            return None;
+        }
         match (method, rest.len()) {
             ("push", 1) => {
                 let val = match self.eval_expr(&rest[0]) {
@@ -297,7 +561,11 @@ impl Interpreter {
                 Some(self.update_var(var, |cur| {
                     match cur {
                         Value::Array(items) => items.push(val),
-                        _ => return Err(RuntimeError::new("push() first argument must be array")),
+                        _ => {
+                            return Err(RuntimeError::new(
+                                &crate::semantics::builtin_args::bad_args("push"),
+                            ))
+                        }
                     }
                     Ok(if want_result {
                         cur.clone()
@@ -308,48 +576,82 @@ impl Interpreter {
             }
             ("pop", 0) => Some(self.update_var(var, |cur| match cur {
                 Value::Array(items) => Ok(items.pop().unwrap_or(Value::Null)),
-                _ => Err(RuntimeError::new("pop() requires array")),
+                _ => Err(RuntimeError::new(
+                    &crate::semantics::builtin_args::bad_args("pop"),
+                )),
             })),
-            ("add", 1) | ("remove", 1) => {
-                let receiver = self.env.with_value(var, |v| match v {
-                    Value::Set(_) => SetReceiver::Set,
-                    Value::Frozen(_) => SetReceiver::Frozen,
-                    _ => SetReceiver::Other,
-                })?;
-                match receiver {
-                    SetReceiver::Other => return None,
-                    SetReceiver::Frozen => {
-                        return Some(Err(RuntimeError::new(if method == "add" {
-                            "cannot add to a frozen set"
-                        } else {
-                            "cannot remove from a frozen set"
-                        })))
-                    }
-                    SetReceiver::Set => {}
-                }
-                let val = match self.eval_expr(&rest[0]) {
-                    Ok(v) => v,
-                    Err(e) => return Some(Err(e)),
-                };
-                let adding = method == "add";
-                Some(self.update_var(var, |cur| {
-                    let Value::Set(items) = cur else {
-                        return Err(RuntimeError::new(&format!("{}() requires a set", method)));
-                    };
-                    if adding {
-                        items.add_value(val);
-                    } else {
-                        items.remove_value(&val);
-                    }
-                    Ok(if want_result {
-                        cur.clone()
-                    } else {
-                        Value::Null
-                    })
-                }))
-            }
             _ => None,
         }
+    }
+
+    /// `v.push(x)`, `v.pop()`, `v.add(x)` and `v.remove(x)` on a mutable
+    /// variable `v` (the method form; both engines): the arguments are
+    /// evaluated first, then the variable is read. An array (`push`/`pop`)
+    /// or a set (`add`/`remove`) is updated in place; a frozen value is the
+    /// frozen error; anything else is an ordinary method call on the value
+    /// (a map's `remove`, a struct's own `push`, ...), whose updated
+    /// receiver is stored back when the method is declared `mut it`.
+    fn mutate_var_method(
+        &mut self,
+        var: &str,
+        method: &str,
+        args: &[Expr],
+        want_result: bool,
+    ) -> Result<Value, RuntimeError> {
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(self.eval_expr(arg)?);
+        }
+        let shape = self
+            .env
+            .with_value(var, |v| receiver_shape(v, method))
+            .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", var)))?;
+        match shape {
+            ReceiverShape::InPlace => self.update_var(var, |cur| {
+                apply_mutating_method(cur, method, values.pop(), want_result)
+            }),
+            ReceiverShape::Frozen(kind) => Err(RuntimeError::new(
+                &crate::semantics::frozen_method(method, &kind),
+            )),
+            ReceiverShape::Other => {
+                let receiver = self
+                    .env
+                    .get(var)
+                    .ok_or_else(|| RuntimeError::new(&format!("undefined: {}", var)))?;
+                let (result, updated) = self.call_method_on_values(receiver, method, values)?;
+                if let Some(updated) = updated {
+                    self.assign_receiver_place(var, &[], updated)?;
+                }
+                Ok(result)
+            }
+        }
+    }
+
+    /// Store the updated receiver of a method declared `mut it` into the
+    /// place the method was called on (`c`, `xs[i]`, `o.f`): like
+    /// `place = updated`, so an immutable root is the immutable-assignment
+    /// error.
+    pub(super) fn assign_receiver_place(
+        &mut self,
+        root: &str,
+        steps: &[PlaceStep<'_>],
+        updated: Value,
+    ) -> Result<(), RuntimeError> {
+        self.env
+            .with_binding_mut(root, |cur, mutable| {
+                if !mutable {
+                    return Err(RuntimeError::new(&crate::semantics::immutable_reassign(
+                        root,
+                    )));
+                }
+                let mut slot = cur;
+                for step in steps {
+                    slot = place_child(root, slot, step)?;
+                }
+                *slot = updated;
+                Ok(())
+            })
+            .unwrap_or_else(|| Err(RuntimeError::new(&format!("undefined: {}", root))))
     }
 
     /// `place.push(x)`, `place.pop()`, `place.add(x)` and `place.remove(x)`
@@ -406,12 +708,13 @@ impl Interpreter {
         let updated = self
             .env
             .with_binding_mut(root, |cur, mutable| {
-                let in_place = match (place_leaf(cur, &steps), method) {
-                    (Some(Value::Frozen(_)), _) => {
-                        return Err(RuntimeError::new(&crate::semantics::frozen_method(method)))
+                let in_place = match place_leaf(cur, &steps).map(|v| receiver_shape(v, method)) {
+                    Some(ReceiverShape::Frozen(kind)) => {
+                        return Err(RuntimeError::new(&crate::semantics::frozen_method(
+                            method, &kind,
+                        )))
                     }
-                    (Some(Value::Array(_)), "push" | "pop") => true,
-                    (Some(Value::Set(_)), "add" | "remove") => true,
+                    Some(ReceiverShape::InPlace) => true,
                     _ => false,
                 };
                 if !in_place {
@@ -444,18 +747,26 @@ impl Interpreter {
                 PlaceStep::Index(index) => Self::index_of(&receiver, index)?,
             };
         }
-        self.call_method_on_values(receiver, method, values)
+        let (result, updated) = self.call_method_on_values(receiver, method, values)?;
+        if let Some(updated) = updated {
+            self.assign_receiver_place(root, &steps, updated)?;
+        }
+        Ok(result)
     }
 
-    /// `receiver.method(args...)` for already-evaluated values, through the
-    /// ordinary method dispatch (bound to hidden names in a scratch scope,
-    /// so nothing is evaluated twice).
+    /// `receiver.method(args...)` for already-evaluated values: a user
+    /// method directly (with its updated receiver when it is declared
+    /// `mut it`), anything else through the ordinary method dispatch (bound
+    /// to hidden names in a scratch scope, so nothing is evaluated twice).
     fn call_method_on_values(
         &mut self,
         receiver: Value,
         method: &str,
         args: Vec<Value>,
-    ) -> Result<Value, RuntimeError> {
+    ) -> Result<(Value, Option<Value>), RuntimeError> {
+        if let Some(found) = self.user_method_of(&receiver, method) {
+            return self.call_found_method(found, &receiver, method, args);
+        }
         const RECEIVER: &str = "\u{0}receiver";
         self.env.push_scope();
         self.env
@@ -475,7 +786,7 @@ impl Interpreter {
         };
         let result = self.eval_expr(&call);
         self.env.pop_scope();
-        result
+        Ok((result?, None))
     }
 
     /// Apply `f` to the mutable variable `var` in place.
@@ -489,15 +800,24 @@ impl Interpreter {
 
     /// Read-only calls answered by borrowing the receiver variable:
     /// `s.has(x)` on sets, `m.get(k)` / `m.has(k)` / `m.len()` on maps, and
-    /// the builtins `len(v)` / `contains(v, x)`. Returns `None` when `expr`
-    /// is not one of them (or an argument is not effect-free), so the
-    /// caller falls back to ordinary dispatch.
+    /// the builtins `len(v)` / `contains(v, x)` and [`BORROWING_BUILTINS`]
+    /// (also as array methods, `xs.slice(i, j)`), on a variable or a
+    /// field/index chain of one. Returns `None` when `expr` is not one of
+    /// them (or an argument is not effect-free), so the caller falls back
+    /// to ordinary dispatch.
     pub(super) fn try_read_in_place(&mut self, expr: &Expr) -> Option<Result<Value, RuntimeError>> {
         let Expr::Call { function, args } = expr else {
             return None;
         };
         match function.as_ref() {
             Expr::FieldAccess { object, field } => {
+                if BORROWING_ARRAY_METHODS.contains(&field.as_str())
+                    && self.borrows_array_method(object, field, args.len())
+                {
+                    if let Some(result) = self.borrowed_builtin_call(field, object, args, true) {
+                        return Some(result);
+                    }
+                }
                 let Expr::Ident(var) = object.as_ref() else {
                     return None;
                 };
@@ -532,16 +852,13 @@ impl Interpreter {
                         (Value::Set(items), "has", Some(x)) => {
                             Some(Value::Bool(items.has_value(x)))
                         }
-                        (Value::Map(pairs), "has", Some(key)) => Some(Value::Bool(
-                            pairs.iter().any(|(k, _)| Value::container_eq(k, key)),
-                        )),
-                        (Value::Map(pairs), "get", Some(key)) => Some(
-                            pairs
-                                .iter()
-                                .find(|(k, _)| Value::container_eq(k, key))
-                                .map(|(_, v)| v.clone())
-                                .unwrap_or(Value::Null),
-                        ),
+                        (Value::Map(pairs), "has", Some(key)) => {
+                            Some(Value::Bool(pairs.has_key_value(key)))
+                        }
+                        (Value::Map(pairs), "get", Some(key)) => {
+                            Some(pairs.get_value(key).cloned().unwrap_or(Value::Null))
+                        }
+
                         (Value::Map(pairs), "len", None) => Some(Value::Int(pairs.len() as i64)),
                         _ => None,
                     })
@@ -588,7 +905,8 @@ impl Interpreter {
                     return None;
                 }
                 let Expr::Ident(var) = &args[0] else {
-                    return None;
+                    // `len(o.items)`: borrow through the chain.
+                    return self.borrowed_builtin_call(name, &args[0], &args[1..], false);
                 };
                 if !self.env.contains(var) {
                     return None;
@@ -601,16 +919,109 @@ impl Interpreter {
                     },
                     None => None,
                 };
-                self.env.with_value(var, |v| {
+                let result = self.env.with_value(var, |v| {
                     if name == "len" {
                         len_of(Some(v))
                     } else {
                         contains_of(Some(v), needle.as_ref())
                     }
-                })
+                })?;
+                // Errors take the ordinary path, which annotates them with
+                // the argument types, as for `get`/`has_key` above.
+                result.ok().map(Ok)
+            }
+            Expr::Ident(name) if BORROWING_BUILTINS.contains(&name.as_str()) => {
+                // `slice(chars, i, j)`, `join(o.parts, ",")`, ...: borrow the
+                // first argument instead of copying it for the call.
+                let first = args.first()?;
+                if crate::builtins_registry::check_arity(name, args.len()).is_err()
+                    || !self.resolves_to_builtin(name)
+                {
+                    return None;
+                }
+                self.borrowed_builtin_call(name, first, &args[1..], false)
             }
             _ => None,
         }
+    }
+
+    /// `name(place, rest...)` for a [`BORROWING_BUILTINS`] (or array-method)
+    /// builtin whose first argument is a variable or a field/index chain of
+    /// one: the other arguments and the chain's indexes are evaluated first
+    /// (they are effect-free, so the order is unobservable), then the
+    /// builtin runs on a reference to the value under the scope lock.
+    /// `None` (the caller takes the ordinary path, which evaluates the
+    /// effect-free operands again) when the shape does not apply or the
+    /// builtin fails: errors are raised, and annotated, by the ordinary path.
+    /// With `require_array` (the method form) the value must be a plain
+    /// array: other receivers dispatch methods differently.
+    fn borrowed_builtin_call(
+        &mut self,
+        name: &str,
+        first: &Expr,
+        rest: &[Expr],
+        require_array: bool,
+    ) -> Option<Result<Value, RuntimeError>> {
+        let (root, steps) = place_path(first)?;
+        if !rest.iter().all(|a| self.is_effect_free(a))
+            || !steps
+                .iter()
+                .all(|s| s.as_ref().map_or_else(|i| self.is_effect_free(i), |_| true))
+            || !self.env.contains(root)
+        {
+            return None;
+        }
+        let mut keys = Vec::with_capacity(steps.len());
+        for step in &steps {
+            keys.push(match step {
+                Ok(field) => PlaceStep::Field(field),
+                Err(index) => match self.eval_expr(index) {
+                    Ok(v) => PlaceStep::Index(v),
+                    Err(e) => return Some(Err(e)),
+                },
+            });
+        }
+        // A receiver that is not an array may reject the call before its
+        // arguments are evaluated (a module namespace): check it first.
+        if require_array
+            && !self
+                .env
+                .with_value(root, |v| {
+                    matches!(borrowed_leaf(v, &keys), Some(Value::Array(_)))
+                })
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        let mut values = Vec::with_capacity(rest.len());
+        for arg in rest {
+            match self.eval_expr(arg) {
+                Ok(v) => values.push(v),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        let result = self
+            .env
+            .with_value(root, |v| {
+                let leaf = borrowed_leaf(v, &keys)?;
+                if require_array && !matches!(leaf, Value::Array(_)) {
+                    return None;
+                }
+                read_only_builtin(name, Some(leaf), &values)
+            })
+            .flatten()?;
+        result.ok().map(Ok)
+    }
+
+    /// Whether `object.method(args)` (with `argc` arguments) may run as the
+    /// global builtin `method` on a borrowed array: that is what
+    /// `known_methods` dispatch does for an array receiver when `method`
+    /// still names the builtin. (The receiver being a plain array is
+    /// checked when it is borrowed.)
+    fn borrows_array_method(&self, object: &Expr, method: &str, argc: usize) -> bool {
+        place_path(object).is_some()
+            && self.resolves_to_builtin(method)
+            && crate::builtins_registry::check_arity(method, argc + 1).is_ok()
     }
 
     /// In-place forms of assignment. Returns `None` when `target = value`
@@ -721,6 +1132,12 @@ impl Interpreter {
                 self.mutate_in_place(value, false, true)
                     .map(|result| result.map(|_| ()))
             }
+            Expr::Call { function, args } => match function.as_ref() {
+                Expr::FieldAccess { object, field } if matches!(object.as_ref(), Expr::Ident(o) if o == x) => {
+                    self.try_update_map_ident(x, field, args)
+                }
+                _ => None,
+            },
             Expr::BinOp { left, op, right }
                 if matches!(left.as_ref(), Expr::Ident(l) if l == x)
                     && !matches!(op, BinOp::And | BinOp::Or) =>
@@ -774,6 +1191,52 @@ impl Interpreter {
             }
             _ => None,
         }
+    }
+
+    /// `m = m.set(k, v)` / `m = m.remove(k)` on a mutable `m` holding a
+    /// (not frozen) Map, with effect-free arguments: update the entries in
+    /// place. The method returns a copy of `m` with that change and the
+    /// assignment stores it into `m`, so updating `m` in place leaves it
+    /// holding exactly that value, without copying the map twice per call
+    /// (building a map in a loop is O(1) per entry instead of O(n)).
+    fn try_update_map_ident(
+        &mut self,
+        x: &str,
+        method: &str,
+        args: &[Expr],
+    ) -> Option<Result<(), RuntimeError>> {
+        if !matches!((method, args.len()), ("set", 2) | ("remove", 1))
+            || self.env.is_mutable(x) != Some(true)
+            || !args.iter().all(|a| self.is_effect_free(a))
+            || !self.env.with_value(x, |v| matches!(v, Value::Map(_)))?
+        {
+            return None;
+        }
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            match self.eval_expr(arg) {
+                Ok(v) => values.push(v),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        let mut values = values.into_iter();
+        let (key, value) = (values.next()?, values.next());
+        Some(
+            self.env
+                .with_value_mut(x, |cur| {
+                    let Value::Map(entries) = cur else {
+                        return Err(RuntimeError::new("BUG: map receiver changed"));
+                    };
+                    match value {
+                        Some(value) => entries.insert_value(key, value),
+                        None => {
+                            entries.remove_key(&key);
+                        }
+                    }
+                    Ok(())
+                })
+                .and_then(|inner| inner),
+        )
     }
 
     /// `p = p <op> e` (and `p <op>= e`) where `p` is a field/index place

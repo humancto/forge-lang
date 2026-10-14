@@ -1,0 +1,23 @@
+// expect: tick 1 / tick 2 / n = 0
+// A `schedule` block in a plain script runs while the top level runs, on
+// both engines (`forge run --interp` used to start it only after the top
+// level, i.e. never). Its body works on its own copy of the variables,
+// kept from one run to the next; an error in one run does not stop the
+// next.
+let ticks = channel()
+let mut n = 0
+schedule every 1 seconds {
+    n += 1
+    if n <= 2 {
+        send(ticks, "tick {n}")
+    }
+    if n == 1 {
+        let empty = []
+        println(empty[5])
+    }
+}
+let first = receive(ticks)
+let second = receive(ticks)
+println(first)
+println(second)
+"{first} / {second} / n = {n}"

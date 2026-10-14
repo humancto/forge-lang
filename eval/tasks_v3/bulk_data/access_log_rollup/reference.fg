@@ -1,0 +1,110 @@
+// Roll up a 150,000-line access log in one pass: objects keyed by route,
+// client and minute, then one sort per report.
+
+fn is_digits(s: String) -> Bool {
+    return regex.test(s, "^[0-9]+$")
+}
+
+fn cmp_str(a: String, b: String) -> Int {
+    if a < b {
+        return -1
+    }
+    if a > b {
+        return 1
+    }
+    return 0
+}
+
+fn normalize(path: String) -> String {
+    let parts = split(split(path, "?")[0], "/")
+    let mut out = []
+    for p in parts {
+        if is_digits(p) {
+            out.push(":id")
+        } else {
+            out.push(p)
+        }
+    }
+    return join(out, "/")
+}
+
+fn percentile(sorted_xs: [Int], q: Int) -> Int {
+    let n = len(sorted_xs)
+    return sorted_xs[(q * n + 99) / 100 - 1]
+}
+
+let mut requests = 0
+let mut malformed = 0
+let mut classes = { "2": 0, "3": 0, "4": 0, "5": 0 }
+let mut routes = {}
+let mut clients = {}
+let mut minutes = {}
+let mut total_bytes = 0
+
+for line in fs.lines("/dev/stdin") {
+    if line.trim() == "" || starts_with(line, "#") {
+        continue
+    }
+    let f = split(line, " ")
+    if len(f) != 7 || !is_digits(f[4]) || !is_digits(f[5]) || !is_digits(f[6]) {
+        malformed += 1
+        continue
+    }
+    requests += 1
+    let status = int(f[4])
+    let latency = int(f[5])
+    let route = normalize(f[3])
+    let key = "{f[2]} {route}"
+    if !has_key(routes, key) {
+        routes[key] = { method: f[2], route: route, lat: [], errors: 0 }
+    }
+    routes[key].lat.push(latency)
+    if status >= 500 {
+        routes[key].errors += 1
+    }
+    let cls = str(status / 100)
+    classes[cls] = get(classes, cls, 0) + 1
+    clients[f[1]] = get(clients, f[1], 0) + 1
+    let minute = substring(f[0], 0, 16)
+    minutes[minute] = get(minutes, minute, 0) + 1
+    total_bytes += int(f[6])
+}
+
+println("requests: {requests}")
+println("malformed: {malformed}")
+println("status: 2xx={classes["2"]} 3xx={classes["3"]} 4xx={classes["4"]} 5xx={classes["5"]}")
+println("top routes:")
+let ranked = sort(values(routes), fn(a, b) {
+    if len(a.lat) != len(b.lat) {
+        return len(b.lat) - len(a.lat)
+    }
+    if a.route != b.route {
+        return cmp_str(a.route, b.route)
+    }
+    return cmp_str(a.method, b.method)
+})
+for r in slice(ranked, 0, 8) {
+    let xs = sort(r.lat)
+    let p50 = percentile(xs, 50)
+    let p95 = percentile(xs, 95)
+    let p99 = percentile(xs, 99)
+    println("{r.method} {r.route} n={len(xs)} p50={p50} p95={p95} p99={p99} max={xs[-1]} 5xx={r.errors}")
+}
+println("top clients:")
+let top_clients = sort(entries(clients), fn(a, b) {
+    if a[1] != b[1] {
+        return b[1] - a[1]
+    }
+    return cmp_str(a[0], b[0])
+})
+for e in slice(top_clients, 0, 5) {
+    println("{e[0]} {e[1]}")
+}
+let peak = sort(entries(minutes), fn(a, b) {
+    if a[1] != b[1] {
+        return b[1] - a[1]
+    }
+    return cmp_str(a[0], b[0])
+})[0]
+println("peak minute: {peak[0]} {peak[1]}")
+println("bytes: {total_bytes}")

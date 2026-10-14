@@ -1,5 +1,6 @@
 use super::ast::*;
 use super::index::{DefKind, IndexBuilder, OccId, Pos, Role, ScopeKind, Span, SyntaxIndex};
+use crate::lexer::literal_braces;
 /// Forge Parser — Recursive Descent
 /// Converts a token stream into an AST.
 /// Expression parsing uses Pratt parsing for correct precedence.
@@ -31,6 +32,10 @@ pub struct Parser {
     /// Edition 2027 or later: report the removed natural-syntax forms
     /// (`parser/removed.rs`). Read once, when the parser is created.
     report_removed: bool,
+    /// Names bound by `import "path" as name` so far: `name.Point { ... }`
+    /// is a struct literal only after such an import (elsewhere
+    /// `a.B { x: 1 }` keeps its old meaning).
+    namespaces: std::collections::HashSet<String>,
 }
 
 /// Deepest nesting of expressions, statements, patterns and type
@@ -51,6 +56,7 @@ impl Parser {
             or_alternative: false,
             report_removed: crate::semantics::edition::current()
                 >= crate::semantics::edition::Edition::E2027,
+            namespaces: std::collections::HashSet::new(),
         }
     }
 
@@ -646,18 +652,51 @@ impl Parser {
         })
     }
 
-    /// Parses: wait expr seconds
+    /// Parses: wait expr [unit]
     fn parse_wait(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Wait)?;
         let duration = self.parse_expr()?;
-        if self.check(&Token::Seconds) {
-            self.advance();
-        }
+        let duration = self.parse_duration_in_seconds(duration);
 
         Ok(Stmt::Expression(Expr::Call {
             function: Box::new(Expr::Ident("wait".to_string())),
             args: vec![duration],
         }))
+    }
+
+    /// The duration unit after the number of `wait`, `timeout` or `schedule
+    /// every`, on the same line, if there is one: `seconds` (a keyword) or
+    /// one of the words of `semantics::DURATION_UNITS` (`ms`, `minute`, ...,
+    /// plain names everywhere else). Returns the canonical unit name.
+    fn parse_duration_unit(&mut self) -> Option<&'static str> {
+        let unit = match self.current_token() {
+            Token::Seconds => Some("seconds"),
+            Token::Ident(ref w) => crate::semantics::duration_unit(w),
+            _ => None,
+        };
+        if unit.is_some() {
+            self.advance();
+        }
+        unit
+    }
+
+    /// `duration` followed by an optional unit, as a number of seconds:
+    /// `500 ms` is `500 / 1000.0`, `2 minutes` is `2 * 60` (a fraction stays
+    /// exact: `0.5 seconds` is `0.5`).
+    fn parse_duration_in_seconds(&mut self, duration: Expr) -> Expr {
+        let (op, factor) = match self.parse_duration_unit() {
+            None | Some("seconds") => return duration,
+            Some("milliseconds") => (BinOp::Div, Expr::Float(1000.0)),
+            Some(unit) => (
+                BinOp::Mul,
+                Expr::Int(crate::semantics::duration_unit_seconds(unit) as i64),
+            ),
+        };
+        Expr::BinOp {
+            left: Box::new(duration),
+            op,
+            right: Box::new(factor),
+        }
     }
 
     /// Parses: try { body } catch name { handler }
@@ -695,7 +734,7 @@ impl Parser {
         match self.current_token() {
             Token::StringLit(s) => {
                 self.advance();
-                Ok(s)
+                Ok(literal_braces(&s).into_owned())
             }
             _ => Err(self.error("expected a library path string after 'native'")),
         }
@@ -791,7 +830,7 @@ impl Parser {
             let path = match self.current_token() {
                 Token::StringLit(s) => {
                     self.advance();
-                    s
+                    literal_braces(&s).into_owned()
                 }
                 _ => return Err(self.error("expected string path after 'from'")),
             };
@@ -824,7 +863,7 @@ impl Parser {
             let path = match self.current_token() {
                 Token::StringLit(s) => {
                     self.advance();
-                    s
+                    literal_braces(&s).into_owned()
                 }
                 Token::Ident(s) => {
                     self.advance();
@@ -836,6 +875,19 @@ impl Parser {
                     ));
                 }
             };
+            // import "path" as name
+            if matches!(self.current_token(), Token::Ident(ref s) if s == "as") {
+                self.advance();
+                let name = self.expect_ident()?;
+                let name_span = self.prev_span();
+                let end = self.prev_end();
+                if let Some(ix) = self.index.as_mut() {
+                    let def = ix.def(&name, name_span, DefKind::Namespace { path: path.clone() });
+                    ix.set_visible_from(def, end);
+                }
+                self.namespaces.insert(name.clone());
+                return Ok(Stmt::ImportNamespace { path, name });
+            }
             Ok(Stmt::Import { path, names: None })
         }
     }
@@ -1090,9 +1142,7 @@ impl Parser {
     fn parse_timeout(&mut self) -> Result<Stmt, ParseError> {
         self.expect(Token::Timeout)?;
         let duration = self.parse_expr()?;
-        if self.check(&Token::Seconds) {
-            self.advance();
-        }
+        let duration = self.parse_duration_in_seconds(duration);
         let body = self.parse_block()?;
         Ok(Stmt::TimeoutBlock { duration, body })
     }
@@ -1113,21 +1163,7 @@ impl Parser {
             self.advance();
         }
         let interval = self.parse_expr()?;
-        let unit = match self.current_token() {
-            Token::Seconds => {
-                self.advance();
-                "seconds".to_string()
-            }
-            Token::Ident(ref s) if s == "minutes" => {
-                self.advance();
-                "minutes".to_string()
-            }
-            Token::Ident(ref s) if s == "hours" => {
-                self.advance();
-                "hours".to_string()
-            }
-            _ => "seconds".to_string(),
-        };
+        let unit = self.parse_duration_unit().unwrap_or("seconds").to_string();
         let body = self.parse_block()?;
         Ok(Stmt::ScheduleBlock {
             interval,
@@ -1207,6 +1243,7 @@ impl Parser {
             else {
                 return Err(self.error("prompt fields must be string literals"));
             };
+            let val = literal_braces(&val).into_owned();
             self.advance();
             match key.as_str() {
                 "system" => system = val,
@@ -1257,7 +1294,7 @@ impl Parser {
                     while !self.check(&Token::RBracket) {
                         match self.current_token().clone() {
                             Token::StringLit(tool) | Token::RawStringLit(tool) => {
-                                tools.push(tool);
+                                tools.push(literal_braces(&tool).into_owned());
                                 self.advance();
                             }
                             _ => return Err(self.error("agent tools must be string literals")),
@@ -1271,7 +1308,7 @@ impl Parser {
                 }
                 "goal" => match self.current_token().clone() {
                     Token::StringLit(text) | Token::RawStringLit(text) => {
-                        goal = text;
+                        goal = literal_braces(&text).into_owned();
                         self.advance();
                     }
                     _ => return Err(self.error("agent goal must be a string literal")),
@@ -1357,6 +1394,7 @@ impl Parser {
             return Err(self.error("expected 'fn' or 'define'"));
         }
         let name = self.expect_ident()?;
+        let in_method = self.impl_owner.is_some();
         let def = match self.impl_owner.take() {
             Some(owner) => self.note_def(&name, DefKind::Method { owner }),
             None => self.note_def(&name, DefKind::Function),
@@ -1366,7 +1404,7 @@ impl Parser {
             let type_params = p.parse_type_params()?;
 
             p.expect(Token::LParen)?;
-            let params = p.parse_params()?;
+            let params = p.parse_params_in(in_method)?;
             p.expect(Token::RParen)?;
 
             let return_type = if p.check(&Token::Arrow) {
@@ -1657,6 +1695,38 @@ impl Parser {
                 let name = name.clone();
                 self.advance();
 
+                // A variant of a module namespace: `geo.Circle(r)`, `geo.Dot`
+                // (after `import "geo.fg" as geo`). The namespace stays in
+                // the pattern: it matches only values that `geo.Circle`
+                // builds, not a same-named variant of another type.
+                if self.check(&Token::Dot) && self.namespaces.contains(&name) {
+                    let receiver = self.note_prev(&name, Role::Ref);
+                    self.advance();
+                    let variant = self.expect_ident()?;
+                    let member = self.note_prev(&variant, Role::Field);
+                    if let (Some(ix), Some(member), Some(receiver)) =
+                        (self.index.as_mut(), member, receiver)
+                    {
+                        ix.member_of(member, receiver);
+                    }
+                    let mut fields = Vec::new();
+                    if self.check(&Token::LParen) {
+                        self.advance();
+                        while !self.check(&Token::RParen) {
+                            fields.push(self.parse_or_pattern()?);
+                            if self.check(&Token::Comma) {
+                                self.advance();
+                            }
+                        }
+                        self.expect(Token::RParen)?;
+                    }
+                    return Ok(Pattern::Constructor {
+                        name: variant,
+                        fields,
+                        namespace: Some(name),
+                    });
+                }
+
                 // Check for constructor pattern: Name(fields...)
                 if self.check(&Token::LParen) {
                     self.note_prev(&name, Role::Ref);
@@ -1669,7 +1739,11 @@ impl Parser {
                         }
                     }
                     self.expect(Token::RParen)?;
-                    Ok(Pattern::Constructor { name, fields })
+                    Ok(Pattern::Constructor {
+                        name,
+                        fields,
+                        namespace: None,
+                    })
                 } else if self.or_alternative {
                     // The first alternative defines this name (checked by
                     // `parse_or_pattern`): it is the same variable.
@@ -1707,7 +1781,7 @@ impl Parser {
                 Ok(Pattern::Literal(Expr::Float(n)))
             }
             Token::StringLit(ref s) => {
-                let s = s.clone();
+                let s = literal_braces(s).into_owned();
                 self.advance();
                 Ok(Pattern::Literal(Expr::StringLit(s)))
             }
@@ -2000,11 +2074,7 @@ impl Parser {
         };
 
         Ok(Expr::Lambda {
-            params: vec![Param {
-                name: "it".to_string(),
-                type_ann: None,
-                default: None,
-            }],
+            params: vec![Param::plain("it", None, None)],
             body: vec![SpannedStmt::unspanned(Stmt::Return(Some(predicate)))],
         })
     }
@@ -2195,6 +2265,11 @@ impl Parser {
     /// Postfix: calls, field access, indexing, try (?)
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
+        // The occurrence of a bare identifier receiver (`m` in `m.f`).
+        let ident_occ = match (&expr, self.index.as_ref()) {
+            (Expr::Ident(name), Some(ix)) => ix.last_occurrence_named(name),
+            _ => None,
+        };
 
         loop {
             match self.current_token() {
@@ -2210,7 +2285,33 @@ impl Parser {
                 Token::Dot => {
                     self.advance();
                     let field = self.expect_ident()?;
-                    self.note_prev(&field, Role::Field);
+                    let field_occ = self.note_prev(&field, Role::Field);
+                    // `name.member`: remember the receiver's occurrence so
+                    // a namespace member (`import "m" as m; m.f`) can be
+                    // resolved to the module's definition.
+                    if let (Expr::Ident(_), Some(field_occ), Some(object_occ)) =
+                        (&expr, field_occ, ident_occ)
+                    {
+                        if let Some(ix) = self.index.as_mut() {
+                            ix.member_of(field_occ, object_occ);
+                        }
+                    }
+                    if let Expr::Ident(ns) = &expr {
+                        if self.namespaces.contains(ns)
+                            && field.chars().next().is_some_and(|c| c.is_uppercase())
+                            && self.check(&Token::LBrace)
+                            && self.brace_opens_struct_fields()
+                        {
+                            let namespace = ns.clone();
+                            let fields = self.parse_struct_fields()?;
+                            expr = Expr::StructInit {
+                                name: field,
+                                fields,
+                                namespace: Some(namespace),
+                            };
+                            continue;
+                        }
+                    }
                     expr = Expr::FieldAccess {
                         object: Box::new(expr),
                         field,
@@ -2280,7 +2381,7 @@ impl Parser {
                     let token = self.pos - 1;
                     self.parse_string_interpolation(&s, token)
                 } else {
-                    Ok(Expr::StringLit(s))
+                    Ok(Expr::StringLit(literal_braces(&s).into_owned()))
                 }
             }
 
@@ -2311,23 +2412,12 @@ impl Parser {
                 self.advance();
                 let name = self.expect_ident()?;
                 self.note_prev(&name, Role::TypeRef);
-                self.expect(Token::LBrace)?;
-                self.skip_newlines();
-                let mut fields = Vec::new();
-                while !self.check(&Token::RBrace) {
-                    let field_name = self.expect_ident()?;
-                    self.note_prev(&field_name, Role::Field);
-                    self.expect(Token::Colon)?;
-                    let value = self.parse_expr()?;
-                    fields.push((field_name, value));
-                    self.skip_newlines();
-                    if self.check(&Token::Comma) {
-                        self.advance();
-                    }
-                    self.skip_newlines();
-                }
-                self.expect(Token::RBrace)?;
-                Ok(Expr::StructInit { name, fields })
+                let fields = self.parse_struct_fields()?;
+                Ok(Expr::StructInit {
+                    name,
+                    fields,
+                    namespace: None,
+                })
             }
 
             Token::Ident(ref name) => {
@@ -2340,23 +2430,12 @@ impl Parser {
                     && self.brace_opens_struct_fields()
                 {
                     self.note_prev(&name, Role::TypeRef);
-                    self.advance();
-                    self.skip_newlines();
-                    let mut fields = Vec::new();
-                    while !self.check(&Token::RBrace) {
-                        let field_name = self.expect_ident()?;
-                        self.note_prev(&field_name, Role::Field);
-                        self.expect(Token::Colon)?;
-                        let value = self.parse_expr()?;
-                        fields.push((field_name, value));
-                        self.skip_newlines();
-                        if self.check(&Token::Comma) {
-                            self.advance();
-                        }
-                        self.skip_newlines();
-                    }
-                    self.expect(Token::RBrace)?;
-                    Ok(Expr::StructInit { name, fields })
+                    let fields = self.parse_struct_fields()?;
+                    Ok(Expr::StructInit {
+                        name,
+                        fields,
+                        namespace: None,
+                    })
                 } else {
                     self.note_prev(&name, Role::Ref);
                     Ok(Expr::Ident(name))
@@ -2516,7 +2595,9 @@ impl Parser {
                 }
             } else if ch == '{' {
                 if !current.is_empty() {
-                    parts.push(StringPart::Literal(std::mem::take(&mut current)));
+                    parts.push(StringPart::Literal(
+                        literal_braces(&std::mem::take(&mut current)).into_owned(),
+                    ));
                 }
                 let mut expr_str = String::new();
                 let mut expr_start = None;
@@ -2556,7 +2637,7 @@ impl Parser {
         }
 
         if !current.is_empty() {
-            parts.push(StringPart::Literal(current));
+            parts.push(StringPart::Literal(literal_braces(&current).into_owned()));
         }
 
         if parts.len() == 1 {
@@ -2658,7 +2739,11 @@ impl Parser {
         let mut i = 1;
         while i + 1 < raw.len() {
             columns.push(tok.col + i);
-            i += if raw[i] == '\\' { 2 } else { 1 };
+            i += if raw[i] == '\\' {
+                crate::lexer::escape_source_len(raw, i)
+            } else {
+                1
+            };
         }
         columns.push(tok.col + i);
         columns
@@ -2708,9 +2793,8 @@ impl Parser {
         while !self.check(&Token::RBrace) {
             let key = match self.current_token() {
                 Token::StringLit(s) => {
-                    let s = s;
                     self.advance();
-                    s
+                    literal_braces(&s).into_owned()
                 }
                 _ => {
                     let key = self.expect_ident()?;
@@ -2760,9 +2844,30 @@ impl Parser {
     /// Parameters, visible from the start of the enclosing (function or
     /// lambda) scope.
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
+        self.parse_params_in(false)
+    }
+
+    /// Parameters of a function, or of a method of an `impl` block when
+    /// `in_method`: there a first parameter named `it` (or `self`) is the
+    /// receiver, and only it may be declared `mut` (`fn inc(mut it)`).
+    fn parse_params_in(&mut self, in_method: bool) -> Result<Vec<Param>, ParseError> {
         let mut params = Vec::new();
         while !self.check(&Token::RParen) {
+            let declared_mut = self.check(&Token::Mut);
+            if declared_mut {
+                self.advance();
+            }
             let name = self.expect_ident()?;
+            let is_receiver =
+                in_method && params.is_empty() && crate::semantics::is_receiver_name(&name);
+            if declared_mut && !is_receiver {
+                return Err(self.error(crate::semantics::MUT_PARAM_NOT_RECEIVER));
+            }
+            let kind = match (is_receiver, declared_mut) {
+                (true, true) => ParamKind::MutReceiver,
+                (true, false) => ParamKind::Receiver,
+                _ => ParamKind::Plain,
+            };
             let def = self.note_def(&name, DefKind::Parameter);
             self.hoist(def);
 
@@ -2784,6 +2889,7 @@ impl Parser {
                 name,
                 type_ann,
                 default,
+                kind,
             });
 
             if self.check(&Token::Comma) {
@@ -2946,6 +3052,27 @@ impl Parser {
     /// fields (`}` or `field:` next, newlines skipped) rather than a block.
     /// `if c == QUOTE {` followed by a statement is a block, so a
     /// capitalised constant can end an `if`/`while` condition.
+    /// `{ field: value, ... }` of a struct literal, at the `{`.
+    fn parse_struct_fields(&mut self) -> Result<Vec<(String, Expr)>, ParseError> {
+        self.expect(Token::LBrace)?;
+        self.skip_newlines();
+        let mut fields = Vec::new();
+        while !self.check(&Token::RBrace) {
+            let field_name = self.expect_ident()?;
+            self.note_prev(&field_name, Role::Field);
+            self.expect(Token::Colon)?;
+            let value = self.parse_expr()?;
+            fields.push((field_name, value));
+            self.skip_newlines();
+            if self.check(&Token::Comma) {
+                self.advance();
+            }
+            self.skip_newlines();
+        }
+        self.expect(Token::RBrace)?;
+        Ok(fields)
+    }
+
     fn brace_opens_struct_fields(&self) -> bool {
         let mut offset = 1;
         while self.peek_token(offset) == Token::Newline {
@@ -3122,6 +3249,48 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    #[test]
+    fn method_receivers_and_mut_it() {
+        let program = parse_program(
+            "impl C {\n    fn a(it, x) { x }\n    fn b(mut it) { it }\n    fn new(n) { n }\n}\nfn f(it) { it }",
+        );
+        let Stmt::ImplBlock { methods, .. } = &program.statements[0].stmt else {
+            panic!("expected an impl block");
+        };
+        let kinds: Vec<Vec<ParamKind>> = methods
+            .iter()
+            .map(|m| match &m.stmt {
+                Stmt::FnDef { params, .. } => params.iter().map(|p| p.kind).collect(),
+                _ => panic!("expected a method"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                vec![ParamKind::Receiver, ParamKind::Plain],
+                vec![ParamKind::MutReceiver],
+                vec![ParamKind::Plain],
+            ]
+        );
+        let Stmt::FnDef { params, .. } = &program.statements[1].stmt else {
+            panic!("expected a function");
+        };
+        assert_eq!(params[0].kind, ParamKind::Plain);
+        for bad in [
+            "fn f(mut it) { }",
+            "impl C {\n    fn a(it, mut x) { }\n}",
+            "impl C {\n    fn a(mut x) { }\n}",
+            "let f = fn(mut it) { it }",
+        ] {
+            let e = parse_err(bad);
+            assert!(
+                e.message.contains("receiver can be declared `mut`"),
+                "{bad}: {}",
+                e.message
+            );
+        }
     }
 
     fn parse_err(input: &str) -> ParseError {

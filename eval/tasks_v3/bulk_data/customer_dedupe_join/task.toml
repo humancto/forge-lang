@@ -1,0 +1,78 @@
+id = "customer_dedupe_join"
+category = "bulk_data"
+title = "Deduplicate 50,000 customers and join 220,000 orders"
+prompt = """
+Standard input has two sections. After the line `#customers` come customer lines
+`<customer id>,<name>,<email>`; after the line `#orders` come order lines
+`<order id>,<customer id>,<amount in cents>,<YYYY-MM-DD>`. Fields never contain commas;
+skip empty lines. There are 50,000 customers and 220,000 orders.
+
+Several customer records may belong to one person. Two records are the same person when
+their normalized emails are equal. To normalize: trim surrounding spaces and lower-case;
+split at the last `@` into local part and domain; drop everything from the first `+` in
+the local part; if the domain is `gmail.com` or `googlemail.com`, also remove every `.`
+from the local part and use the domain `gmail.com`. Each person is represented by their
+record with the smallest customer id (ids are compared as strings); that record's name and
+the normalized email describe the person.
+
+An order whose customer id is unknown is an orphan; count it and ignore it. Every other
+order belongs to the person of its customer record.
+
+Write money as `<whole>.<cents>` with two cent digits. Print:
+
+```
+customers: <customer records>
+people: <distinct people>
+merged: <customer records minus people>
+orders: <order lines>
+orphans: <orphan orders>
+top spenders:
+<person id> <name> <normalized email> orders=<n> total=<sum> first=<earliest date> last=<latest date>
+2026 by month:
+2026-MM <sum> (<number of orders>)
+```
+
+with the 10 people with the largest order total under `top spenders:` (ties: person id
+ascending), and one line per month of 2026 that has orders, in month order.
+
+The program must finish within a few seconds.
+"""
+stdin_file = "input.txt"
+generator = "gen_input.py"
+generated_sha256 = { "input.txt" = "d0fe0933528804855f0bd515654a3228c6e9816b664ee1a85f8f5618bfc78f79" }
+needs = []
+timeout = 45
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
+expected_stdout = """
+customers: 50000
+people: 40000
+merged: 10000
+orders: 220000
+orphans: 471
+top spenders:
+C100000 Tia Berg tia.berg0@example.org orders=68 total=18568.08 first=2025-01-15 last=2026-12-18
+C100085 Xia Diaz xiadiaz4@gmail.com orders=49 total=12486.54 first=2025-02-10 last=2026-12-21
+C100044 Wes Ng wes.ng2@corp.io orders=46 total=12331.49 first=2025-02-02 last=2026-12-21
+C103969 Finn Smith finnsmith189@gmail.com orders=39 total=11514.10 first=2025-01-24 last=2026-12-27
+C100274 Oli Smith olismith13@gmail.com orders=42 total=11377.25 first=2025-01-14 last=2026-12-24
+C100441 Vic Silva vic.silva21@example.org orders=45 total=11158.42 first=2025-01-05 last=2026-12-23
+C100107 Eve Rossi everossi5@gmail.com orders=43 total=11085.14 first=2025-01-14 last=2026-12-26
+C100022 Hana Kim hana.kim1@mail.net orders=52 total=11058.08 first=2025-02-14 last=2026-12-26
+C101827 Bo Haas bohaas87@gmail.com orders=43 total=11051.00 first=2025-02-07 last=2026-12-23
+C101134 Pia Rossi piarossi54@gmail.com orders=40 total=10988.14 first=2025-02-01 last=2026-12-10
+2026 by month:
+2026-01 3509350.61 (13876)
+2026-02 3434979.74 (13829)
+2026-03 3426793.33 (13570)
+2026-04 3431702.98 (13704)
+2026-05 3427391.38 (13789)
+2026-06 3440763.95 (13688)
+2026-07 3431919.23 (13637)
+2026-08 3408318.85 (13637)
+2026-09 3442637.84 (13722)
+2026-10 3427062.49 (13633)
+2026-11 3470441.18 (13820)
+2026-12 3485490.07 (13866)
+"""

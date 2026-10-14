@@ -1,0 +1,77 @@
+// Canonical compact JSON with the integer/float distinction kept. Strings
+// are escaped by json.compact; numbers and containers are encoded here, so
+// the output format is spelled out by the task rather than by json.compact
+// (which also writes 1.0 as `1.0` since eval/V3_FINDINGS.md finding 15).
+
+fn encode(v) -> String {
+    let t = typeof(v)
+    if t == "Float" {
+        if v == floor(v) {
+            return "{int(v)}.0"
+        }
+        return str(v)
+    }
+    if t == "Array" {
+        return "[" + join(map(v, fn(x) { return encode(x) }), ",") + "]"
+    }
+    if t == "Object" {
+        let mut parts = []
+        for k, x in v {
+            parts.push(json.compact(k) + ":" + encode(x))
+        }
+        return "{" + join(parts, ",") + "}"
+    }
+    return json.compact(v)
+}
+
+fn kind(v) -> String {
+    return match typeof(v) {
+        "Null" => "null",
+        "Bool" => "boolean",
+        "Int" | "Float" => "number",
+        "String" => "string",
+        "Array" => "array",
+        _ => "object",
+    }
+}
+
+fn depth(v) -> Int {
+    let t = typeof(v)
+    if t != "Array" && t != "Object" {
+        return 0
+    }
+    let items = if t == "Array" { v } else { values(v) }
+    let mut d = 0
+    for x in items {
+        d = max(d, depth(x))
+    }
+    return d + 1
+}
+
+fn count_numbers(v) -> Int {
+    let t = typeof(v)
+    if t == "Int" || t == "Float" {
+        return 1
+    }
+    if t != "Array" && t != "Object" {
+        return 0
+    }
+    let items = if t == "Array" { v } else { values(v) }
+    return sum(map(items, fn(x) { return count_numbers(x) }))
+}
+
+let mut n = 0
+for line in fs.lines("/dev/stdin") {
+    n += 1
+    if line.trim() == "" {
+        continue
+    }
+    let mut v = null
+    try {
+        v = json.parse(line)
+    } catch e {
+        println("{n}: invalid")
+        continue
+    }
+    println("{n}: {kind(v)} depth={depth(v)} numbers={count_numbers(v)} {encode(v)}")
+}

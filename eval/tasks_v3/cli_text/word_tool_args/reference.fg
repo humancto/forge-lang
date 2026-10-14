@@ -1,0 +1,64 @@
+// A word-count tool configured by command-line options. `io.args()` is the
+// script path followed by the program's arguments (`forge run main.fg --top 3`).
+
+let usage_text = "usage: wordtool [--top N] [--min-length N] [--ignore-case] [--]"
+
+fn usage(msg: String) {
+    eprintln("error: {msg}")
+    eprintln(usage_text)
+    exit(2)
+}
+
+let argv = io.args()
+let args = slice(argv, 1, len(argv))
+let mut top = 5
+let mut min_len = 1
+let mut ignore_case = false
+let mut i = 0
+while i < len(args) {
+    let a = args[i]
+    if a == "--top" || a == "--min-length" {
+        if i + 1 >= len(args) {
+            usage("{a} needs a value")
+        }
+        let v = args[i + 1]
+        if !regex.test(v, "^[0-9]+$") || int(v) == 0 {
+            usage("{a} needs a positive integer, got '{v}'")
+        }
+        if a == "--top" {
+            top = int(v)
+        } else {
+            min_len = int(v)
+        }
+        i += 2
+    } else if a == "--ignore-case" {
+        ignore_case = true
+        i += 1
+    } else {
+        usage("unknown option '{a}'")
+    }
+}
+
+let mut counts = {}
+for raw in regex.find_all(fs.read("/dev/stdin"), "[A-Za-z']+") {
+    let mut w = regex.replace(raw, "^'+|'+$", "")
+    if ignore_case {
+        w = w.lower()
+    }
+    if w != "" && len(w) >= min_len {
+        counts[w] = get(counts, w, 0) + 1
+    }
+}
+let ranked = sort(entries(counts), fn(a, b) {
+    if a[1] != b[1] {
+        return b[1] - a[1]
+    }
+    if a[0] < b[0] {
+        return -1
+    }
+    return 1
+})
+for e in slice(ranked, 0, min(top, len(ranked))) {
+    println("{pad_start(str(e[1]), 4)} {e[0]}")
+}
+eprintln("{len(keys(counts))} distinct words")

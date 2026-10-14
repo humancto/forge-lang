@@ -123,8 +123,7 @@ let result = try_receive(ch)    // Some(42)
 
 **Errors:**
 
-- `"try_receive() requires a channel"` — No argument provided.
-- `"try_receive() argument must be a channel"` — Argument is not a channel.
+- `"try_receive() requires a channel"` — The argument is not a channel.
 
 ## Producer-Consumer Pattern
 
@@ -171,6 +170,57 @@ repeat 3 times {
     }
 }
 ```
+
+## Closing and Selecting
+
+### close(channel)
+
+`close` ends the channel for senders: later `send` calls fail with `channel
+closed` (E0030) and `try_send` returns `false`. Values sent before `close` stay
+in the buffer and are still received in order; once they are gone `receive`
+returns `null`.
+
+### is_closed(channel)
+
+Returns `true` once the channel is *finished*: closed **and** drained, so no
+value can be received from it any more. A closed channel that still holds
+values is not finished (this is Kotlin's `isClosedForReceive`). Asking does
+not consume a value. `is_closed(5)` is E0015 `is_closed() requires a channel`.
+
+```forge
+let ch = channel()
+send(ch, 1)
+close(ch)
+println(is_closed(ch))   // false: 1 is still waiting
+println(receive(ch))     // 1
+println(is_closed(ch))   // true
+```
+
+### select(channels, timeout_ms?)
+
+Waits until one of `channels` has a value and returns `[index, value]`
+(channels are polled fairly). Finished channels are skipped. `select`
+returns `null` when the timeout (milliseconds) passes, and immediately when
+every channel is finished (or the array is empty); without a timeout it waits
+until one of the two happens. After a `null`, `all(chs, fn(c) { return
+is_closed(c) })` is `true` only in the second case, so a consumer merging
+several producers can tell "all finished" from "slow":
+
+```forge
+while true {
+    let r = select(chs, 1000)
+    if r == null {
+        if all(chs, fn(c) { return is_closed(c) }) {
+            break
+        }
+        continue
+    }
+    handle(r[0], r[1])
+}
+```
+
+**Errors:** `"select() requires an array of channels"` (E0015) when the first
+argument is not an array of channels.
 
 ## Channel Lifetime
 

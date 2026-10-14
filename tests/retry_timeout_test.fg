@@ -1,0 +1,93 @@
+// retry_timeout_test.fg — the `retry` and `timeout` blocks as llms.txt
+// documents them (V3 finding 16). Both are statements; values leave
+// through a variable or a `return`.
+
+let mut calls = 0
+
+fn flaky(fail_times: Int) {
+    calls += 1
+    if calls <= fail_times {
+        let empty = []
+        return empty[0]
+    }
+    return "ok on attempt {calls}"
+}
+
+fn with_retry(n: Int, fail_times: Int) {
+    calls = 0
+    retry n times {
+        return flaky(fail_times)
+    }
+}
+
+@test
+fn test_retry_returns_the_first_success() {
+    assert_eq(with_retry(5, 2), "ok on attempt 3")
+}
+
+@test
+fn test_retry_assigns_through_a_variable() {
+    let mut result = null
+    let mut attempts = 0
+    retry 3 times {
+        attempts += 1
+        if attempts < 2 {
+            assert(false, "not yet")
+        }
+        result = "done after {attempts}"
+    }
+    assert_eq(result, "done after 2")
+}
+
+@test
+fn test_exhausted_retry_quotes_the_last_error() {
+    try {
+        with_retry(2, 10)
+        assert(false, "unreachable")
+    } catch e {
+        assert_eq(e.code, "E0041")
+        assert(e.message.starts_with("retry failed after 2 attempts: "))
+        assert(e.message.contains("out of bounds"))
+    }
+}
+
+@test
+fn test_retry_with_no_attempts_fails_at_once() {
+    let mut ran = false
+    try {
+        retry 0 times {
+            ran = true
+        }
+    } catch e {
+        assert_eq(e.code, "E0041")
+        assert_eq(e.message, "retry failed after 0 attempts")
+    }
+    assert_eq(ran, false)
+}
+
+@test
+fn test_break_leaves_retry_without_retrying() {
+    let mut runs = 0
+    for i in range(0, 3) {
+        retry 3 times {
+            runs += 1
+            break
+        }
+    }
+    assert_eq(runs, 1)
+}
+
+@test
+fn test_timeout_stops_a_wait() {
+    let ch = channel()
+    try {
+        timeout 1 seconds {
+            receive(ch)
+        }
+        assert(false, "unreachable")
+    } catch e {
+        assert_eq(e.code, "E0031")
+        assert_eq(e.type, "TimeoutError")
+        assert_eq(e.message, "timeout: operation exceeded 1 second limit")
+    }
+}

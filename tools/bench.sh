@@ -9,8 +9,8 @@
 # Options:
 #   --json            print JSON on stdout instead of a table
 #   --forge PATH      forge binary (default: $FORGE, else target/release/forge)
-#   --suite LIST      comma-separated: vm,interp,startup,peers
-#                     (default: vm,interp,startup)
+#   --suite LIST      comma-separated: vm,interp,startup,typed,peers
+#                     (default: vm,interp,startup,typed)
 #   --filter TEXT     only benchmarks whose id contains TEXT ($BENCH_FILTER)
 #   --ids LIST        only these comma-separated benchmark ids (exact match)
 #   --runs N          timed runs per benchmark (default 3, $BENCH_RUNS)
@@ -21,6 +21,8 @@
 # Suites (ids are <suite>/<program>):
 #   vm       benchmarks/vm/*.fg on the default engine (VM + JIT tier-up)
 #   interp   benchmarks/interp/*.fg with --interp
+#   typed    benchmarks/typed/*.fg with --edition 2027: annotated code,
+#            whose argument and result types are checked at run time
 #   startup  benchmarks/startup/hello.fg run $STARTUP_BATCH times (default 20)
 #            per sample, so process start-up is measured above timer noise
 #   peers    the vm workloads in Python / Node / Lua (benchmarks/peers/),
@@ -28,7 +30,7 @@
 #            are not installed are reported as "missing", not as failures.
 #
 # Flags after `--` replace a suite's own engine flags (vm: none,
-# interp: --interp), e.g. `tools/bench.sh --suite vm -- --jit`.
+# interp: --interp, typed: --edition 2027), e.g. `tools/bench.sh --suite vm -- --jit`.
 #
 # Each sample is the wall-clock time of whole `forge run` processes, so it
 # includes start-up. JSON reports every sample plus the median and minimum.
@@ -39,7 +41,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FORGE_BIN="${FORGE:-$ROOT/target/release/forge}"
 JSON=0
-SUITES="vm,interp,startup"
+SUITES="vm,interp,startup,typed"
 FILTER="${BENCH_FILTER:-}"
 IDS=""
 RUNS="${BENCH_RUNS:-3}"
@@ -51,7 +53,7 @@ OVERRIDE_FLAGS=0
 EXTRA_FLAGS=()
 
 usage() {
-    sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
@@ -139,7 +141,7 @@ add_bench() {
 IFS=',' read -r -a SUITE_LIST <<<"$SUITES"
 for suite in "${SUITE_LIST[@]}"; do
     case "$suite" in
-        vm|interp|startup)
+        vm|interp|startup|typed)
             for prog in "$ROOT/benchmarks/$suite"/*.fg; do
                 [ -e "$prog" ] || continue
                 add_bench "$suite/$(basename "$prog" .fg)" "$prog" "$suite" forge
@@ -158,7 +160,7 @@ for suite in "${SUITE_LIST[@]}"; do
                 add_bench "peers/$lang/${file%.*}" "$prog" peers "$runner"
             done
             ;;
-        *) echo "bench.sh: unknown suite '$suite' (vm, interp, startup, peers)" >&2; exit 2 ;;
+        *) echo "bench.sh: unknown suite '$suite' (vm, interp, startup, typed, peers)" >&2; exit 2 ;;
     esac
 done
 
@@ -178,6 +180,7 @@ suite_flags() {
     fi
     case "$1" in
         interp) echo "--interp" ;;
+        typed) printf '%s\n' --edition 2027 ;;
         *) ;;
     esac
 }

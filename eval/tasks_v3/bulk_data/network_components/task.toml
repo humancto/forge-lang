@@ -1,0 +1,45 @@
+id = "network_components"
+category = "bulk_data"
+title = "Connected components of a 120,000-node network"
+prompt = """
+The first line of standard input is `nodes <n>` (here n = 120,000; the nodes are
+0 .. n-1). Then come 100,000 lines `link <a> <b>` (an undirected link between nodes a and
+b) and 30,000 lines `ask <a> <b>`, mixed; skip empty lines. Process the lines in order:
+a link joins the components of a and b; an ask checks whether a and b are connected by the
+links seen so far (only earlier lines count).
+
+Print:
+
+```
+links: <number of links> merges: <links that joined two different components>
+components: <number of components at the end, counting single nodes>
+singletons: <components of size 1>
+largest: <the 5 largest component sizes, descending, separated by spaces>
+connected asks: <asks that were connected>/<number of asks>
+component of <smallest node>: <size> nodes
+```
+
+with the last line once for each of the 3 largest components (ties: smaller smallest
+node first), naming the smallest node of the component.
+
+The program must finish within a few seconds: do not search the graph for every ask.
+"""
+stdin_file = "input.txt"
+generator = "gen_input.py"
+generated_sha256 = { "input.txt" = "67c7fd3a40af59d41e93dd51b6b555075a8bf429fe2c092f6c2f0fb8df87f05b" }
+needs = []
+timeout = 15
+# CPU-heavy: runs alone after the other tasks, so its time limit is not
+# eaten by contention on a small machine.
+timed = true
+max_memory = "1GB"
+expected_stdout = """
+links: 100000 merges: 91284
+components: 28716
+singletons: 22793
+largest: 79719 33 26 25 24
+connected asks: 13320/30000
+component of 2: 79719 nodes
+component of 12754: 33 nodes
+component of 3079: 26 nodes
+"""

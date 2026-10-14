@@ -154,6 +154,16 @@ pub enum Stmt {
         path: String,
         names: Option<Vec<ImportName>>,
     },
+    /// `import "path" as name`: bind `name` to the module's namespace, an
+    /// object whose members are every name the module's top level binds
+    /// (functions, variables, type names, variants, interfaces, structs and
+    /// re-exports: `semantics::namespace_members`), plus `__module__` (the
+    /// path as written). The module itself runs
+    /// once per program, like any other import of it.
+    ImportNamespace {
+        path: String,
+        name: String,
+    },
     /// `import native "path" [as name]` / `import { f, g } from native "path"`:
     /// load a native plugin (see `src/plugins`). Bound names are known here,
     /// at parse time; nothing is loaded until the statement runs.
@@ -300,6 +310,10 @@ pub enum Expr {
     StructInit {
         name: String,
         fields: Vec<(String, Expr)>,
+        /// `m.Point { ... }`: the namespace (`import "..." as m`) the
+        /// struct is read from. Both engines check that `m.Point` is the
+        /// module's struct `Point` before building the value.
+        namespace: Option<String>,
     },
     Block(Vec<SpannedStmt>),
 }
@@ -339,6 +353,51 @@ pub struct Param {
     pub name: String,
     pub type_ann: Option<TypeAnn>,
     pub default: Option<Expr>,
+    /// Whether this is a method's receiver (`it`), and whether it is
+    /// declared `mut it`.
+    pub kind: ParamKind,
+}
+
+/// How a parameter binds its argument.
+///
+/// The first parameter of a method in an `impl`/`give` block, when it is
+/// named `it` (or `self`), is the method's *receiver*: the value the method
+/// is called on. A plain receiver is immutable inside the method (assigning
+/// to it or to one of its fields is E0006 / T0017). A `mut it` receiver may
+/// be updated, and when the method returns normally its final value is
+/// written back to the place the method was called on (`c.inc()`,
+/// `xs[i].inc()`, `o.f.inc()`; see `semantics::temporary_receiver`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParamKind {
+    /// An ordinary (mutable) parameter.
+    #[default]
+    Plain,
+    /// A method's receiver declared `it`: immutable.
+    Receiver,
+    /// A method's receiver declared `mut it`: mutable, written back.
+    MutReceiver,
+}
+
+impl Param {
+    /// An ordinary parameter.
+    pub fn plain(
+        name: impl Into<String>,
+        type_ann: Option<TypeAnn>,
+        default: Option<Expr>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            type_ann,
+            default,
+            kind: ParamKind::Plain,
+        }
+    }
+
+    /// Whether the parameter is bound mutably (everything but a plain
+    /// receiver).
+    pub fn is_mutable(&self) -> bool {
+        self.kind != ParamKind::Receiver
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -422,9 +481,14 @@ pub enum Pattern {
     Wildcard,
     Literal(Expr),
     Binding(String),
+    /// `Name(fields...)`, or `ns.Name(fields...)` with `namespace` set
+    /// (after `import "m.fg" as ns`): a namespaced pattern matches only
+    /// values built by that namespace's member `Name`
+    /// (`semantics::namespaced_variant_matches`).
     Constructor {
         name: String,
         fields: Vec<Pattern>,
+        namespace: Option<String>,
     },
     /// `p1 | p2 | ...`: matches when any alternative matches; the first
     /// matching alternative supplies the bindings. The parser requires

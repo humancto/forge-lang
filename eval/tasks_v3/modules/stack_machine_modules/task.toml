@@ -1,0 +1,186 @@
+id = "stack_machine_modules"
+category = "modules"
+title = "Typed stack machine split into instruction, stack and machine modules"
+answer = "files"
+editions = ["2027"]
+prompt = '''
+The working directory already contains this `main.fg`, which you must not change (it is
+provided as is when your files are run):
+
+```forge
+// main.fg (provided): assembles and runs a stack-machine program.
+import { parse_program } from "vm/ops.fg"
+import { run } from "vm/machine.fg"
+
+let src = fs.read("/dev/stdin")
+match parse_program(src) {
+    Ok(ops) => {
+        println("{len(ops)} instructions")
+        match run(ops, 10000) {
+            Ok(out) => println("output: {join(map(out, fn(n) { return str(n) }), " ")}"),
+            Err(e) => println("runtime error: {e}"),
+        }
+    },
+    Err(e) => println("parse error: {e}"),
+}
+```
+
+Write three typed modules (declare parameter and result types):
+
+- `vm/ops.fg`: an algebraic type `Op` with one variant per instruction, and
+  `parse_program(src)` returning `Ok(<array of Op>)` or `Err(<message>)`.
+- `vm/stack.fg`: a generic struct `Stack<T>` for the machine's operand stack, with the
+  functions or methods the machine needs.
+- `vm/machine.fg`: `run(ops, max_steps)` returning `Ok(<array of printed Ints>)` or
+  `Err(<message>)`; it must use `Op` from `vm/ops.fg` and `Stack` from `vm/stack.fg`.
+
+Assembly language: one instruction per line; `#` starts a comment; blank lines are
+ignored; words are separated by spaces. A line `<name>:` defines a label naming the next
+instruction (labels may be used before they are defined). Instructions: `push <int>`
+(optional `-`, digits), `pop`, `add`, `sub`, `mul`, `div`, `dup` (copy the top), `swap`
+(exchange the top two), `over` (copy the second from the top onto the top), `jz <label>`
+(pop a value; jump if it is 0), `jmp <label>`, `print` (pop a value and append it to the
+output), `halt` (stop). For `sub` and `div`, with a pushed first and b second (b on top),
+the result is a - b and a / b (integer division truncating toward zero); both operands
+are popped and the result pushed.
+
+Parse errors (lines numbered from 1, the first error in line order; a duplicate label is
+found before any other error): `line <n>: duplicate label <name>`,
+`line <n>: bad number <word>` (push with a non-integer), `line <n>: unknown label <name>`,
+`line <n>: unknown instruction <the line without comment, trimmed>` (also for a wrong
+number of words).
+
+Running starts at instruction 0 and stops after the last instruction or at `halt`.
+Instructions are numbered from 0 (labels do not count). Each executed instruction counts
+one step; running instruction number max_steps + 1 is the error `step limit exceeded`.
+An instruction needing more values than the stack holds is
+`stack underflow at <instruction number>`, and `div` by zero is
+`division by zero at <instruction number>`.
+'''
+needs = ["read"]
+
+[[case]]
+name = "factorial"
+stdin = """
+# 10! computed with a loop
+    push 1      # acc
+    push 10     # n
+loop:
+    dup
+    jz done
+    swap        # n acc
+    over        # n acc n
+    mul         # n acc*n
+    swap        # acc n
+    push 1
+    sub
+    jmp loop
+done:
+    pop
+    print
+"""
+expected_stdout = """
+13 instructions
+output: 3628800
+"""
+
+[[case]]
+name = "countdown"
+stdin = """
+push 3
+top:
+dup
+print
+push 1
+sub
+dup
+jz end
+jmp top
+end:
+push -7
+push 2
+div
+print
+push 7
+push -2
+div
+print
+halt
+push 99
+print
+"""
+expected_stdout = """
+19 instructions
+output: 3 2 1 -3 -3
+"""
+
+[[case]]
+name = "parse_errors"
+stdin = """
+start:
+push 1
+push x1
+jmp nowhere
+"""
+expected_stdout = """
+parse error: line 3: bad number x1
+"""
+
+[[case]]
+name = "duplicate"
+stdin = """
+frob 3
+a:
+push 1
+a:
+"""
+expected_stdout = """
+parse error: line 4: duplicate label a
+"""
+
+[[case]]
+name = "unknown"
+stdin = """
+push 1
+push 2 3   # too many words
+"""
+expected_stdout = """
+parse error: line 2: unknown instruction push 2 3
+"""
+
+[[case]]
+name = "underflow"
+stdin = """
+push 1
+print
+add
+"""
+expected_stdout = """
+3 instructions
+runtime error: stack underflow at 2
+"""
+
+[[case]]
+name = "div_zero"
+stdin = """
+push 5
+push 0
+div
+"""
+expected_stdout = """
+3 instructions
+runtime error: division by zero at 2
+"""
+
+[[case]]
+name = "forever"
+stdin = """
+again:
+push 1
+print
+jmp again
+"""
+expected_stdout = """
+3 instructions
+runtime error: step limit exceeded
+"""

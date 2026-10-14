@@ -9,9 +9,16 @@
 //!
 //! * the browser playground (`wasm32-unknown-unknown` has no stdout) uses
 //!   [`capture`];
-//! * the sandbox (`crate::sandbox`) installs a stdout-only [`Sink`] with
+//! * the sandbox (`crate::sandbox`) installs a [`Sink::bounded`] with
 //!   [`scope`] on its worker thread, so `forge mcp` and other embedders get
-//!   a script's output, bounded, instead of the host's stdout.
+//!   a script's stdout and stderr (`eprintln`, `log.*`, `sus`, `term.*`
+//!   chrome), bounded by one output budget, instead of the host's streams.
+//!
+//! While a capture takes stderr, `log.*` writes a plain `[level] message`
+//! line into it instead of emitting a `tracing` event (the process's
+//! subscriber writes to the host's stderr, outside the capture and its
+//! budget), and color chrome is off for every captured stream: a capture
+//! is not a terminal.
 //!
 //! # Invariant: forks inherit the capture
 //!
@@ -61,6 +68,31 @@ impl Captured {
             .collect()
     }
 
+    /// The first `limit` bytes written, in write order, cut on a character
+    /// boundary, split into `(stdout, stderr)`.
+    pub fn split_within(&self, limit: usize) -> (String, String) {
+        let (mut stdout, mut stderr) = (String::new(), String::new());
+        let mut room = limit;
+        for (stream, text) in &self.chunks {
+            if room == 0 {
+                break;
+            }
+            let mut take = text.len().min(room);
+            while !text.is_char_boundary(take) {
+                take -= 1;
+            }
+            room -= take;
+            match stream {
+                Stream::Stdout => stdout.push_str(&text[..take]),
+                Stream::Stderr => stderr.push_str(&text[..take]),
+            }
+            if take < text.len() {
+                break;
+            }
+        }
+        (stdout, stderr)
+    }
+
     fn push(&mut self, stream: Stream, text: &str, limit: usize) {
         if self.truncated || text.is_empty() {
             return;
@@ -89,8 +121,8 @@ impl Captured {
 /// ([`current_sink`] / [`scope`]) writes into the same sink.
 pub struct Sink {
     limit: usize,
-    /// Capture stderr too (the playground); otherwise stderr goes to the
-    /// host's stderr exactly as without a capture (the sandbox).
+    /// Capture stderr too; otherwise stderr goes to the host's stderr
+    /// exactly as without a capture.
     stderr: bool,
     /// Stored `true` the first time output is dropped for the limit (the
     /// sandbox points it at the run's cancellation flag, so a runaway
@@ -119,16 +151,21 @@ impl Sink {
         })
     }
 
-    /// A sink for stdout only (stderr is passed through to the host's
-    /// stderr) that stores `true` in `on_overflow` once output past `limit`
-    /// is dropped.
-    pub fn stdout_only(limit: usize, on_overflow: Option<Arc<AtomicBool>>) -> Arc<Sink> {
+    /// A sink that keeps at most `limit` bytes of stdout and stderr
+    /// together (one budget for both streams) and stores `true` in
+    /// `on_overflow` once output past `limit` is dropped.
+    pub fn bounded(limit: usize, on_overflow: Option<Arc<AtomicBool>>) -> Arc<Sink> {
         Arc::new(Sink {
             limit,
-            stderr: false,
+            stderr: true,
             on_overflow,
             captured: Mutex::new(Captured::default()),
         })
+    }
+
+    /// Whether this sink takes output written to `stream`.
+    pub fn takes(&self, stream: Stream) -> bool {
+        stream == Stream::Stdout || self.stderr
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Captured> {
@@ -191,6 +228,12 @@ thread_local! {
 /// The capture installed on this thread, if any.
 pub fn current_sink() -> Option<Arc<Sink>> {
     CAPTURE.try_with(|c| c.borrow().clone()).ok().flatten()
+}
+
+/// Whether output written to `stream` on this thread goes to a capture
+/// (rather than the process's stream).
+pub fn captures(stream: Stream) -> bool {
+    current_sink().is_some_and(|sink| sink.takes(stream))
 }
 
 /// Restores the previous capture of this thread when dropped.
@@ -384,16 +427,43 @@ mod tests {
     }
 
     #[test]
-    fn stdout_only_sinks_flag_overflow() {
+    fn bounded_sinks_share_one_budget_and_flag_overflow() {
         let flag = Arc::new(AtomicBool::new(false));
-        let sink = Sink::stdout_only(4, Some(flag.clone()));
+        let sink = Sink::bounded(6, Some(flag.clone()));
         let _scope = scope(Some(sink.clone()));
-        assert!(!write(Stream::Stderr, "not captured"));
+        assert!(captures(Stream::Stdout) && captures(Stream::Stderr));
         out("abc");
+        err("de");
         assert!(!flag.load(Ordering::Acquire));
-        out("de");
+        err("fg");
         assert!(flag.load(Ordering::Acquire));
         assert!(sink.truncated());
-        assert_eq!(sink.take().text(Stream::Stdout), "abcd");
+        let got = sink.take();
+        assert_eq!(got.text(Stream::Stdout), "abc");
+        assert_eq!(got.text(Stream::Stderr), "def");
+    }
+
+    #[test]
+    fn split_within_keeps_write_order_and_char_boundaries() {
+        let got = Captured {
+            chunks: vec![
+                (Stream::Stdout, "ab".to_string()),
+                (Stream::Stderr, "cé".to_string()),
+                (Stream::Stdout, "z".to_string()),
+            ],
+            bytes: 6,
+            truncated: false,
+        };
+        assert_eq!(got.split_within(3), ("ab".to_string(), "c".to_string()));
+        assert_eq!(got.split_within(4), ("ab".to_string(), "c".to_string()));
+        assert_eq!(got.split_within(5), ("ab".to_string(), "cé".to_string()));
+        assert_eq!(got.split_within(99), ("abz".to_string(), "cé".to_string()));
+        assert_eq!(got.split_within(0), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn no_capture_takes_nothing() {
+        let _scope = scope(None);
+        assert!(!captures(Stream::Stdout) && !captures(Stream::Stderr));
     }
 }

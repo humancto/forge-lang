@@ -1,0 +1,7 @@
+// Imported as a namespace by the namespaced-pattern tests: its variants
+// share their names with variant_b.fg's, but belong to another type.
+type T = Item(Int) | Mark
+
+fn helper(n) {
+    return n
+}

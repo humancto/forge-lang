@@ -1,0 +1,315 @@
+// Methods that update their receiver (V3 finding 5). A method's receiver
+// `it` is read-only unless the method declares `mut it`; a `mut it` method
+// writes its final `it` back to the place it was called on (`c.inc()`,
+// `xs[i].inc()`, `o.f.inc()`), which must be a mutable variable or a
+// field/index of one. Calling it on a temporary (`make().inc()`) is an
+// error, never a silently lost update. Both engines, both editions (the
+// 2027 copy is tests/edition2027/mut_receiver_test.fg).
+
+struct Counter {
+    n: Int
+}
+
+impl Counter {
+    fn inc(mut it) {
+        it.n += 1
+        return it.n
+    }
+    fn add(mut it, k: Int) {
+        it.n = it.n + k
+    }
+    fn get(it) {
+        return it.n
+    }
+    fn reset(mut it) {
+        it = Counter { n: 0 }
+    }
+    fn twice(mut it) {
+        it.inc()
+        it.inc()
+        return it.n
+    }
+}
+
+struct Stack {
+    items: [Int]
+}
+
+impl Stack {
+    fn push(mut it, x: Int) {
+        it.items.push(x)
+    }
+    fn pop(mut it) {
+        return it.items.pop()
+    }
+    fn peek(it) {
+        return it.items[len(it.items) - 1]
+    }
+}
+
+fn make() {
+    return Counter { n: 5 }
+}
+
+fn code_of(f) {
+    try {
+        f()
+        return "ok"
+    } catch e {
+        return e.code
+    }
+}
+
+@test
+fn a_mut_method_updates_a_variable() {
+    let mut c = Counter { n: 0 }
+    assert_eq(c.inc(), 1)
+    assert_eq(c.inc(), 2)
+    c.add(10)
+    assert_eq(c.n, 12)
+    assert_eq(c.get(), 12)
+    c.reset()
+    assert_eq(c.n, 0)
+    assert_eq(c.twice(), 2)
+    assert_eq(c.n, 2)
+}
+
+@test
+fn a_mut_method_updates_fields_and_elements() {
+    let mut cs = [Counter { n: 0 }, Counter { n: 10 }]
+    cs[1].inc()
+    cs[0].add(3)
+    assert_eq([cs[0].n, cs[1].n], [3, 11])
+    let mut o = { c: Counter { n: 1 }, list: [Counter { n: 7 }] }
+    o.c.inc()
+    o.list[0].inc()
+    assert_eq([o.c.n, o.list[0].n], [2, 8])
+    let mut i = 0
+    fn next() {
+        i += 1
+        return i - 1
+    }
+    let mut row = [Counter { n: 0 }, Counter { n: 0 }]
+    row[next()].inc()
+    row[next()].add(5)
+    assert_eq([row[0].n, row[1].n, i], [1, 5, 2])
+}
+
+@test
+fn a_struct_with_its_own_push_and_pop() {
+    let mut s = Stack { items: [] }
+    s.push(1)
+    s.push(2)
+    s.push(3)
+    assert_eq(s.peek(), 3)
+    assert_eq(s.pop(), 3)
+    assert_eq(s.items, [1, 2])
+    let mut stacks = { a: Stack { items: [] } }
+    stacks.a.push(4)
+    stacks["a"].push(5)
+    assert_eq(stacks.a.items, [4, 5])
+}
+
+@test
+fn aliases_do_not_see_the_update() {
+    let mut c = Counter { n: 0 }
+    let alias = c
+    c.inc()
+    assert_eq([c.n, alias.n], [1, 0])
+}
+
+@test
+fn immutable_roots_and_temporaries_are_errors() {
+    assert_eq(code_of(fn() {
+        let c = Counter { n: 0 }
+        c.inc()
+    }), "E0006")
+    assert_eq(code_of(fn() {
+        make().inc()
+    }), "E0006")
+    // Methods that do not update their receiver work on anything.
+    assert_eq(make().get(), 5)
+    let c = Counter { n: 4 }
+    assert_eq(c.get(), 4)
+}
+
+struct Plain {
+    n: Int
+}
+
+impl Plain {
+    fn bump(it) {
+        it.n += 1
+        return it.n
+    }
+    fn copy_bumped(it) {
+        let mut copy = it
+        copy.n += 1
+        return copy
+    }
+}
+
+@test
+fn a_plain_receiver_is_read_only() {
+    let mut p = Plain { n: 0 }
+    try {
+        p.bump()
+        assert(false)
+    } catch e {
+        assert_eq(e.code, "E0006")
+        assert(contains(e.message, "'it'"))
+    }
+    assert_eq(p.copy_bumped().n, 1)
+    assert_eq(p.n, 0)
+}
+
+type Light = Red | Green
+
+impl Light {
+    fn advance(mut it) {
+        it = match it {
+            Red => Green,
+            Green => Red,
+        }
+    }
+}
+
+@test
+fn algebraic_types_have_mut_methods_too() {
+    let mut l = Red
+    l.advance()
+    assert_eq(l, Green)
+    l.advance()
+    assert_eq(l, Red)
+}
+
+interface Bumpable {
+    fn bump() -> Int
+}
+
+struct Box {
+    n: Int
+}
+
+impl Bumpable for Box {
+    fn bump(mut it) -> Int {
+        it.n += 1
+        return it.n
+    }
+}
+
+fn bump_twice(b: Bumpable) {
+    let mut x = b
+    x.bump()
+    return x.bump()
+}
+
+@test
+fn mut_methods_through_interfaces() {
+    let b = Box { n: 0 }
+    assert_eq(bump_twice(b), 2)
+    assert_eq(b.n, 0)
+}
+
+struct Inner {
+    hits: Int
+}
+
+impl Inner {
+    fn hit(mut it) {
+        it.hits += 1
+    }
+}
+
+struct Outer {
+    has inner: Inner
+    name: String
+}
+
+@test
+fn embedded_mut_methods_update_the_embedded_value() {
+    let mut o = Outer { inner: Inner { hits: 0 }, name: "x" }
+    o.inner.hit()
+    assert_eq(o.inner.hits, 1)
+    // Delegated through the embedded field: the field is updated.
+    o.hit()
+    o.hit()
+    assert_eq(o.inner.hits, 3)
+    assert_eq(o.name, "x")
+}
+
+@test
+fn an_error_inside_the_method_keeps_the_receiver() {
+    let mut s = Stack { items: [] }
+    try {
+        s.peek()
+    } catch e {
+        assert_eq(s.items, [])
+    }
+}
+
+// V3 finding 11: a struct's own `push` (not declared `mut it`) on a
+// `let mut` binding is an ordinary method call on both engines.
+struct Pile {
+    items: [Int]
+}
+
+impl Pile {
+    fn push(it, x: Int) {
+        return Pile { items: it.items + [x] }
+    }
+    fn add(it, x: Int) {
+        return Pile { items: [x] + it.items }
+    }
+}
+
+@test
+fn a_struct_method_named_push_is_called_on_a_mutable_binding() {
+    let mut s = Pile { items: [] }
+    s = s.push(1)
+    s = s.push(2)
+    s = s.add(0)
+    assert_eq(s.items, [0, 1, 2])
+    s.push(3)
+    assert_eq(s.items, [0, 1, 2])
+}
+
+// The mutating method names (`push`/`pop`/`add`/`remove`) on a mutable
+// variable read the variable after evaluating their arguments, whatever
+// it holds (an array, a set, a map, a struct); every other method call
+// reads its receiver first.
+@test
+fn map_remove_reads_the_map_after_its_argument() {
+    let mut m = map([(1, "a"), (2, "b")])
+    fn g() {
+        m = m.set(3, "c")
+        return 1
+    }
+    m = m.remove(g())
+    assert_eq(m.len(), 2)
+    assert_eq(m.has(3), true)
+    assert_eq(m.has(1), false)
+}
+
+@test
+fn frozen_receivers_name_what_they_hold() {
+    let mut m = freeze(map([(1, 2)]))
+    let mut s = freeze(set([1]))
+    let mut xs = freeze([1])
+    let mut messages = []
+    for f in [fn() { m = m.remove(1) }, fn() { m.remove(1) }, fn() { s.add(2) }, fn() { s.remove(1) }, fn() { xs.push(2) }, fn() { xs.pop() }] {
+        try {
+            f()
+        } catch e {
+            messages.push("{e.code} {e.message}")
+        }
+    }
+    assert_eq(messages, [
+        "E0029 cannot remove from a frozen map",
+        "E0029 cannot remove from a frozen map",
+        "E0029 cannot add to a frozen set",
+        "E0029 cannot remove from a frozen set",
+        "E0029 cannot push to a frozen array",
+        "E0029 cannot pop from a frozen array",
+    ])
+}

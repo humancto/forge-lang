@@ -146,6 +146,7 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_validate_impl",
     "__forge_call_method",
     "__forge_binding_matches",
+    "__forge_variant_pattern",
     "__forge_retry_count",
     "__forge_retry_wait",
     "__forge_retry_failed",
@@ -156,6 +157,7 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_register_agent",
     "__forge_raise_error",
     "__forge_import_module",
+    "__forge_import_namespace",
     "__forge_import_native",
     "__forge_get_field",
     "__forge_set_field",
@@ -165,6 +167,8 @@ const COMPILER_INTRINSICS: &[&str] = &[
     "__forge_when_matches",
     "__forge_method_mut",
     "__forge_method_mut_place",
+    "__forge_call_method_at",
+    "__forge_receiver_out",
 ];
 
 /// Builtins a `CallPure` may call with borrowed (`PeekLocal`) arguments:
@@ -191,6 +195,24 @@ pub struct VM {
     /// one again binds its globals instead of running it again (see
     /// `__forge_import_module`).
     pub(crate) loaded_modules: HashMap<std::path::PathBuf, Arc<LoadedModule>>,
+    /// Modules the program's VMs ran, shared with every VM forked for a
+    /// task, so a module runs once per program (`vm::module_share`).
+    pub(super) module_registry: Arc<super::module_share::ModuleRegistry>,
+    /// One list per module whose top level is running here: the modules
+    /// it imported (its snapshot's dependencies).
+    pub(super) module_imports: Vec<Vec<std::path::PathBuf>>,
+    /// Set by `__forge_receiver_out`, which a method declared `mut it`
+    /// calls right before each of its returns: the frame's closure and the
+    /// final value of `it`. Taken by the method dispatch that called it
+    /// (`VM::call_user_method`), which accepts it only from that closure.
+    /// A GC root.
+    pub(super) receiver_out: Option<(GcRef, Value)>,
+    /// The updated receiver of the last `__forge_call_method_at`, for the
+    /// `TakeReceiver` right after it. A GC root.
+    pub(super) pending_receiver: Option<Value>,
+    /// The updated receiver of the user method `call_forge_method_value`
+    /// just called, handed to `call_forge_method_full` (pinned).
+    pub(super) method_updated: Option<Value>,
     pub gc: Gc,
     pub output: Vec<String>,
     /// JIT tier state: specialization cache keyed by (prototype id, type
@@ -458,6 +480,11 @@ impl VM {
             embedded_fields: HashMap::new(),
             struct_defaults: HashMap::new(),
             loaded_modules: HashMap::new(),
+            module_registry: Arc::default(),
+            module_imports: Vec::new(),
+            receiver_out: None,
+            pending_receiver: None,
+            method_updated: None,
             gc,
             output: Vec::new(),
             #[cfg(feature = "jit")]
@@ -726,8 +753,10 @@ impl VM {
 
         child.embedded_fields = self.embedded_fields.clone();
         // The task has copies of the modules' globals: it must not run
-        // them again when it imports one.
+        // them again when it imports one. A module neither has run yet runs
+        // once for the whole program (`vm::module_share`).
         child.loaded_modules = self.loaded_modules.clone();
+        child.module_registry = Arc::clone(&self.module_registry);
 
         for (name, defaults) in &self.struct_defaults {
             let mut child_defaults = IndexMap::new();
@@ -932,9 +961,8 @@ impl VM {
     pub(super) fn wait_interrupted(&mut self) -> Result<(), VMError> {
         if let Some((_, guard)) = self.earliest_expired_timeout() {
             self.cancel_scopes_from(guard.scope_depth);
-            return Err(VMError::new(&format!(
-                "timeout: operation exceeded {} second limit",
-                guard.seconds
+            return Err(VMError::new(&crate::semantics::timeout_exceeded(
+                guard.seconds,
             )));
         }
         if self.is_cancelled() {
@@ -989,10 +1017,10 @@ impl VM {
     ) -> Result<Option<SharedValue>, VMError> {
         use std::sync::mpsc::RecvTimeoutError;
         self.wait_cancellable(|slice| {
-            let guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
-            match guard.as_ref() {
+            let mut guard = ch.receiver.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
                 None => Some(None),
-                Some(rx) => match crate::clock::recv_timeout(rx, slice) {
+                Some(rx) => match rx.recv_timeout(slice) {
                     Ok(v) => Some(Some(v)),
                     Err(RecvTimeoutError::Disconnected) => Some(None),
                     Err(RecvTimeoutError::Timeout) => None,
@@ -1006,15 +1034,9 @@ impl VM {
     /// when a `timeout` deadline passes or the run or an enclosing scope is
     /// cancelled, so a sandbox deadline can reclaim the thread.
     pub(super) fn sleep_with_timeout_checks(&mut self, duration: Duration) -> Result<(), VMError> {
-        let total_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-        let mut elapsed = 0u64;
-        while elapsed < total_ms {
-            self.wait_interrupted()?;
-            let chunk = std::cmp::min(50, total_ms - elapsed);
-            crate::clock::sleep(Duration::from_millis(chunk));
-            elapsed += chunk;
-        }
-        self.wait_interrupted()
+        // Shared with the interpreter's `wait` (one deadline, not a count
+        // of slices: see `clock::sleep_interruptible`).
+        crate::clock::sleep_interruptible(duration, || self.wait_interrupted())
     }
 
     fn handle_timeout_expiry(&mut self) -> Result<usize, VMError> {
@@ -1027,10 +1049,7 @@ impl VM {
             self.frames.pop();
         }
 
-        let err = VMError::new(&format!(
-            "timeout: operation exceeded {} second limit",
-            guard.seconds
-        ));
+        let err = VMError::new(&crate::semantics::timeout_exceeded(guard.seconds));
         let err_value = self.runtime_error_value(&err);
         let base = self.frames[frame_idx].base;
         self.registers[base + guard.error_register as usize] = err_value;
@@ -1039,6 +1058,7 @@ impl VM {
         self.cancel_scopes_from(guard.scope_depth);
         let frame = &mut self.frames[frame_idx];
         frame.handlers.truncate(guard.handler_base);
+        frame.open_upvalues.clear_globals();
         frame.ip = guard.catch_ip;
         // The safe point that called us has already refilled the countdown,
         // so the catch path's `PopTimeout` runs before the next poll.
@@ -1242,7 +1262,21 @@ impl VM {
                                 let name = self.globals.names().name_of(id);
                                 return Err(self.undefined_global(chunk, pc, &name));
                             };
+                            // Copying a reference out of the slot, which may
+                            // own it (see `BindGlobal`).
+                            self.gc.share(val);
                             self.registers[base + a as usize] = val;
+                        }
+                    }
+                    OpCode::BindGlobal => {
+                        // `GetGlobal`'s check, then an alias instead of a copy.
+                        if let Some(id) = chunk.global_id(bx, self.globals.names()) {
+                            let Some(val) = self.globals.get_id(id) else {
+                                let pc = self.frames[frame_idx].ip - 1;
+                                let name = self.globals.names().name_of(id);
+                                return Err(self.undefined_global(chunk, pc, &name));
+                            };
+                            self.bind_global(frame_idx, base, a, id, val);
                         }
                     }
                     OpCode::SetGlobal => {
@@ -1318,14 +1352,38 @@ impl VM {
                         self.push_element_local(frame_idx, base, a, ElemKey::Field(field), value)?;
                     }
                     OpCode::PeekLocal => {
-                        // Not shared: the copy is an argument of the
-                        // `CallPure` that follows (see the opcode docs).
+                        // Not shared: a snapshot used by the same statement
+                        // (see the opcode docs).
                         let value = self.read_local(frame_idx, base, b)?;
+                        if c == PEEK_SHARE_IF_CAPTURED
+                            && self.frames[frame_idx].open_upvalues.contains_key(&b)
+                        {
+                            self.gc.share(value);
+                        }
                         self.registers[base + a as usize] = value;
+                    }
+                    OpCode::BindUpvalue => {
+                        self.bind_upvalue(frame_idx, base, a, b)?;
+                    }
+                    OpCode::PushPlaceLocal => {
+                        let done = self.push_place_local(frame_idx, base, a, b, c)?;
+                        self.registers[base + b as usize + c as usize + 1] = Value::bool_val(done);
                     }
                     OpCode::UpdateSetLocal => {
                         let value = self.registers[base + b as usize];
                         self.update_set_local(frame_idx, base, a, value, c == SET_UPDATE_REMOVE)?;
+                    }
+                    OpCode::UpdateMapLocal => {
+                        let operand = base + b as usize;
+                        if c == MAP_UPDATE_SET {
+                            let snapshot = self.registers[operand];
+                            let key = self.registers[operand + 1];
+                            let value = self.registers[operand + 2];
+                            self.map_set_local(frame_idx, base, a, snapshot, key, value)?;
+                        } else {
+                            let key = self.registers[operand];
+                            self.map_remove_local(frame_idx, base, a, key)?;
+                        }
                     }
                     OpCode::Jump => {
                         let frame = &mut self.frames[frame_idx];
@@ -1381,7 +1439,7 @@ impl VM {
                         // owned locals: only a builtin that never keeps or
                         // returns its arguments may see them unshared.
                         let borrowed =
-                            opcode == OpCode::CallPure && self.is_pure_borrow_builtin(func_val);
+                            opcode == OpCode::CallPure && self.is_pure_borrow_call(func_val, &args);
                         if opcode == OpCode::CallPure && !borrowed {
                             for v in &args {
                                 self.gc.share(*v);
@@ -1473,10 +1531,17 @@ impl VM {
                                 if let ObjKind::Closure(closure) = &obj.kind {
                                     if uv_idx < closure.upvalues.len() {
                                         let uv_ref = closure.upvalues[uv_idx];
-                                        if let Some(uv_obj) = self.gc.get(uv_ref) {
-                                            if let ObjKind::Upvalue(uv) = &uv_obj.kind {
-                                                self.registers[base + a as usize] = uv.value;
-                                            }
+                                        let value = match self.gc.get(uv_ref).map(|o| &o.kind) {
+                                            Some(ObjKind::Upvalue(uv)) => Some(uv.value),
+                                            _ => None,
+                                        };
+                                        if let Some(value) = value {
+                                            // Copying a reference out of the
+                                            // cell, which may own it (a
+                                            // captured local can own its
+                                            // value, see `vm::local_ops`).
+                                            self.gc.share(value);
+                                            self.registers[base + a as usize] = value;
                                         }
                                     }
                                 }
@@ -1586,10 +1651,10 @@ impl VM {
                                 // same order). The loop's own reference is
                                 // shared, so nothing updates it in place.
                                 if i == 0 {
-                                    if let Some(ObjKind::Set(items)) =
-                                        self.gc.get_mut(r).map(|o| &mut o.kind)
-                                    {
-                                        items.make_dense();
+                                    match self.gc.get_mut(r).map(|o| &mut o.kind) {
+                                        Some(ObjKind::Set(items)) => items.make_dense(),
+                                        Some(ObjKind::Map(entries)) => entries.make_dense(),
+                                        _ => {}
                                     }
                                 }
                                 let src = if let Some(o) = self.gc.get(r) {
@@ -1601,7 +1666,7 @@ impl VM {
                                             items.get_index(i as usize).copied().map(IterSrc::Item)
                                         }
                                         ObjKind::Map(pairs) => pairs
-                                            .get(i as usize)
+                                            .get_index(i as usize)
                                             .map(|(k, v)| IterSrc::Pair(*k, *v)),
                                         ObjKind::Object(map) => map
                                             .iter()
@@ -1646,6 +1711,13 @@ impl VM {
                         let val = self.registers[base + c as usize];
                         self.registers[base + a as usize] = self.index_set(target, idx, val)?;
                     }
+                    OpCode::TakeReceiver => match self.pending_receiver.take() {
+                        Some(updated) => self.registers[base + a as usize] = updated,
+                        None => {
+                            self.frames[frame_idx].ip =
+                                (self.frames[frame_idx].ip as isize + sbx as isize) as usize;
+                        }
+                    },
                     OpCode::JumpIfArg => {
                         if self.frames[frame_idx].argc > a as usize {
                             self.frames[frame_idx].ip =
@@ -1684,6 +1756,23 @@ impl VM {
                         if self.for_range_next(base, a, b)? {
                             // Skip the loop-exit jump that follows.
                             self.frames[frame_idx].ip += 1;
+                        }
+                    }
+                    OpCode::TypeCheck => {
+                        // A local (statement checks read it in place) may live in
+                        // an open upvalue cell.
+                        let value = self.read_local(frame_idx, base, a)?;
+                        let name = chunk.constants.get(c as usize);
+                        let frame = &mut self.frames[frame_idx];
+                        if super::type_check::fits_unchanged(&self.gc, value, b, name) {
+                            // Take the following `Jump` (over the check's
+                            // call) right here: the verifier guarantees it
+                            // is one.
+                            let jump = chunk.code[frame.ip];
+                            frame.ip = (frame.ip as i64 + 1 + decode_sbx(jump) as i64) as usize;
+                        } else {
+                            // Skip that jump: the call decides (and raises).
+                            frame.ip += 1;
                         }
                     }
                     OpCode::Len => {
@@ -1909,13 +1998,12 @@ impl VM {
                     }
                     OpCode::PushTimeout => {
                         let timeout_val = self.registers[base + a as usize];
-                        let seconds = if let Some(n) = timeout_val.as_int(&self.gc) {
-                            n.max(0) as u64
-                        } else if let Some(n) = timeout_val.as_float() {
-                            n.max(0.0) as u64
-                        } else {
-                            5
-                        };
+                        let seconds =
+                            crate::semantics::timeout_seconds(match timeout_val.as_int(&self.gc) {
+                                Some(n) => n as f64,
+                                // Not a number: 5 seconds (as the interpreter).
+                                None => timeout_val.as_float().unwrap_or(5.0),
+                            });
                         let catch_ip = {
                             let frame = &self.frames[frame_idx];
                             (frame.ip as i64 + sbx as i64) as usize
@@ -1949,8 +2037,13 @@ impl VM {
                     OpCode::Schedule => {
                         let closure_val = self.registers[base + a as usize];
                         let interval_val = self.registers[base + b as usize];
-                        let secs = if let Some(n) = interval_val.as_int(&self.gc) {
-                            if n > 0 {
+                        let n = if let Some(n) = interval_val.as_int(&self.gc) {
+                            Some(n as f64)
+                        } else {
+                            interval_val.as_float()
+                        };
+                        let interval = match n {
+                            Some(n) => {
                                 // Read unit string from register C
                                 let unit_val = self.registers[base + c as usize];
                                 let unit_str = if let Some(r) = unit_val.as_obj() {
@@ -1964,19 +2057,16 @@ impl VM {
                                 } else {
                                     String::new()
                                 };
-                                crate::semantics::schedule_interval_secs(n as u64, &unit_str)
-                            } else {
-                                return Err(VMError::new(
-                                    "schedule interval must be a positive integer",
-                                ));
+                                crate::semantics::schedule_interval(n, &unit_str)
+                                    .map_err(|m| VMError::new(&m))?
                             }
-                        } else {
-                            60 // Non-integer defaults to 60s (matches interpreter)
+                            // Not a number: once a minute (matches interpreter)
+                            None => Duration::from_secs(60),
                         };
 
                         self.spawn_host_task(HostTask::Schedule {
                             closure: closure_val,
-                            interval: Duration::from_secs(secs),
+                            interval,
                         });
                         self.drain_stream_boundary_flags();
                     }
@@ -2186,6 +2276,11 @@ impl VM {
                 for task in self.deferred_host_tasks.iter().flatten() {
                     roots.extend(task.closure().as_obj());
                 }
+                if let Some((closure, value)) = self.receiver_out {
+                    roots.push(closure);
+                    roots.extend(value.as_obj());
+                }
+                roots.extend(self.pending_receiver.and_then(|v| v.as_obj()));
                 self.gc.collect(&roots);
                 if self.gc.memory_exceeded() {
                     let limit = self.gc.memory_limit().unwrap_or(0);
@@ -2636,6 +2731,8 @@ impl VM {
 
                 let err_value = self.runtime_error_value(&err);
                 let base = self.frames[frame_idx].base;
+                // The statement that failed may have left a global alias.
+                self.frames[frame_idx].open_upvalues.clear_globals();
                 self.registers[base + handler.error_register as usize] = err_value;
                 self.frames[frame_idx].ip = handler.catch_ip;
                 return Ok(frame_idx);
@@ -2703,18 +2800,13 @@ impl VM {
                                 items.iter().map(|i| self.convert_to_interp_val(i)),
                             ),
                         ),
-                        ObjKind::Map(pairs) => {
-                            let converted: Vec<(
-                                crate::interpreter::Value,
-                                crate::interpreter::Value,
-                            )> = pairs
-                                .iter()
-                                .map(|(k, v)| {
+                        ObjKind::Map(pairs) => crate::interpreter::Value::Map(
+                            crate::interpreter::MapEntries::from_pairs_unchecked(pairs.iter().map(
+                                |(k, v)| {
                                     (self.convert_to_interp_val(k), self.convert_to_interp_val(v))
-                                })
-                                .collect();
-                            crate::interpreter::Value::Map(converted)
-                        }
+                                },
+                            )),
+                        ),
                         ObjKind::Frozen(inner) => self.convert_to_interp_val(inner),
                         ObjKind::Stream(_) => {
                             // Streams cannot cross the VM/interpreter boundary.
@@ -2775,7 +2867,9 @@ impl VM {
                     .iter()
                     .map(|(k, v)| (self.convert_interp_value(k), self.convert_interp_value(v)))
                     .collect();
-                let r = self.gc.alloc(ObjKind::Map(vm_pairs));
+                let map = VmMap::collect_unchecked(vm_pairs, &self.gc);
+                let r = self.gc.alloc(ObjKind::Map(map));
+
                 Value::obj(r)
             }
             crate::interpreter::Value::ResultOk(inner) => {
@@ -2945,7 +3039,13 @@ impl VM {
                         ))
                     })?);
                 } else {
-                    return Err(VMError::new(&crate::semantics::no_field(
+                    // A module namespace (`import "m" as m`) names its
+                    // module in the error.
+                    let module = map
+                        .get(crate::semantics::NAMESPACE_MODULE_KEY)
+                        .and_then(|v| self.get_string(v));
+                    return Err(VMError::new(&crate::semantics::missing_member(
+                        module.as_deref(),
                         field,
                         map.keys().map(String::as_str),
                     )));
@@ -3033,12 +3133,40 @@ impl VM {
     }
 
     /// `crate::semantics::check_call_arity` for a closure called directly.
-    /// Whether `func` is one of [`PURE_BORROW_BUILTINS`].
-    fn is_pure_borrow_builtin(&self, func: Value) -> bool {
-        matches!(
-            func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind),
-            Some(ObjKind::NativeFunction(nf)) if PURE_BORROW_BUILTINS.contains(&nf.name.as_str())
-        )
+    /// Whether calling `func` with `args` only reads the arguments: `func`
+    /// is one of [`PURE_BORROW_BUILTINS`], or it is `__forge_call_method`
+    /// calling an intrinsic read of a map or set (`m.get(k)`, `m.has(k)`,
+    /// `m.len()`, `s.has(x)`), which run no Forge code and keep nothing.
+    fn is_pure_borrow_call(&self, func: Value, args: &[Value]) -> bool {
+        let name = match func.as_obj().and_then(|r| self.gc.get(r)).map(|o| &o.kind) {
+            Some(ObjKind::NativeFunction(nf)) => nf.name.as_str(),
+            _ => return false,
+        };
+        if PURE_BORROW_BUILTINS.contains(&name) {
+            return true;
+        }
+        if name != "__forge_call_method" && name != "__forge_call_method_at" {
+            return false;
+        }
+        let (Some(receiver), Some(method)) = (args.first(), args.get(1)) else {
+            return false;
+        };
+        let Some(method) =
+            method
+                .as_obj()
+                .and_then(|r| self.gc.get(r))
+                .and_then(|o| match &o.kind {
+                    ObjKind::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+        else {
+            return false;
+        };
+        if self.peel_map(*receiver).is_some() {
+            matches!(method, "get" | "has" | "len")
+        } else {
+            self.peel_set(*receiver).is_some() && method == "has"
+        }
     }
 
     fn check_direct_call_arity(&self, func: Value, argc: usize) -> Result<(), VMError> {

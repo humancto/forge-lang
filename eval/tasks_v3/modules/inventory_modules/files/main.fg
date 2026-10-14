@@ -1,0 +1,29 @@
+// main.fg (provided): reads commands and drives the modules.
+import { Item, parse_item } from "inventory/item.fg"
+import { add, take, items, operations } from "inventory/store.fg"
+import { summary } from "report.fg"
+
+for line in fs.lines("/dev/stdin") {
+    let cmd = line.trim()
+    if cmd == "" {
+        continue
+    }
+    if starts_with(cmd, "add ") {
+        match parse_item(substring(cmd, 4, len(cmd))) {
+            Ok(item) => println("added {item.label()}: {add(item)} in stock"),
+            Err(msg) => println("error: {msg}"),
+        }
+    } else if starts_with(cmd, "take ") {
+        let parts = split(cmd, " ")
+        match take(parts[1], int(parts[2])) {
+            Ok(left) => println("took {parts[2]} {parts[1]}: {left} left"),
+            Err(msg) => println("error: {msg}"),
+        }
+    } else if cmd == "report" {
+        println(summary())
+    } else {
+        println("error: unknown command")
+    }
+}
+println("operations: {operations()}")
+println("skus: {join(map(items(), fn(i) { return i.sku }), ",")}")

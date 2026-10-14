@@ -1,0 +1,79 @@
+// Edition 2027: interface-typed values pass on to interface parameters
+// (V3 finding 6), and null tests guard the other operand of `||` / `&&`
+// (V3 finding 18). Both programs used to be rejected or warned about by the
+// checker; this file must check cleanly and run on both engines.
+//   forge --edition 2027 test tests/edition2027 --engine both
+
+interface Shape {
+    fn area() -> Int
+}
+
+interface Labeled {
+    fn area() -> Int
+    fn label() -> String
+}
+
+struct Sq {
+    s: Int
+}
+
+impl Shape for Sq {
+    fn area(it) -> Int {
+        return it.s * it.s
+    }
+}
+
+impl Sq {
+    fn label(it) -> String {
+        return "sq{it.s}"
+    }
+}
+
+fn area_of(x: Shape) -> Int {
+    return x.area()
+}
+
+fn pass_on(x: Shape) -> Int {
+    return area_of(x)
+}
+
+fn wider(x: Labeled) -> String {
+    return "{x.label()}={area_of(x)}"
+}
+
+fn total(xs: [Shape]) -> Int {
+    let mut t = 0
+    for x in xs {
+        t += pass_on(x)
+    }
+    return t
+}
+
+fn lowest(xs: [Int]) {
+    let mut lo = null
+    for v in xs {
+        if lo == null || v < lo {
+            lo = v
+        }
+    }
+    return lo
+}
+
+fn above(x: ?Int, limit: Int) -> Bool {
+    return x != null && x > limit
+}
+
+@test
+fn interface_parameters_pass_on() {
+    assert_eq(pass_on(Sq { s: 3 }), 9)
+    assert_eq(wider(Sq { s: 2 }), "sq2=4")
+    assert_eq(total([Sq { s: 1 }, Sq { s: 2 }]), 5)
+}
+
+@test
+fn guarded_null_comparisons() {
+    assert_eq(lowest([3, 1, 2]), 1)
+    assert_eq(lowest([]), null)
+    assert(above(5, 3))
+    assert(!above(null, 3))
+}

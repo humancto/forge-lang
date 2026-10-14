@@ -19,6 +19,13 @@ tests/interpreter_behavior_test.fg:403 T0006  # asserts function parameters do n
 tests/interpreter_behavior_test.fg:934 T0006  # asserts `safe { }` recovers from an undefined variable
 tests/language_spec_test.fg:41 T0017  # asserts reassigning an immutable binding raises
 tests/language_spec_test.fg:1528 T0006  # asserts reading an undefined variable raises
+tests/mut_receiver_test.fg:125 T0017  # asserts a `mut it` method on a `let` binding is E0006 at run time
+tests/mut_receiver_test.fg:128 T0017  # asserts a `mut it` method on a temporary is E0006 at run time
+tests/mut_receiver_test.fg:142 T0017  # asserts writing a plain receiver `it` is E0006 at run time
+tests/namespace_import_test.fg:63 T0008  # asserts an unknown namespace member raises E0013 with a suggestion
+tests/namespace_import_test.fg:70 T0008  # asserts `safe { }` recovers from an unknown namespace member
+tests/namespace_variant_patterns_test.fg:75 T0008  # asserts an unknown namespace member in a pattern raises E0013
+tests/namespace_variant_patterns_test.fg:101 T0008  # asserts an earlier arm matches before an unknown member is read
 tests/parity/supported/hoisted_functions.fg:10 T0018  # parity fixture: a hoisted function is undefined above the variable it reads
 tests/parity/supported/call_arity.fg:13 T0004  # parity fixture: arity error text on both engines
 tests/parity/supported/call_arity.fg:18 T0004  # parity fixture: arity error text on both engines
@@ -27,7 +34,7 @@ tests/parity/supported/call_arity.fg:28 T0004  # parity fixture: arity error tex
 tests/parity/supported/call_arity.fg:33 T0004  # parity fixture: arity error text on both engines
 tests/parity/supported/call_arity.fg:38 T0004  # parity fixture: builtin arity error text on both engines
 tests/parity/supported/import_named_isolated.fg:4 T0006  # parity fixture: names not listed in `import { }` stay private
-tests/parity/supported/value_semantics_copy.fg:47 T0017  # parity fixture: index assignment on an immutable binding raises
+tests/parity/supported/value_semantics_copy.fg:48 T0017  # parity fixture: index assignment on an immutable binding raises
 tests/safety_correctness_test.fg:38 T0006  # asserts try/catch catches a reference error
 tests/safety_correctness_test.fg:185 T0013  # asserts calling a non-function raises
 tests/testing_framework_test.fg:48 T0006  # asserts the error type of an undefined-variable error

@@ -1,0 +1,48 @@
+// runtime_errors_and_json_test.fg — edition 2027 coverage of V3 findings
+// 12, 15, 16, 17 and 20 (the edition-independent suites are in tests/).
+
+fn caught(f) -> String {
+    try {
+        f()
+    } catch e {
+        return "{e.code} {e.type} {e.message}"
+    }
+    return "no error"
+}
+
+@test
+fn test_json_numbers_keep_their_kind() {
+    assert_eq(json.compact([1, 1.0, -0.5]), "[1,1.0,-0.5]")
+    assert_eq(typeof(json.parse("-0")), "Int")
+    assert_eq(typeof(json.parse("2.0")), "Float")
+}
+
+@test
+fn test_classified_errors() {
+    assert_eq(caught(fn() { return int("12x") }), "E0038 ValueError cannot convert '12x' to Int")
+    assert(caught(fn() { return json.parse("[1,") }).starts_with("E0039 ValueError JSON parse error: "))
+    assert_eq(caught(fn() { return regex.find("x", "(") }), "E0040 ValueError invalid regex '(': unclosed group")
+    let exhausted = caught(fn() {
+        retry 2 times {
+            assert(false, "down")
+        }
+    })
+    assert_eq(exhausted, "E0041 RuntimeError retry failed after 2 attempts: assertion failed: down")
+}
+
+@test
+fn test_builtin_argument_errors() {
+    assert_eq(caught(fn() { return join([1, 2], 5) }), "E0015 TypeError join() requires (array[, separator_string]) (got Array, Int)")
+    assert_eq(caught(fn() { return get(5, "a") }), "E0015 TypeError get() requires (object, key[, default]) or (array, index[, default]) (got Int, String)")
+}
+
+@test
+fn test_is_closed_and_select() {
+    let ch = channel()
+    send(ch, 1)
+    close(ch)
+    assert_eq(is_closed(ch), false)
+    assert_eq(select([ch], 1000), [0, 1])
+    assert_eq(is_closed(ch), true)
+    assert_eq(select([ch], 1000), null)
+}

@@ -1,0 +1,87 @@
+@server(port: 18525)
+
+// Jobs live in SQLite; a `schedule` block (started once the server is up)
+// processes the queued ones every second. Handlers only enqueue and read.
+db.open("jobs.db")
+db.execute("CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, input TEXT NOT NULL, status TEXT NOT NULL, result INTEGER, error TEXT)")
+
+fn as_job(r) {
+    return { id: r.id, kind: r.kind, status: r.status, result: r.result, error: r.error }
+}
+
+fn find_job(text: String) {
+    if !regex.test(text, "^[0-9]+$") {
+        return null
+    }
+    let rows = db.query("SELECT id, kind, status, result, error FROM jobs WHERE id = ?", [int(text)])
+    if len(rows) == 0 {
+        return null
+    }
+    return as_job(rows[0])
+}
+
+fn process(job) {
+    let input = json.parse(job.input)
+    if job.kind == "sum" {
+        db.execute("UPDATE jobs SET status = 'done', result = ? WHERE id = ?", [sum(input), job.id])
+    } else if job.kind == "words" {
+        let words = filter(regex.split(input, "\\s+"), fn(w) { return w != "" })
+        db.execute("UPDATE jobs SET status = 'done', result = ? WHERE id = ?", [len(words), job.id])
+    } else {
+        db.execute("UPDATE jobs SET status = 'failed', error = ? WHERE id = ?", ["job asked to fail", job.id])
+    }
+    return null
+}
+
+schedule every 1 seconds {
+    for job in db.query("SELECT id, kind, input FROM jobs WHERE status = 'queued' ORDER BY id") {
+        process(job)
+    }
+}
+
+@post("/jobs")
+fn create(body) {
+    let kind = get(body, "kind", null)
+    if kind != "sum" && kind != "words" && kind != "fail" {
+        return http.response(422, { error: "kind must be sum, words or fail" })
+    }
+    let input = get(body, "input", null)
+    if kind == "sum" && (typeof(input) != "Array" || !all(input, fn(x) { return typeof(x) == "Int" })) {
+        return http.response(422, { error: "sum needs an array of integers" })
+    }
+    if kind == "words" && typeof(input) != "String" {
+        return http.response(422, { error: "words needs a string" })
+    }
+    db.execute("INSERT INTO jobs (kind, input, status) VALUES (?, ?, 'queued')", [kind, json.compact(input)])
+    let id = db.last_insert_rowid()
+    return http.response(202, { id: id, status: "queued" }, { Location: "/jobs/{id}" })
+}
+
+@get("/jobs/:id")
+fn show(id: String) {
+    let job = find_job(id)
+    if job == null {
+        return http.response(404, { error: "no such job" })
+    }
+    return job
+}
+
+@get("/jobs")
+fn list_jobs(query) {
+    let status = get(query, "status", null)
+    let rows = if status == null {
+        db.query("SELECT id FROM jobs ORDER BY id")
+    } else {
+        db.query("SELECT id FROM jobs WHERE status = ? ORDER BY id", [status])
+    }
+    return { jobs: map(rows, fn(r) { return r.id }) }
+}
+
+@get("/stats")
+fn stats() {
+    let mut out = { queued: 0, done: 0, failed: 0 }
+    for r in db.query("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status") {
+        out[r.status] = r.n
+    }
+    return out
+}

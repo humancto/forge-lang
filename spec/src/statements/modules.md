@@ -89,6 +89,65 @@ say root(16)        // 4.0
 
 Only functions and variables can be renamed. Structs, `type` definitions, their variants and interfaces keep their name — their values, methods and `match` patterns refer to it — so `import { Point as P } from "geometry.fg"` is error `E0019`. `as` is not available in native imports (`import native "lib" as name` names the whole library instead).
 
+## Namespace Imports
+
+`import "path" as name` binds one name to the module's namespace instead of
+bringing its definitions into scope:
+
+```forge
+// geo.fg
+let TAU = 6.28
+fn area(s) { ... }
+struct Point { x: Int, y: Int = 0 }
+impl Point { fn origin() { return Point { x: 0 } } }
+type Shape = Circle(Float) | Square(Float) | Dot
+```
+
+```forge
+// main.fg
+import "geo.fg" as geo
+println(geo.TAU)                         // 6.28
+println(geo.area(geo.Circle(2.0)))       // functions and variant constructors
+let p = geo.Point { x: 1 }               // a struct of the module
+let o = geo.Point.origin()               // its static methods
+let kind = match geo.Square(1.0) {
+    geo.Circle(r) => "circle",           // variants in patterns
+    geo.Square(w) => "square",
+    geo.Dot => "dot",
+}
+```
+
+The namespace is a read-only object. Its members are every name the
+module's top level binds, in definition order, plus `__module__` (the path as
+written): functions, `let` variables (destructured names too), `type` names
+(the type's description, e.g. `geo.Shape.variants` is
+`["Circle", "Square", "Dot"]`; not when a variant has the type's name),
+variants, interfaces, structs, and the names the module's own imports bind
+(re-exports). Methods and type tables come with the import as for every
+other form. The module is the same single run as every other import of the file,
+so `geo.f()` and an `f` imported with `import { f } from "geo.fg"` share the
+module's state. A variable member is the variable's value when the import
+ran, like `import { TAU }`; read state that changes through a function.
+
+* `geo.nope` (or `geo.nope()`) is error `E0013`,
+  `module 'geo.fg' has no member 'nope'`, with a suggestion when a member
+  has a close name. The type checker reports it statically (`T0008`) and
+  checks `geo.f(x)` against `f`'s signature, as for a direct import.
+* `geo.x = 1` is error `E0006` (the namespace binding is immutable); a
+  namespace has no builtin methods (`geo.len()` is `E0013` too).
+* `geo.Name { ... }` requires `Name` to be a struct of the module
+  (`'geo.Name' is not a struct`, `E0013`, otherwise).
+* `geo.Name(...)` (or `geo.Name`) in a pattern matches only values built by
+  the member `geo.Name`: that variant *of that type*. If another module's
+  type also has a `Name` variant, its values do not match. An unknown
+  member is `E0013` (`T0008` statically) when the arm is tried; a member
+  that is not a variant is `'geo.Name' is not a variant` (`E0013`). A bare
+  `Name(...)` pattern still matches any value whose variant is `Name`.
+* The namespace is a value: it can be passed to functions and stored;
+  `typeof(geo)` is `Object`.
+* `import "math" as m` is error `E0019`: built-in modules keep their own
+  name.
+
 ## Built-in Modules
 
 Forge's standard library modules (`math`, `fs`, `io`, `crypto`, `db`, `pg`, `env`, `json`, `regex`, `log`, `term`, `http`, `csv`, `exec`, `time`) are automatically available without import. Attempting to `import` a built-in module name produces an error with guidance:
@@ -135,13 +194,14 @@ circular import: a.fg -> b.fg -> a.fg
 
 Move the shared code into a third module to break the cycle.
 
-## No Namespacing
+## Name Clashes
 
-Imported definitions are placed directly into the importing file's scope. There is no namespace or module prefix for file imports. If two imported files define the same name, the later import overwrites the earlier one; import one of them under another name with `as` to keep both.
+`import "file.fg"` and `import { ... } from "file.fg"` place definitions directly into the importing file's scope. If two imported files define the same name, the later import overwrites the earlier one; import one of them under another name with `as`, or import a module as a namespace, to keep both.
 
 ```forge
 import "a.fg"                              // defines fn helper()
 import { helper as b_helper } from "b.fg"  // b.fg's helper, renamed
+import "c.fg" as c                         // c.helper()
 ```
 
 ## No Export Keyword

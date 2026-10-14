@@ -97,3 +97,13 @@ Writing the v2 references found 26 issues (`V2_FINDINGS.md`). All the bugs
 are fixed in this round. Two items stay open: `Map` operations are still
 linear per call (sets are hash-indexed now; objects are the usual
 dictionary), and there is no typed dictionary that accepts object literals.
+
+## 2026-10-13: tier v3 added
+
+Tier v2 is saturated too, so `eval/tasks_v3/` adds 36 tasks: multi-file answers behind
+provided drivers, SQLite services under concurrent requests, 80,000-250,000-record
+generated inputs, deep recursion, error handling with exit statuses and stderr, channel
+pipelines and CLI/text edge cases (`eval/README.md`, "Tier v3"). No solver has been
+scored on it yet. Writing the references found 22 issues
+([`V3_FINDINGS.md`](V3_FINDINGS.md)), all fixed in the same round, so every reference
+passes on both engines and both editions.

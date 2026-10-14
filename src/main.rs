@@ -416,8 +416,13 @@ fn load_mcp_tools(
         .grant_import_root("forge_modules");
     let (tools, report) =
         mcp::ToolSet::load(file, &source, caps, max_time, limits.clone(), engine)?;
+    // stdout is the protocol stream: everything loading printed goes to
+    // the operator's stderr.
     if !report.stdout.is_empty() {
         eprint!("{}", report.stdout);
+    }
+    if !report.stderr.is_empty() {
+        eprint!("{}", report.stderr);
     }
     Ok(tools)
 }
@@ -536,13 +541,19 @@ enum McpCommand {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run a Forge source file (.fg) or compiled bytecode (.fgc)
+    /// Run a Forge source file (.fg) or compiled bytecode (.fgc). Everything
+    /// after the file goes to the program (`io.args()`), flags included:
+    /// give forge's own flags before the file.
     Run {
-        /// Path to a .fg or .fgc file (reads entry from forge.toml if omitted)
-        file: Option<PathBuf>,
         /// Allow shell execution (same as the top-level --allow-run)
         #[arg(long = "allow-run")]
         allow_run: bool,
+        /// Path to a .fg or .fgc file (reads entry from forge.toml if omitted)
+        file: Option<PathBuf>,
+        /// Arguments for the program: `io.args()` is the file path followed
+        /// by these
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Parse and type-check a file without running it. Exits 1 when it has
     /// errors (syntax errors, or any type diagnostic under --strict).
@@ -941,7 +952,7 @@ async fn async_main() {
     }
 
     match cli.command {
-        Some(Command::Run { file, .. }) => {
+        Some(Command::Run { file, args, .. }) => {
             let file = match file {
                 Some(f) => f,
                 None => {
@@ -967,6 +978,13 @@ async fn async_main() {
                     }
                 }
             };
+            // The program's command line (`io.args()`): its path as given,
+            // then everything after it.
+            runtime::program_args::set_process(
+                std::iter::once(file.display().to_string())
+                    .chain(args)
+                    .collect(),
+            );
             if file.extension().map(|e| e == "fgc").unwrap_or(false) {
                 run_bytecode_file(&file, profile);
                 return;
@@ -1622,7 +1640,13 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
             interpreter.source_file =
                 Some(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
         }
-        interpreter.set_defer_host_runtime(true);
+        // As on the VM: only a server defers `schedule`/`watch` start-up to
+        // the end of the top level (`host::launch` starts them from the
+        // final state). A plain script starts them where they are written,
+        // so they run while the top level runs.
+        let runtime_plan = runtime::metadata::extract_runtime_plan(&program);
+        let serving = runtime_plan.server.is_some();
+        interpreter.set_defer_host_runtime(serving);
         match interpreter.run(&program) {
             Ok(_) => {}
             Err(e) => {
@@ -1632,10 +1656,11 @@ async fn run_source(source: &str, filename: &str, use_vm: bool, profile: bool, s
         }
         exit_if_limit_tripped();
 
-        let runtime_plan = runtime::metadata::extract_runtime_plan(&program);
-        if let Err(e) = runtime::host::launch(interpreter, &runtime_plan).await {
-            eprintln!("{}", errors::format_simple_error(&e.message));
-            process::exit(1);
+        if serving {
+            if let Err(e) = runtime::host::launch(interpreter, &runtime_plan).await {
+                eprintln!("{}", errors::format_simple_error(&e.message));
+                process::exit(1);
+            }
         }
     }
 }

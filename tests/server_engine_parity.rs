@@ -105,7 +105,8 @@ fn deep() {
 @get("/shapes")
 fn shapes() {
     return {
-        list: [1, 2.5, "x", null, true],
+        list: [1, 2.5, 2.0, "x", null, true],
+        text: json.parse("\"tab\\tfeed\\f\""),
         ok: Ok(1),
         err: Err("no"),
         nested: { a: [{ b: 1 }] },
@@ -298,6 +299,18 @@ fn http_responses_are_identical_on_both_engines() {
     assert_eq!(status_of("/panic"), 500);
     assert_eq!(status_of("/no/such/route"), 404);
     assert_eq!(status_of("/ping"), 200);
+    // JSON keeps a Float a Float (`2.0`) and uses the short escapes, like
+    // `json.compact`.
+    let shapes = REQUESTS
+        .iter()
+        .zip(&vm)
+        .find(|((_, p, _), _)| *p == "/shapes")
+        .map(|(_, reply)| reply.body.as_str())
+        .expect("request in corpus");
+    assert!(
+        shapes.contains(r#"[1,2.5,2.0,"x",null,true]"#) && shapes.contains(r#""tab\tfeed\f""#),
+        "{shapes}"
+    );
     let hits: Vec<_> = REQUESTS
         .iter()
         .zip(&vm)

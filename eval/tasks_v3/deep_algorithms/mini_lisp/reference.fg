@@ -1,0 +1,232 @@
+// A small Lisp: expressions are Ints, Strings (symbols) and arrays;
+// values are an algebraic type; errors are Err(...) propagated with `?`.
+
+type Val = Num(Int) | Flag(Bool) | Lst([Any]) | Lam([Any], Any, [Any]) | Prim(String)
+
+let mut globals = {}
+for name in ["+", "-", "*", "/", "=", "<", ">", "list", "cons", "car", "cdr", "null?", "length"] {
+    globals[name] = Prim(name)
+}
+
+fn parse(tokens, i: Int) {
+    let t = tokens[i]
+    if t == "(" {
+        let mut items = []
+        let mut j = i + 1
+        while tokens[j] != ")" {
+            let r = parse(tokens, j)
+            items.push(r[0])
+            j = r[1]
+        }
+        return [items, j + 1]
+    }
+    if regex.test(t, "^-?[0-9]+$") {
+        return [int(t), i + 1]
+    }
+    return [t, i + 1]
+}
+
+fn show(v) -> String {
+    return match v {
+        Num(n) => str(n),
+        Flag(b) => if b { "#t" } else { "#f" },
+        Lst(xs) => "(" + join(map(xs, fn(x) { return show(x) }), " ") + ")",
+        Lam(p, b, e) => "<lambda>",
+        Prim(name) => "<builtin {name}>",
+    }
+}
+
+// env: an array of frames (objects), innermost last.
+fn lookup(sym: String, env) {
+    let mut i = len(env) - 1
+    while i >= 0 {
+        if has_key(env[i], sym) {
+            return Ok(env[i][sym])
+        }
+        i -= 1
+    }
+    if has_key(globals, sym) {
+        return Ok(globals[sym])
+    }
+    return Err("unbound symbol: {sym}")
+}
+
+fn nums(name: String, args) {
+    let mut out = []
+    for a in args {
+        match a {
+            Num(n) => out.push(n),
+            _ => { return Err("type error in {name}") },
+        }
+    }
+    return Ok(out)
+}
+
+fn call_prim(name: String, args) {
+    if name == "+" || name == "-" || name == "*" {
+        let xs = nums(name, args)?
+        if name == "-" && len(xs) == 1 {
+            return Ok(Num(0 - xs[0]))
+        }
+        let mut acc = if name == "*" { 1 } else { 0 }
+        let mut first = true
+        for x in xs {
+            if name == "+" {
+                acc += x
+            } else if name == "*" {
+                acc = acc * x
+            } else if first {
+                acc = x
+            } else {
+                acc -= x
+            }
+            first = false
+        }
+        return Ok(Num(acc))
+    }
+    if name == "/" || name == "=" || name == "<" || name == ">" {
+        let xs = nums(name, args)?
+        let a = xs[0]
+        let b = xs[1]
+        if name == "/" {
+            if b == 0 {
+                return Err("division by zero")
+            }
+            let q = abs(a) / abs(b)
+            if (a >= 0) == (b >= 0) {
+                return Ok(Num(q))
+            }
+            return Ok(Num(0 - q))
+        }
+        if name == "=" {
+            return Ok(Flag(a == b))
+        }
+        if name == "<" {
+            return Ok(Flag(a < b))
+        }
+        return Ok(Flag(a > b))
+    }
+    if name == "list" {
+        return Ok(Lst(args))
+    }
+    if name == "null?" {
+        return match args[0] {
+            Lst(xs) => Ok(Flag(len(xs) == 0)),
+            _ => Ok(Flag(false)),
+        }
+    }
+    if name == "cons" {
+        return match args[1] {
+            Lst(xs) => Ok(Lst([args[0]] + xs)),
+            _ => Err("type error in cons"),
+        }
+    }
+    // car, cdr, length
+    return match args[0] {
+        Lst(xs) => {
+            if name == "length" {
+                Ok(Num(len(xs)))
+            } else if len(xs) == 0 {
+                Err("{name} of empty list")
+            } else if name == "car" {
+                Ok(xs[0])
+            } else {
+                Ok(Lst(slice(xs, 1, len(xs))))
+            }
+        },
+        _ => Err("type error in {name}"),
+    }
+}
+
+fn evaluate(x, env) {
+    let t = typeof(x)
+    if t == "Int" {
+        return Ok(Num(x))
+    }
+    if t == "String" {
+        if x == "#t" {
+            return Ok(Flag(true))
+        }
+        if x == "#f" {
+            return Ok(Flag(false))
+        }
+        return lookup(x, env)
+    }
+    if len(x) == 0 {
+        return Ok(Lst([]))
+    }
+    let head = x[0]
+    if head == "if" {
+        let c = evaluate(x[1], env)?
+        let is_false = match c {
+            Flag(b) => !b,
+            _ => false,
+        }
+        if is_false {
+            return evaluate(x[3], env)
+        }
+        return evaluate(x[2], env)
+    }
+    if head == "lambda" {
+        return Ok(Lam(x[1], x[2], env))
+    }
+    if head == "let" {
+        let mut frame = {}
+        for binding in x[1] {
+            frame[binding[0]] = evaluate(binding[1], env)?
+        }
+        return evaluate(x[2], env + [frame])
+    }
+    if head == "begin" {
+        let mut v = Lst([])
+        for e in slice(x, 1, len(x)) {
+            v = evaluate(e, env)?
+        }
+        return Ok(v)
+    }
+    let f = evaluate(head, env)?
+    let mut args = []
+    for a in slice(x, 1, len(x)) {
+        args.push(evaluate(a, env)?)
+    }
+    return match f {
+        Prim(name) => call_prim(name, args),
+        Lam(params, body, cenv) => {
+            if len(params) != len(args) {
+                Err("arity: expected {len(params)} arguments, got {len(args)}")
+            } else {
+                let mut frame = {}
+                for i in range(0, len(params)) {
+                    frame[params[i]] = args[i]
+                }
+                evaluate(body, cenv + [frame])
+            }
+        },
+        _ => Err("not a function: {show(f)}"),
+    }
+}
+
+fn run_form(form) {
+    if typeof(form) == "Array" && len(form) > 0 && form[0] == "define" {
+        let target = form[1]
+        if typeof(target) == "Array" {
+            globals[target[0]] = Lam(slice(target, 1, len(target)), form[2], [])
+            return Ok(target[0])
+        }
+        globals[target] = evaluate(form[2], [])?
+        return Ok(target)
+    }
+    let v = evaluate(form, [])?
+    return Ok(show(v))
+}
+
+let tokens = regex.find_all(fs.read("/dev/stdin"), "[()]|[^\\s()]+")
+let mut i = 0
+while i < len(tokens) {
+    let r = parse(tokens, i)
+    i = r[1]
+    match run_form(r[0]) {
+        Ok(text) => println(text),
+        Err(msg) => println("error: {msg}"),
+    }
+}

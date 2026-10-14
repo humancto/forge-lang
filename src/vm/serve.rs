@@ -52,7 +52,7 @@ enum FrozenObj {
     /// set (they depend on content, not on object identity).
     Set(VmSet),
     Object(IndexMap<String, Value>),
-    Map(Vec<(Value, Value)>),
+    Map(VmMap),
     Function(ObjFunction),
     Closure {
         function: ObjFunction,
@@ -266,7 +266,7 @@ fn thaw(object: &FrozenObj, refs: &[GcRef]) -> ObjKind {
         FrozenObj::Object(map) => {
             ObjKind::Object(map.iter().map(|(k, v)| (k.clone(), r(v))).collect())
         }
-        FrozenObj::Map(pairs) => ObjKind::Map(pairs.iter().map(|(k, v)| (r(k), r(v))).collect()),
+        FrozenObj::Map(pairs) => ObjKind::Map(pairs.map_same_hash(|(k, v)| (r(k), r(v)))),
         FrozenObj::Function(f) => ObjKind::Function(f.clone()),
         FrozenObj::Closure { function, upvalues } => ObjKind::Closure(ObjClosure {
             function: function.clone(),
@@ -631,9 +631,7 @@ impl<'a> Freezer<'a> {
             ObjKind::Object(map) => {
                 FrozenObj::Object(map.iter().map(|(k, v)| (k.clone(), m(v))).collect())
             }
-            ObjKind::Map(pairs) => {
-                FrozenObj::Map(pairs.iter().map(|(k, v)| (m(k), m(v))).collect())
-            }
+            ObjKind::Map(pairs) => FrozenObj::Map(pairs.map_same_hash(|(k, v)| (m(k), m(v)))),
             ObjKind::Function(f) => FrozenObj::Function(f.clone()),
             ObjKind::Closure(c) => FrozenObj::Closure {
                 function: c.function.clone(),
